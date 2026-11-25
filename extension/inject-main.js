@@ -71,6 +71,18 @@
         typeof streamingData.dashManifestUrl === "string" ? streamingData.dashManifestUrl.slice(0, MAX_URL) : "";
       if (formats.length === 0 && adaptiveFormats.length === 0 && !hlsManifestUrl && !dashManifestUrl) return;
 
+      const rawThumbs = videoDetails && videoDetails.thumbnail && Array.isArray(videoDetails.thumbnail.thumbnails)
+        ? videoDetails.thumbnail.thumbnails
+        : [];
+      const thumbnails = rawThumbs
+        .slice(0, 16)
+        .filter((t) => t && typeof t.url === "string" && t.url.trim())
+        .map((t) => ({
+          url: t.url.trim().slice(0, MAX_URL),
+          width: Number(t.width) || 0,
+          height: Number(t.height) || 0
+        }));
+
       const payload = {
         videoId,
         title,
@@ -78,7 +90,8 @@
         hlsManifestUrl,
         dashManifestUrl,
         formats,
-        adaptiveFormats
+        adaptiveFormats,
+        thumbnails
       };
       const key = videoId || "_latest";
       ytPayloads.set(key, payload);
@@ -187,9 +200,29 @@
       }));
 
       const pageUrl = location.href;
+      let cover = "";
+      try {
+        const st = window.__INITIAL_STATE__;
+        if (st && typeof st === "object") {
+          const candidates = [
+            st.videoData && st.videoData.pic,
+            st.epInfo && st.epInfo.cover,
+            st.mediaInfo && st.mediaInfo.cover
+          ];
+          for (const c of candidates) {
+            if (typeof c === "string" && c.trim()) {
+              cover = c.trim().slice(0, MAX_URL);
+              break;
+            }
+          }
+        }
+      } catch {
+        // ignore
+      }
       const payload = {
         pageUrl,
         title: (document.title || "").slice(0, 200),
+        cover,
         data: {
           quality: Number(data.quality) || 0,
           format: typeof data.format === "string" ? data.format.slice(0, 32) : "",
@@ -527,18 +560,48 @@
     return /\.(?:jpg|jpeg|png|webp|gif|bmp)$/i.test(path);
   }
 
+  function pickWeiboGroupThumb(node, inheritedPagePic) {
+    const check = (val) => {
+      if (!val) return null;
+      if (typeof val === "string") {
+        let u = val.trim();
+        if (u.startsWith("//")) u = `https:${u}`;
+        if (/^https?:\/\//i.test(u)) return { url: u.slice(0, MAX_URL), width: 0, height: 0 };
+      } else if (typeof val === "object") {
+        let u = typeof val.url === "string" ? val.url.trim() : (typeof val.pic_url === "string" ? val.pic_url.trim() : "");
+        if (u.startsWith("//")) u = `https:${u}`;
+        if (/^https?:\/\//i.test(u)) {
+          return { url: u.slice(0, MAX_URL), width: Number(val.width) || 0, height: Number(val.height) || 0 };
+        }
+      }
+      return null;
+    };
+    return (
+      (node && node.big_pic_info && check(node.big_pic_info.pic_big)) ||
+      (node && node.pic_info && check(node.pic_info.pic_big)) ||
+      (node && check(node.page_pic)) ||
+      (node && check(node.cover_image)) ||
+      check(inheritedPagePic) ||
+      null
+    );
+  }
+
   function extractWeiboGroups(data) {
     const groups = [];
-    const stack = [data];
+    const stack = [{ node: data, pagePic: null }];
     let guard = 0;
     while (stack.length > 0 && guard < 50000) {
       guard++;
-      const node = stack.pop();
+      const frame = stack.pop();
+      const node = frame && frame.node;
+      const inheritedPagePic = frame ? frame.pagePic : null;
       if (!node || typeof node !== "object") continue;
       if (Array.isArray(node)) {
-        for (let i = 0; i < node.length; i++) stack.push(node[i]);
+        for (let i = 0; i < node.length; i++) stack.push({ node: node[i], pagePic: inheritedPagePic });
         continue;
       }
+
+      const nextPagePic = node.page_pic || inheritedPagePic;
 
       if (Array.isArray(node.playback_list) && node.playback_list.length > 0) {
         const variants = [];
@@ -571,14 +634,15 @@
           const objSuffix = rawObjId.includes(":") ? rawObjId.split(":").pop() : "";
           const mediaId = String(node.media_id || node.media_id_str || inferredMediaId || objSuffix || "");
           const id = mediaId || rawObjId || variants[0].url;
-          groups.push({ id, mediaId, variants });
+          const thumb = pickWeiboGroupThumb(node, nextPagePic);
+          groups.push({ id, mediaId, variants, thumb });
         }
       }
 
       for (const key of Object.keys(node)) {
         if (WEIBO_SKIP_KEYS.has(key)) continue;
         const val = node[key];
-        if (val && typeof val === "object") stack.push(val);
+        if (val && typeof val === "object") stack.push({ node: val, pagePic: nextPagePic });
       }
     }
     return groups;
@@ -588,7 +652,7 @@
     if (!groups || groups.length === 0) return;
     const at = Date.now();
     for (const g of groups.slice(0, 40)) {
-      const entry = { k: "weibo-group", id: g.id, mid: g.mediaId || "", v: g.variants, t: at };
+      const entry = { k: "weibo-group", id: g.id, mid: g.mediaId || "", v: g.variants, thumb: g.thumb || null, t: at };
       items.push(entry);
       if (items.length > MAX_ITEMS) items.splice(0, items.length - MAX_ITEMS);
       pending.push(entry);

@@ -196,6 +196,55 @@
     return codecs.startsWith("avc1");
   }
 
+  function normalizeBilibiliCoverUrl(rawUrl) {
+    if (typeof rawUrl !== "string") return "";
+    let url = rawUrl.trim();
+    if (!url) return "";
+    if (url.startsWith("//")) url = `https:${url}`;
+    if (!/^https?:\/\//i.test(url)) return "";
+    return url;
+  }
+
+  function detectBilibiliThumbFormat(url) {
+    const path = String(url || "").split("?")[0].split("#")[0].toLowerCase();
+    if (path.endsWith(".webp") || /\.webp(?:@|!|_|$)/i.test(path)) return { format: "WEBP", ext: "webp" };
+    if (path.endsWith(".png") || /\.png(?:@|!|_|$)/i.test(path)) return { format: "PNG", ext: "png" };
+    return { format: "JPG", ext: "jpg" };
+  }
+
+  function extractBilibiliThumbnail(stateOrMeta, fallbackOgImage) {
+    const rawCandidates = [];
+    if (typeof stateOrMeta === "string") {
+      rawCandidates.push(stateOrMeta);
+    } else if (stateOrMeta && typeof stateOrMeta === "object") {
+      rawCandidates.push(
+        stateOrMeta.cover,
+        stateOrMeta.videoData && stateOrMeta.videoData.pic,
+        stateOrMeta.epInfo && stateOrMeta.epInfo.cover,
+        stateOrMeta.mediaInfo && stateOrMeta.mediaInfo.cover,
+        stateOrMeta.ogImage
+      );
+    }
+    if (typeof fallbackOgImage === "string") {
+      rawCandidates.push(fallbackOgImage);
+    }
+
+    for (const raw of rawCandidates) {
+      const url = normalizeBilibiliCoverUrl(raw);
+      if (!url) continue;
+      const fmt = detectBilibiliThumbFormat(url);
+      return {
+        url,
+        width: 0,
+        height: 0,
+        format: fmt.format,
+        ext: fmt.ext,
+        source: "bilibili"
+      };
+    }
+    return null;
+  }
+
   function parseBilibiliPlayInfo(rawPayload, meta) {
     if (!rawPayload || typeof rawPayload !== "object") return null;
 
@@ -392,11 +441,17 @@
 
     if (variants.length === 0) return null;
 
+    const thumbnail = extractBilibiliThumbnail(
+      (meta && (meta.cover || meta.initialState)) || rawPayload.cover || rawPayload.initialState,
+      meta && meta.ogImage
+    );
+
     return {
       videoId,
       title,
       pageUrl,
       variants,
+      thumbnail,
       at: Date.now()
     };
   }
@@ -409,6 +464,7 @@
     isBilibiliMediaChunkURL,
     extractBilibiliVideoId,
     getBilibiliRequestHeaders,
+    extractBilibiliThumbnail,
     parseBilibiliPlayInfo
   };
 

@@ -28,6 +28,7 @@
   const BILI_PROBE_MSG = "magicdown:bili-probe:v1";
   const YT = typeof window !== "undefined" && window.MagicDownYouTube ? window.MagicDownYouTube : null;
   const BILI = typeof window !== "undefined" && window.MagicDownBilibili ? window.MagicDownBilibili : null;
+  const THUMB = typeof window !== "undefined" && window.MagicDownThumbnail ? window.MagicDownThumbnail : null;
   const isYouTubePage = Boolean(YT && YT.isYouTubeHost(location.hostname));
   const isBilibiliPage = Boolean(BILI && BILI.isBilibiliHost(location.hostname));
   const ytPlayers = new Map(); // videoId -> parsed YouTube player entry
@@ -184,7 +185,16 @@
         variants.push(v);
       }
       if (variants.length > 0) {
-        weiboGroups.set(id, { id, mediaId, at, variants });
+        const rawThumb = item.thumb && typeof item.thumb === "object" && typeof item.thumb.url === "string" && item.thumb.url
+          ? {
+              url: item.thumb.url,
+              width: Number(item.thumb.width) || 0,
+              height: Number(item.thumb.height) || 0,
+              ...(THUMB ? THUMB.detectImageFormat(item.thumb.url) : { format: "JPG", ext: "jpg" }),
+              source: "weibo"
+            }
+          : null;
+        weiboGroups.set(id, { id, mediaId, at, variants, thumb: rawThumb });
         if (mediaId) weiboMediaIdToGroup.set(mediaId, id);
         for (const v of variants) {
           weiboUrlToGroup.set(mediaDedupKey(v.url), id);
@@ -256,9 +266,12 @@
         return;
       }
       if (data.__mdSniff === BILI_MSG && data.payload && BILI) {
+        const ogEl = document.querySelector('meta[property="og:image"]');
         const parsed = BILI.parseBilibiliPlayInfo(data.payload, {
           pageUrl: data.payload.pageUrl || location.href,
           title: data.payload.title || document.title,
+          cover: data.payload.cover || "",
+          ogImage: ogEl ? ogEl.getAttribute("content") || "" : "",
           userAgent: navigator.userAgent
         });
         if (parsed) {
@@ -1125,6 +1138,78 @@
     return Array.from(map.values());
   }
 
+  function getActiveVideoThumbnail(videos) {
+    if (!activeVideo) return null;
+
+    if (isYouTubePage && YT) {
+      const ytEntry = currentYouTubeEntry();
+      const thumb = (ytEntry && ytEntry.thumbnail) || YT.extractYouTubeThumbnail([], YT.extractYouTubeVideoId(location.href));
+      if (thumb && thumb.url) {
+        return {
+          ...thumb,
+          title: (ytEntry && ytEntry.title) || document.title || "video",
+          referrer: location.href
+        };
+      }
+    }
+
+    if (isBilibiliPage && BILI) {
+      const biliEntry = currentBilibiliEntry();
+      const ogEl = document.querySelector('meta[property="og:image"]');
+      const thumb = (biliEntry && biliEntry.thumbnail) || BILI.extractBilibiliThumbnail(null, ogEl ? ogEl.getAttribute("content") || "" : "");
+      if (thumb && thumb.url) {
+        const reqHeaders = BILI.getBilibiliRequestHeaders(location.href, navigator.userAgent);
+        return {
+          ...thumb,
+          title: (biliEntry && biliEntry.title) || document.title || "video",
+          referrer: reqHeaders.Referer,
+          headers: reqHeaders
+        };
+      }
+    }
+
+    // Weibo: bind thumbnail strictly to the active video's matched media_id / group.
+    const directCandidates = collectDOMVideos(activeVideo);
+    for (const item of directCandidates) {
+      const group = findWeiboGroupForUrl(item.url);
+      if (group && group.thumb && group.thumb.url) {
+        return {
+          ...group.thumb,
+          title: document.title || "video",
+          referrer: location.href
+        };
+      }
+    }
+    if (Array.isArray(videos)) {
+      for (const item of videos) {
+        if (!item || !item.url) continue;
+        const group = findWeiboGroupForUrl(item.url);
+        if (group && group.thumb && group.thumb.url) {
+          return {
+            ...group.thumb,
+            title: item.title || document.title || "video",
+            referrer: location.href
+          };
+        }
+      }
+    }
+
+    // Facebook, Douyin, and generic video pages: <video poster>, container cover, or single-video og:image.
+    if (THUMB) {
+      const videoCount = collectVideoElements(document).length;
+      const domThumb = THUMB.extractDomVideoThumbnail(activeVideo, document, location.href, { videoCount });
+      if (domThumb && domThumb.url) {
+        return {
+          ...domThumb,
+          title: document.title || "video",
+          referrer: location.href
+        };
+      }
+    }
+
+    return null;
+  }
+
   function unavailableReason(video) {
     if (!video) return "No <video> element found in this frame. If the player is an iframe, scroll it into view to wake the frame.";
     if (isYouTubePage) {
@@ -1346,6 +1431,22 @@
         background: rgba(16, 185, 129, 0.2);
         color: #10B981;
       }
+      .md-thumb-sep {
+        height: 1px;
+        background: #212838;
+        margin: 2px 2px;
+      }
+      .md-item-thumb {
+        border-color: rgba(16, 185, 129, 0.25);
+        background: rgba(20, 25, 35, 0.92);
+      }
+      .md-item-thumb:hover {
+        border-color: #10B981;
+      }
+      .md-thumb-badge {
+        background: rgba(16, 185, 129, 0.18);
+        color: #34D399;
+      }
     `;
     shadow.appendChild(style);
 
@@ -1434,8 +1535,9 @@
     }
 
     const videos = getCombinedVideos();
+    const thumb = getActiveVideoThumbnail(videos);
     const reason = videos.length === 0 ? unavailableReason(activeVideo) : "";
-    const signature = `${videoKey(activeVideo)}::${reason}::${videos
+    const signature = `${videoKey(activeVideo)}::${reason}::${thumb ? thumb.url : ""}::${videos
       .map((v) => `${v.url}|${v.quality}|${v.format}|${v.plan ? "p" : ""}`)
       .join(";")}`;
 
@@ -1532,6 +1634,84 @@
           if (v.plan) payload.plan = v.plan;
           if (v.audioUrl) payload.audioUrl = v.audioUrl;
           if (v.size > 0) payload.size = v.size;
+          let resp = null;
+          try {
+            resp = await chrome.runtime.sendMessage(payload);
+          } catch {
+            resp = null;
+          }
+          if (resp && resp.success) {
+            dlPill.textContent = "Sent!";
+            dlPill.classList.add("sent");
+          } else {
+            dlPill.textContent = "Offline";
+          }
+        } else {
+          dlPill.textContent = "Sent!";
+          dlPill.classList.add("sent");
+        }
+      });
+
+      listEl.appendChild(btn);
+    }
+
+    if (thumb && thumb.url) {
+      if (videos.length > 0) {
+        const sep = document.createElement("div");
+        sep.className = "md-thumb-sep";
+        listEl.appendChild(sep);
+      }
+
+      const btn = document.createElement("button");
+      btn.className = "md-item md-item-thumb";
+      btn.type = "button";
+
+      const left = document.createElement("div");
+      left.className = "md-item-left";
+
+      const badge = document.createElement("span");
+      badge.className = "md-q-badge md-thumb-badge";
+      badge.textContent = "Thumb";
+
+      const metaParts = [thumb.format || "JPG"];
+      if (thumb.width > 0 && thumb.height > 0) {
+        metaParts.push(`${thumb.width}×${thumb.height}`);
+      }
+
+      const meta = document.createElement("span");
+      meta.className = "md-meta";
+      meta.textContent = metaParts.join(" · ");
+
+      left.appendChild(badge);
+      left.appendChild(meta);
+
+      const dlPill = document.createElement("span");
+      dlPill.className = "md-dl-pill";
+      dlPill.textContent = "Download";
+
+      btn.appendChild(left);
+      btn.appendChild(dlPill);
+
+      btn.addEventListener("click", async (e) => {
+        e.stopPropagation();
+        const ext = thumb.ext || "jpg";
+        const filename = THUMB
+          ? THUMB.buildThumbnailFilename(thumb.title || document.title, ext)
+          : sanitizeTitleFilename(ext, `${thumb.title || document.title || "video"}-thumbnail`);
+        if (isExtensionEnv) {
+          const mergedHeaders = {
+            Origin: window.location.origin,
+            Referer: thumb.referrer || window.location.href,
+            "User-Agent": navigator.userAgent,
+            ...(thumb.headers && typeof thumb.headers === "object" ? thumb.headers : {})
+          };
+          const payload = {
+            type: "download",
+            url: thumb.url,
+            filename,
+            referrer: thumb.referrer || window.location.href,
+            headers: mergedHeaders
+          };
           let resp = null;
           try {
             resp = await chrome.runtime.sendMessage(payload);

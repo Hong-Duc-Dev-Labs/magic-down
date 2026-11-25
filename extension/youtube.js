@@ -167,6 +167,74 @@
     };
   }
 
+  function detectThumbFormat(url) {
+    const path = String(url || "").split("?")[0].split("#")[0].toLowerCase();
+    if (path.endsWith(".webp")) return { format: "WEBP", ext: "webp" };
+    if (path.endsWith(".png")) return { format: "PNG", ext: "png" };
+    return { format: "JPG", ext: "jpg" };
+  }
+
+  function isLetterboxedYouTubeThumb(url, width, height) {
+    const lower = String(url || "").toLowerCase();
+    if (/\/(?:maxresdefault|hq720|mqdefault)\.(?:jpg|webp)(?:$|\?)/i.test(lower)) return false;
+    if (/\/(?:hqdefault|sddefault|default)\.(?:jpg|webp)(?:$|\?)/i.test(lower)) return true;
+    if (width > 0 && height > 0) {
+      const ratio = width / height;
+      return ratio > 1.25 && ratio < 1.45; // 4:3 letterboxed
+    }
+    return false;
+  }
+
+  function extractYouTubeThumbnail(thumbnails, videoId) {
+    const candidates = [];
+    if (Array.isArray(thumbnails)) {
+      for (const item of thumbnails) {
+        if (!item || typeof item !== "object" || typeof item.url !== "string") continue;
+        let url = item.url.trim();
+        if (url.startsWith("//")) url = `https:${url}`;
+        if (!/^https?:\/\//i.test(url)) continue;
+        const width = Number(item.width) || 0;
+        const height = Number(item.height) || 0;
+        const area = width * height;
+        const letterboxed = isLetterboxedYouTubeThumb(url, width, height);
+        candidates.push({ url, width, height, area, letterboxed });
+      }
+    }
+
+    if (candidates.length > 0) {
+      candidates.sort((a, b) => {
+        // Prefer non-letterboxed when both are high-res or same area
+        if (b.area !== a.area) return b.area - a.area;
+        if (a.letterboxed !== b.letterboxed) return a.letterboxed ? 1 : -1;
+        return 0;
+      });
+      const best = candidates[0];
+      const fmt = detectThumbFormat(best.url);
+      return {
+        url: best.url,
+        width: best.width,
+        height: best.height,
+        format: fmt.format,
+        ext: fmt.ext,
+        source: "youtube"
+      };
+    }
+
+    const cleanId = typeof videoId === "string" ? videoId.trim() : "";
+    if (cleanId && /^[A-Za-z0-9_-]{6,20}$/.test(cleanId)) {
+      return {
+        url: `https://i.ytimg.com/vi/${cleanId}/maxresdefault.jpg`,
+        width: 1280,
+        height: 720,
+        format: "JPG",
+        ext: "jpg",
+        source: "youtube"
+      };
+    }
+
+    return null;
+  }
+
   function parseYouTubePlayerPayload(payload) {
     if (!payload || typeof payload !== "object") return null;
     const videoId = typeof payload.videoId === "string" ? payload.videoId.trim() : "";
@@ -249,6 +317,7 @@
     });
 
     const variants = [...progressive, ...pairedAdaptiveVideos, ...adaptiveAudios];
+    const thumbnail = extractYouTubeThumbnail(payload.thumbnails, videoId);
 
     return {
       videoId,
@@ -257,6 +326,7 @@
       hlsManifestUrl,
       dashManifestUrl,
       variants,
+      thumbnail,
       cipherOnlyCount,
       drmDetected,
       at: Date.now()
@@ -269,6 +339,7 @@
     isGoogleVideoPlaybackURL,
     isYouTubeRangeChunkURL,
     parseMimeContainer,
+    extractYouTubeThumbnail,
     parseYouTubePlayerPayload
   };
 
