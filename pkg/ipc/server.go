@@ -29,6 +29,9 @@ type AddDownloadRequest struct {
 	Cookies       string            `json:"cookies,omitempty"`
 	Headers       map[string]string `json:"headers,omitempty"`
 	ConvertFormat string            `json:"convert_format,omitempty"`
+	TargetFormat  string            `json:"target_format,omitempty"`
+	OutputFormat  string            `json:"output_format,omitempty"`
+	AudioBitrate  string            `json:"audio_bitrate,omitempty"`
 	Plan          json.RawMessage   `json:"plan,omitempty"`
 	AutoStart     bool              `json:"auto_start"`
 	StartPaused   bool              `json:"start_paused,omitempty"`
@@ -246,6 +249,9 @@ func (s *Server) handleAddDownload(w http.ResponseWriter, r *http.Request) {
 		Cookies:       req.Cookies,
 		Headers:       req.Headers,
 		ConvertFormat: req.ConvertFormat,
+		TargetFormat:  req.TargetFormat,
+		OutputFormat:  req.OutputFormat,
+		AudioBitrate:  req.AudioBitrate,
 		Plan:          plan,
 		AutoStart:     req.AutoStart,
 		StartPaused:   req.StartPaused,
@@ -362,6 +368,9 @@ func (s *Server) handleAddBatchDownload(w http.ResponseWriter, r *http.Request) 
 			Cookies:       cookies,
 			Headers:       headers,
 			ConvertFormat: item.ConvertFormat,
+			TargetFormat:  item.TargetFormat,
+			OutputFormat:  item.OutputFormat,
+			AudioBitrate:  item.AudioBitrate,
 			AutoStart:     autoStart,
 			StartPaused:   item.StartPaused,
 		})

@@ -21,6 +21,9 @@ type InboundMessage struct {
 	NumSegments   int               `json:"num_segments,omitempty"`
 	TotalBytes    int64             `json:"total_bytes,omitempty"`
 	ConvertFormat string                   `json:"convert_format,omitempty"`
+	TargetFormat  string                   `json:"target_format,omitempty"`
+	OutputFormat  string                   `json:"output_format,omitempty"`
+	AudioBitrate  string                   `json:"audio_bitrate,omitempty"`
 	Plan          json.RawMessage          `json:"plan,omitempty"`
 	AutoStart     bool                     `json:"auto_start,omitempty"`
 	SkipDialog    bool                     `json:"skip_dialog,omitempty"`
@@ -123,6 +126,9 @@ func (h *Handler) HandleMessage(msgBytes []byte) ([]byte, error) {
 			NumSegments:   in.NumSegments,
 			TotalBytes:    in.TotalBytes,
 			ConvertFormat: in.ConvertFormat,
+			TargetFormat:  in.TargetFormat,
+			OutputFormat:  in.OutputFormat,
+			AudioBitrate:  in.AudioBitrate,
 			Plan:          in.Plan,
 			AutoStart:     true, // default to starting automatically from browser
 			SkipDialog:    in.SkipDialog,

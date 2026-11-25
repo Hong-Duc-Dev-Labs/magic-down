@@ -285,3 +285,25 @@ test("Facebook DASH video pairs with matching fbVideoId audio track and builds a
   tabVideos.delete(tabId);
   tabFbAudios.delete(tabId);
 });
+
+test("buildDownloadPayload forwards target_format, output_format, and audio_bitrate", () => {
+  const { buildDownloadPayload } = require("./background.js");
+  const mp4Payload = buildDownloadPayload({
+    url: "https://rr1.googlevideo.com/videoplayback?itag=313",
+    audioUrl: "https://rr1.googlevideo.com/videoplayback?itag=251",
+    filename: "video_4k.mp4",
+    targetFormat: "MP4"
+  });
+  assert.equal(mp4Payload.target_format, "mp4");
+  assert.equal(mp4Payload.audio_url, "https://rr1.googlevideo.com/videoplayback?itag=251");
+
+  const mp3Payload = buildDownloadPayload({
+    url: "https://rr1.googlevideo.com/videoplayback?itag=251",
+    filename: "song.mp3",
+    outputFormat: "MP3",
+    audioBitrate: "320K"
+  });
+  assert.equal(mp3Payload.output_format, "mp3");
+  assert.equal(mp3Payload.audio_bitrate, "320k");
+  assert.equal(mp3Payload.filename, "song.mp3");
+});

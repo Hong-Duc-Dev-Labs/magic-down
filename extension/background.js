@@ -186,7 +186,7 @@ function sanitizeHeaders(rawHeaders) {
   return out;
 }
 
-function buildDownloadPayload({ url, audioUrl = "", filename = "", referrer = "", cookies = "", headers = null, convertFormat = "", plan = null, size = 0 }) {
+function buildDownloadPayload({ url, audioUrl = "", filename = "", referrer = "", cookies = "", headers = null, convertFormat = "", targetFormat = "", outputFormat = "", audioBitrate = "", plan = null, size = 0 }) {
   const safeHeaders = sanitizeHeaders(headers);
   const payload = {
     action: "download",
@@ -206,6 +206,15 @@ function buildDownloadPayload({ url, audioUrl = "", filename = "", referrer = ""
   if (convertFormat) {
     payload.convert_format = convertFormat;
   }
+  if (typeof targetFormat === "string" && targetFormat.trim()) {
+    payload.target_format = targetFormat.trim().toLowerCase();
+  }
+  if (typeof outputFormat === "string" && outputFormat.trim()) {
+    payload.output_format = outputFormat.trim().toLowerCase();
+  }
+  if (typeof audioBitrate === "string" && audioBitrate.trim()) {
+    payload.audio_bitrate = audioBitrate.trim().toLowerCase();
+  }
   const safePlan = sanitizeDownloadPlan(plan);
   if (safePlan) {
     payload.plan = safePlan;
@@ -213,9 +222,9 @@ function buildDownloadPayload({ url, audioUrl = "", filename = "", referrer = ""
   return payload;
 }
 
-async function forwardDownload({ url, audioUrl = "", filename = "", referrer = "", headers = null, convertFormat = "", plan = null, size = 0 }) {
+async function forwardDownload({ url, audioUrl = "", filename = "", referrer = "", headers = null, convertFormat = "", targetFormat = "", outputFormat = "", audioBitrate = "", plan = null, size = 0 }) {
   const cookies = await getCookiesHeader(url);
-  const payload = buildDownloadPayload({ url, audioUrl, filename, referrer, cookies, headers, convertFormat, plan, size });
+  const payload = buildDownloadPayload({ url, audioUrl, filename, referrer, cookies, headers, convertFormat, targetFormat, outputFormat, audioBitrate, plan, size });
 
   const resp = await sendNativeMessage(payload);
 
@@ -1130,6 +1139,9 @@ if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.onMessage)
         referrer: message.referrer || "",
         headers: message.headers || null,
         convertFormat: message.convertFormat || "",
+        targetFormat: message.targetFormat || "",
+        outputFormat: message.outputFormat || "",
+        audioBitrate: message.audioBitrate || "",
         plan: message.plan || null,
         size: typeof message.size === "number" ? message.size : 0
       }).then(sendResponse);

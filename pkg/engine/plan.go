@@ -40,10 +40,13 @@ type PlanPart struct {
 // single-file DASH); "segments" means separate segment URLs (Weibo CDN .m4s).
 // Both are concatenated into one output file, so no new on-disk format exists.
 type DownloadPlan struct {
-	Kind   string     `json:"kind,omitempty"`
-	URL    string     `json:"url,omitempty"`
-	Format string     `json:"format,omitempty"`
-	Parts  []PlanPart `json:"parts"`
+	Kind         string     `json:"kind,omitempty"`
+	URL          string     `json:"url,omitempty"`
+	Format       string     `json:"format,omitempty"`
+	TargetFormat string     `json:"target_format,omitempty"`
+	OutputFormat string     `json:"output_format,omitempty"`
+	AudioBitrate string     `json:"audio_bitrate,omitempty"`
+	Parts        []PlanPart `json:"parts"`
 }
 
 // ParseDownloadPlan decodes and validates a plan supplied by the browser
@@ -66,9 +69,12 @@ func (p *DownloadPlan) Normalize(fallbackURL string) (*DownloadPlan, error) {
 		return nil, errors.New("empty download plan")
 	}
 	out := &DownloadPlan{
-		Kind:   strings.ToLower(strings.TrimSpace(p.Kind)),
-		URL:    strings.TrimSpace(p.URL),
-		Format: normalizePlanFormat(p.Format),
+		Kind:         strings.ToLower(strings.TrimSpace(p.Kind)),
+		URL:          strings.TrimSpace(p.URL),
+		Format:       normalizePlanFormat(p.Format),
+		TargetFormat: strings.ToLower(strings.TrimSpace(p.TargetFormat)),
+		OutputFormat: strings.ToLower(strings.TrimSpace(p.OutputFormat)),
+		AudioBitrate: strings.ToLower(strings.TrimSpace(p.AudioBitrate)),
 	}
 	if out.URL == "" {
 		out.URL = strings.TrimSpace(fallbackURL)

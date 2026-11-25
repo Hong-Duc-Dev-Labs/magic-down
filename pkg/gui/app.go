@@ -96,6 +96,9 @@ type App struct {
 	inputCookies       string
 	inputHeaders       map[string]string
 	inputConvertFormat string
+	inputTargetFormat  string
+	inputOutputFormat  string
+	inputAudioBitrate  string
 	inputPlan          *engine.DownloadPlan
 	lastAutoTarget     string
 	addError           string
@@ -353,6 +356,9 @@ func (a *App) openIncomingDownloadDialog(req ipc.AddDownloadRequest) {
 	a.inputCookies = req.Cookies
 	a.inputHeaders = req.Headers
 	a.inputConvertFormat = req.ConvertFormat
+	a.inputTargetFormat = req.TargetFormat
+	a.inputOutputFormat = req.OutputFormat
+	a.inputAudioBitrate = req.AudioBitrate
 	a.inputEstimatedSize = req.TotalBytes
 	a.inputPlan = nil
 	if len(req.Plan) > 0 {
@@ -1293,6 +1299,9 @@ func (a *App) submitAddDownload(autoStart bool) {
 		Cookies:       a.inputCookies,
 		Headers:       a.inputHeaders,
 		ConvertFormat: a.inputConvertFormat,
+		TargetFormat:  a.inputTargetFormat,
+		OutputFormat:  a.inputOutputFormat,
+		AudioBitrate:  a.inputAudioBitrate,
 		Plan:          a.inputPlan,
 		AutoStart:     autoStart,
 		StartPaused:   !autoStart,

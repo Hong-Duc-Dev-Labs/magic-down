@@ -66,6 +66,49 @@
     }
   }
 
+  const MP3_PRESETS = [
+    { quality: "MP3 · 320 kbps", bitrate: "320k", kbps: 320 },
+    { quality: "MP3 · 192 kbps", bitrate: "192k", kbps: 192 },
+    { quality: "MP3 · 128 kbps", bitrate: "128k", kbps: 128 }
+  ];
+
+  function buildMp3Variants(sourceVariant, title) {
+    if (!sourceVariant || typeof sourceVariant.url !== "string" || !sourceVariant.url) {
+      return [];
+    }
+    return MP3_PRESETS.map((preset) => ({
+      url: sourceVariant.url,
+      quality: preset.quality,
+      height: 0,
+      width: 0,
+      fps: 0,
+      bandwidth: preset.kbps * 1000,
+      size: 0,
+      format: "MP3",
+      ext: "mp3",
+      outputFormat: "mp3",
+      audioBitrate: preset.bitrate,
+      isHLS: false,
+      source: sourceVariant.source || "youtube",
+      streamType: "audio-mp3",
+      hasVideo: false,
+      hasAudio: true,
+      title: title || sourceVariant.title || "",
+      referrer: sourceVariant.referrer || "",
+      headers: sourceVariant.headers ? { ...sourceVariant.headers } : undefined
+    }));
+  }
+
+  function parseVideoCodecRank(mimeType, format) {
+    const raw = String(mimeType || "").toLowerCase();
+    if (format === "MP4") {
+      if (raw.includes("avc1") || raw.includes("h264")) return 3;
+      if (raw.includes("av01")) return 2;
+      return 1;
+    }
+    return 0;
+  }
+
   function parseMimeContainer(mimeType) {
     const raw = String(mimeType || "").toLowerCase();
     const base = raw.split(";")[0].trim();
@@ -134,6 +177,7 @@
           size,
           format,
           ext,
+          codecRank: parseVideoCodecRank(raw.mimeType, format),
           isHLS: false,
           source: "youtube",
           streamType: "video-only",
@@ -272,7 +316,13 @@
       if (v.streamType === "video-only") {
         const key = `${v.height}|${v.fps}|${v.format}`;
         const prev = bestVideoByKey.get(key);
-        if (!prev || (v.bandwidth || 0) > (prev.bandwidth || 0)) {
+        const vRank = v.codecRank || 0;
+        const prevRank = (prev && prev.codecRank) || 0;
+        if (
+          !prev ||
+          vRank > prevRank ||
+          (vRank === prevRank && (v.bandwidth || 0) > (prev.bandwidth || 0))
+        ) {
           bestVideoByKey.set(key, v);
         }
       } else if (v.streamType === "audio-only") {
@@ -304,12 +354,14 @@
       const combinedSize = v.size > 0 && audio.size > 0 ? v.size + audio.size : (v.size || 0);
       return {
         ...v,
+        videoFormat: v.format,
         audioUrl: audio.url,
         audioSize: audio.size || 0,
         audioFormat: audio.format || "M4A",
         size: combinedSize,
         format: "MP4",
         ext: "mp4",
+        targetFormat: "mp4",
         streamType: "muxed",
         hasAudio: true,
         needsMux: true
@@ -317,6 +369,8 @@
     });
 
     const variants = [...progressive, ...pairedAdaptiveVideos, ...adaptiveAudios];
+    const mp3Source = bestAnyAudio || progressive[0] || null;
+    const mp3Variants = buildMp3Variants(mp3Source, title);
     const thumbnail = extractYouTubeThumbnail(payload.thumbnails, videoId);
 
     return {
@@ -326,6 +380,7 @@
       hlsManifestUrl,
       dashManifestUrl,
       variants,
+      mp3Variants,
       thumbnail,
       cipherOnlyCount,
       drmDetected,
@@ -334,11 +389,13 @@
   }
 
   const api = {
+    MP3_PRESETS,
     isYouTubeHost,
     extractYouTubeVideoId,
     isGoogleVideoPlaybackURL,
     isYouTubeRangeChunkURL,
     parseMimeContainer,
+    buildMp3Variants,
     extractYouTubeThumbnail,
     parseYouTubePlayerPayload
   };

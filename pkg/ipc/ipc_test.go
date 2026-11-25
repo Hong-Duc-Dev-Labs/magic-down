@@ -193,3 +193,45 @@ func TestServer_IncomingDownloadDialogHookAndAudioURL(t *testing.T) {
 		t.Fatalf("expected 0 tasks added directly when dialog hook is active")
 	}
 }
+
+func TestIPCAddDownload_MP3OutputFormatAndBitrate(t *testing.T) {
+	tempDir := t.TempDir()
+	cfg := engine.DefaultConfig(tempDir, filepath.Join(tempDir, "state.json"))
+	cfg.AutoCategorize = true
+	eng, err := engine.NewEngine(cfg)
+	if err != nil {
+		t.Fatalf("failed to init engine: %v", err)
+	}
+	defer eng.Close()
+
+	srv := NewServer(eng, 0)
+	if err := srv.Start(); err != nil {
+		t.Fatalf("failed to start server: %v", err)
+	}
+	defer srv.Stop()
+
+	client := NewClient(srv.Port())
+	resp, err := client.AddDownload(AddDownloadRequest{
+		URL:          "https://example.com/audio.webm",
+		Filename:     "track.webm",
+		OutputFormat: "mp3",
+		AudioBitrate: "320k",
+		TargetFormat: "mp4",
+		AutoStart:    false,
+	})
+	if err != nil {
+		t.Fatalf("AddDownload failed: %v", err)
+	}
+	if !resp.Success || resp.Task == nil {
+		t.Fatalf("expected success with task, got %+v", resp)
+	}
+	if resp.Task.OutputFormat != "mp3" || resp.Task.AudioBitrate != "320k" || resp.Task.TargetFormat != "mp4" {
+		t.Fatalf("unexpected format fields: %+v", resp.Task)
+	}
+	if resp.Task.Filename != "track.mp3" {
+		t.Fatalf("expected .mp3 filename, got %q", resp.Task.Filename)
+	}
+	if resp.Task.Category != engine.CategoryMusic {
+		t.Fatalf("expected Music category, got %q", resp.Task.Category)
+	}
+}

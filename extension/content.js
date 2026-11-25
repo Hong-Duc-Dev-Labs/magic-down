@@ -1527,6 +1527,47 @@
     });
   }
 
+  function getMp3VariantsForVideos(videos) {
+    const ytEntry = currentYouTubeEntry();
+    if (ytEntry && Array.isArray(ytEntry.mp3Variants) && ytEntry.mp3Variants.length > 0) {
+      return ytEntry.mp3Variants;
+    }
+    const biliEntry = currentBilibiliEntry();
+    if (biliEntry && Array.isArray(biliEntry.mp3Variants) && biliEntry.mp3Variants.length > 0) {
+      return biliEntry.mp3Variants;
+    }
+    if (!Array.isArray(videos) || videos.length === 0) return [];
+    const audioTrack = videos.find((v) => v && v.streamType === "audio-only" && v.url);
+    const muxedWithAudio = videos.find((v) => v && v.audioUrl && /^https?:\/\//i.test(v.audioUrl));
+    const progressive = videos.find((v) => v && v.url && !v.isHLS && !v.plan && /^https?:\/\//i.test(v.url));
+    const fallback = videos.find((v) => v && v.url && /^https?:\/\//i.test(v.url));
+    const sourceUrl =
+      (audioTrack && audioTrack.url) ||
+      (muxedWithAudio && muxedWithAudio.audioUrl) ||
+      (progressive && progressive.url) ||
+      (fallback && fallback.url) ||
+      "";
+    if (!sourceUrl) return [];
+    const base = audioTrack || muxedWithAudio || progressive || fallback;
+    return [
+      { quality: "MP3 · 320 kbps", bitrate: "320k", kbps: 320 },
+      { quality: "MP3 · 192 kbps", bitrate: "192k", kbps: 192 },
+      { quality: "MP3 · 128 kbps", bitrate: "128k", kbps: 128 }
+    ].map((preset) => ({
+      url: sourceUrl,
+      quality: preset.quality,
+      format: "MP3",
+      ext: "mp3",
+      outputFormat: "mp3",
+      audioBitrate: preset.bitrate,
+      streamType: "audio-mp3",
+      source: (base && base.source) || "video",
+      title: (base && base.title) || "",
+      referrer: (base && base.referrer) || "",
+      headers: base && base.headers ? { ...base.headers } : undefined
+    }));
+  }
+
   function renderDropdown() {
     if (!dropdownEl || !listEl) return;
     if (!dropdownOpen) {
@@ -1535,9 +1576,10 @@
     }
 
     const videos = getCombinedVideos();
+    const mp3Variants = getMp3VariantsForVideos(videos);
     const thumb = getActiveVideoThumbnail(videos);
     const reason = videos.length === 0 ? unavailableReason(activeVideo) : "";
-    const signature = `${videoKey(activeVideo)}::${reason}::${thumb ? thumb.url : ""}::${videos
+    const signature = `${videoKey(activeVideo)}::${reason}::${thumb ? thumb.url : ""}::${mp3Variants.length}::${videos
       .map((v) => `${v.url}|${v.quality}|${v.format}|${v.plan ? "p" : ""}`)
       .join(";")}`;
 
@@ -1633,6 +1675,9 @@
           };
           if (v.plan) payload.plan = v.plan;
           if (v.audioUrl) payload.audioUrl = v.audioUrl;
+          if (v.targetFormat) payload.targetFormat = v.targetFormat;
+          if (v.outputFormat) payload.outputFormat = v.outputFormat;
+          if (v.audioBitrate) payload.audioBitrate = v.audioBitrate;
           if (v.size > 0) payload.size = v.size;
           let resp = null;
           try {
@@ -1653,6 +1698,82 @@
       });
 
       listEl.appendChild(btn);
+    }
+
+    if (mp3Variants.length > 0) {
+      if (videos.length > 0) {
+        const sep = document.createElement("div");
+        sep.className = "md-thumb-sep";
+        listEl.appendChild(sep);
+      }
+
+      for (const m of mp3Variants) {
+        const btn = document.createElement("button");
+        btn.className = "md-item md-item-mp3";
+        btn.type = "button";
+
+        const left = document.createElement("div");
+        left.className = "md-item-left";
+
+        const q = document.createElement("span");
+        q.className = "md-q-badge";
+        q.textContent = m.quality;
+
+        const meta = document.createElement("span");
+        meta.className = "md-meta";
+        meta.textContent = "Audio · MP3";
+
+        left.appendChild(q);
+        left.appendChild(meta);
+
+        const dlPill = document.createElement("span");
+        dlPill.className = "md-dl-pill";
+        dlPill.textContent = "Download";
+
+        btn.appendChild(left);
+        btn.appendChild(dlPill);
+
+        btn.addEventListener("click", async (e) => {
+          e.stopPropagation();
+          const filename = sanitizeTitleFilename("mp3", m.title);
+          if (isExtensionEnv) {
+            const mergedHeaders = {
+              Origin: window.location.origin,
+              "User-Agent": navigator.userAgent,
+              ...(m.headers && typeof m.headers === "object" ? m.headers : {})
+            };
+            if (m.source === "bilibili" && !mergedHeaders.Referer) {
+              mergedHeaders.Referer = m.referrer || window.location.href || "https://www.bilibili.com/";
+            }
+            const payload = {
+              type: "download",
+              url: m.url,
+              filename,
+              referrer: m.referrer || window.location.href,
+              headers: mergedHeaders,
+              outputFormat: "mp3",
+              audioBitrate: m.audioBitrate
+            };
+            let resp = null;
+            try {
+              resp = await chrome.runtime.sendMessage(payload);
+            } catch {
+              resp = null;
+            }
+            if (resp && resp.success) {
+              dlPill.textContent = "Sent!";
+              dlPill.classList.add("sent");
+            } else {
+              dlPill.textContent = "Offline";
+            }
+          } else {
+            dlPill.textContent = "Sent!";
+            dlPill.classList.add("sent");
+          }
+        });
+
+        listEl.appendChild(btn);
+      }
     }
 
     if (thumb && thumb.url) {

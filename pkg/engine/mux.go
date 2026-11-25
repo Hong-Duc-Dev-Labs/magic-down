@@ -53,12 +53,82 @@ func findFFmpegDefault() (string, error) {
 		return path, nil
 	}
 
-	return "", errors.New("ffmpeg not found: place ffmpeg next to MagicDown or add it to PATH to merge video+audio")
+	return "", errors.New("ffmpeg not found: install ffmpeg (e.g. winget install Gyan.FFmpeg) or place ffmpeg.exe next to MagicDown and add it to PATH")
+}
+
+// NormalizeOutputFormat validates and canonicalizes a requested audio/media output format.
+func NormalizeOutputFormat(format string) (string, bool) {
+	switch strings.ToLower(strings.TrimSpace(strings.TrimPrefix(format, "."))) {
+	case "mp3":
+		return "mp3", true
+	default:
+		return "", false
+	}
+}
+
+// NormalizeAudioBitrate validates and canonicalizes an MP3 audio bitrate.
+// Defaults to "192k" when empty or unrecognized.
+func NormalizeAudioBitrate(bitrate string) string {
+	switch strings.ToLower(strings.TrimSpace(bitrate)) {
+	case "320k", "320", "320kbps":
+		return "320k"
+	case "192k", "192", "192kbps":
+		return "192k"
+	case "128k", "128", "128kbps":
+		return "128k"
+	default:
+		return "192k"
+	}
+}
+
+// ConvertToMP3 transcodes srcPath (audio or video file) into an MP3 file at dstPath
+// using libmp3lame at the requested bitrate (320k, 192k, 128k) with ID3v2.3 tags.
+func ConvertToMP3(ctx context.Context, srcPath, dstPath, bitrate string) error {
+	ffmpegPath, err := FindFFmpeg()
+	if err != nil {
+		return err
+	}
+
+	br := NormalizeAudioBitrate(bitrate)
+	tmpOut := dstPath + ".converting.mp3"
+	_ = os.Remove(tmpOut)
+
+	args := []string{
+		"-y",
+		"-i", srcPath,
+		"-vn",
+		"-c:a", "libmp3lame",
+		"-b:a", br,
+		"-id3v2_version", "3",
+		tmpOut,
+	}
+	if out, err := ffmpegRunner(ctx, ffmpegPath, args); err != nil {
+		_ = os.Remove(tmpOut)
+		msg := strings.TrimSpace(string(out))
+		if len(msg) > 240 {
+			msg = msg[len(msg)-240:]
+		}
+		if msg != "" {
+			return fmt.Errorf("ffmpeg mp3 conversion failed: %w (%s)", err, msg)
+		}
+		return fmt.Errorf("ffmpeg mp3 conversion failed: %w", err)
+	}
+
+	if _, err := os.Stat(dstPath); err == nil {
+		_ = os.Remove(dstPath)
+	}
+	if err := os.Rename(tmpOut, dstPath); err != nil {
+		_ = os.Remove(tmpOut)
+		return fmt.Errorf("failed to finalize mp3 output: %w", err)
+	}
+	return nil
 }
 
 // MuxVideoAudio merges separate video and audio files into a single MP4 file.
-// It tries fast stream copy first (-c copy -movflags +faststart) and falls back
-// to AAC audio transcoding (-c:v copy -c:a aac) if the audio codec is not MP4-compatible.
+// It tries fast stream copy first (-c copy -movflags +faststart), then falls back
+// to AAC audio transcoding (-c:v copy -c:a aac) for WebM/Opus audio, and finally
+// to H.264+AAC transcoding (-c:v libx264 -c:a aac) if the video codec cannot be
+// stream-copied into an MP4 container.
 func MuxVideoAudio(ctx context.Context, videoPath, audioPath, outputPath string) error {
 	ffmpegPath, err := FindFFmpeg()
 	if err != nil {
@@ -68,18 +138,16 @@ func MuxVideoAudio(ctx context.Context, videoPath, audioPath, outputPath string)
 	tmpOut := outputPath + ".muxing.mp4"
 	_ = os.Remove(tmpOut)
 
-	copyArgs := []string{
-		"-y",
-		"-i", videoPath,
-		"-i", audioPath,
-		"-c", "copy",
-		"-movflags", "+faststart",
-		tmpOut,
-	}
-	if _, err := ffmpegRunner(ctx, ffmpegPath, copyArgs); err != nil {
-		_ = os.Remove(tmpOut)
-		// Fallback for non-MP4 audio codecs (e.g., WebM/Opus -> AAC in MP4)
-		aacArgs := []string{
+	attempts := [][]string{
+		{
+			"-y",
+			"-i", videoPath,
+			"-i", audioPath,
+			"-c", "copy",
+			"-movflags", "+faststart",
+			tmpOut,
+		},
+		{
 			"-y",
 			"-i", videoPath,
 			"-i", audioPath,
@@ -88,18 +156,43 @@ func MuxVideoAudio(ctx context.Context, videoPath, audioPath, outputPath string)
 			"-b:a", "192k",
 			"-movflags", "+faststart",
 			tmpOut,
+		},
+		{
+			"-y",
+			"-i", videoPath,
+			"-i", audioPath,
+			"-c:v", "libx264",
+			"-preset", "veryfast",
+			"-crf", "22",
+			"-c:a", "aac",
+			"-b:a", "192k",
+			"-movflags", "+faststart",
+			tmpOut,
+		},
+	}
+
+	var lastOut []byte
+	var lastErr error
+	for _, args := range attempts {
+		_ = os.Remove(tmpOut)
+		out, runErr := ffmpegRunner(ctx, ffmpegPath, args)
+		if runErr == nil {
+			lastErr = nil
+			break
 		}
-		if out, err2 := ffmpegRunner(ctx, ffmpegPath, aacArgs); err2 != nil {
-			_ = os.Remove(tmpOut)
-			msg := strings.TrimSpace(string(out))
-			if len(msg) > 240 {
-				msg = msg[len(msg)-240:]
-			}
-			if msg != "" {
-				return fmt.Errorf("ffmpeg mux failed: %w (%s)", err2, msg)
-			}
-			return fmt.Errorf("ffmpeg mux failed: %w", err2)
+		lastOut = out
+		lastErr = runErr
+	}
+	if lastErr != nil {
+		_ = os.Remove(tmpOut)
+		msg := strings.TrimSpace(string(lastOut))
+		if len(msg) > 240 {
+			msg = msg[len(msg)-240:]
 		}
+		if msg != "" {
+			return fmt.Errorf("ffmpeg mux failed: %w (%s)", lastErr, msg)
+		}
+		return fmt.Errorf("ffmpeg mux failed: %w", lastErr)
 	}
 
 	if _, err := os.Stat(outputPath); err == nil {

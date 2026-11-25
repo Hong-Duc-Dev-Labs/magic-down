@@ -182,6 +182,12 @@ func (t *Task) processProbeResponse(resp *http.Response, downloadDir string) {
 	if fmtExt, ok := NormalizeImageFormat(t.ConvertFormat); ok {
 		t.Filename = ReplaceExtension(t.Filename, fmtExt)
 	}
+	if outFmt, ok := NormalizeOutputFormat(t.OutputFormat); ok && outFmt == "mp3" {
+		t.Filename = ReplaceExtension(t.Filename, "mp3")
+		if t.Category == "" {
+			t.Category = CategoryMusic
+		}
+	}
 	if t.Category == "" {
 		t.Category = CategoryForFilename(t.Filename, t.URL)
 	}
@@ -283,11 +289,20 @@ func (t *Task) Start(parentCtx context.Context, client *http.Client, onUpdate fu
 	supportsRanges := t.SupportsRanges
 	plan := t.Plan
 	audioURL := t.AudioURL
+	outputFmt := t.OutputFormat
 	isHLS := t.IsHLS || (plan == nil && audioURL == "" && IsHLSURL(t.URL, ""))
 	totalBytes := t.TotalBytes
 	numSegments := len(t.Segments)
 	savePath := t.SavePath
 	t.mu.Unlock()
+
+	// Ensure ffmpeg is available before spending bandwidth on MP3 conversion.
+	if outFmt, ok := NormalizeOutputFormat(outputFmt); ok && outFmt == "mp3" {
+		if _, err := FindFFmpeg(); err != nil {
+			t.fail(err.Error(), onUpdate)
+			return err
+		}
+	}
 
 	// Ensure download directory exists
 	saveDir := filepath.Dir(savePath)
@@ -556,11 +571,46 @@ func (t *Task) runSingleStreamAttempt(ctx context.Context, client *http.Client, 
 func (t *Task) finalizeFile(onUpdate func(*Task)) error {
 	t.mu.RLock()
 	convertFmt := t.ConvertFormat
+	outputFmt := t.OutputFormat
+	audioBitrate := t.AudioBitrate
+	activeCtx := t.activeCtx
 	partPath := t.PartPath
 	savePath := t.SavePath
 	t.mu.RUnlock()
 
-	if fmtExt, ok := NormalizeImageFormat(convertFmt); ok {
+	if activeCtx == nil {
+		activeCtx = context.Background()
+	}
+
+	if outFmt, ok := NormalizeOutputFormat(outputFmt); ok && outFmt == "mp3" {
+		t.mu.Lock()
+		t.Status = StatusMuxing
+		t.Speed = 0
+		t.ETA = 0
+		t.mu.Unlock()
+		if onUpdate != nil {
+			onUpdate(t)
+		}
+
+		savePath = ReplaceExtension(savePath, "mp3")
+		if err := ConvertToMP3(activeCtx, partPath, savePath, audioBitrate); err != nil {
+			if activeCtx.Err() != nil {
+				t.markPaused(onUpdate)
+				return activeCtx.Err()
+			}
+			t.fail(err.Error(), onUpdate)
+			return err
+		}
+		_ = os.Remove(partPath)
+		t.mu.Lock()
+		t.SavePath = savePath
+		t.Filename = filepath.Base(savePath)
+		if fi, err := os.Stat(savePath); err == nil {
+			atomic.StoreInt64(&t.DownloadedBytes, fi.Size())
+			t.TotalBytes = fi.Size()
+		}
+		t.mu.Unlock()
+	} else if fmtExt, ok := NormalizeImageFormat(convertFmt); ok {
 		savePath = ReplaceExtension(savePath, fmtExt)
 		if err := ConvertImageFile(partPath, savePath, fmtExt); err != nil {
 			t.fail(fmt.Sprintf("image conversion to %s failed: %v", fmtExt, err), onUpdate)
@@ -706,6 +756,9 @@ func (t *Task) Clone() *Task {
 		IsHLS:           t.IsHLS,
 		Plan:            t.Plan.Clone(),
 		ConvertFormat:   t.ConvertFormat,
+		TargetFormat:    t.TargetFormat,
+		OutputFormat:    t.OutputFormat,
+		AudioBitrate:    t.AudioBitrate,
 		NumSegments:     t.NumSegments,
 		ErrorMessage:    t.ErrorMessage,
 		Retries:         t.Retries,

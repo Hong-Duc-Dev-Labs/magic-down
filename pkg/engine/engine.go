@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -27,6 +28,9 @@ type AddTaskRequest struct {
 	Cookies       string            `json:"cookies,omitempty"`
 	Headers       map[string]string `json:"headers,omitempty"`
 	ConvertFormat string            `json:"convert_format,omitempty"`
+	TargetFormat  string            `json:"target_format,omitempty"`
+	OutputFormat  string            `json:"output_format,omitempty"`
+	AudioBitrate  string            `json:"audio_bitrate,omitempty"`
 	Plan          *DownloadPlan     `json:"plan,omitempty"`
 	AutoStart     bool              `json:"auto_start"`
 	StartPaused   bool              `json:"start_paused,omitempty"`
@@ -178,9 +182,35 @@ func (e *Engine) AddTask(req AddTaskRequest) (*Task, error) {
 		filename = ReplaceExtension(filename, convertFmt)
 	}
 
+	rawOutputFmt := req.OutputFormat
+	if rawOutputFmt == "" && plan != nil {
+		rawOutputFmt = plan.OutputFormat
+	}
+	outputFmt, _ := NormalizeOutputFormat(rawOutputFmt)
+
+	rawBitrate := req.AudioBitrate
+	if rawBitrate == "" && plan != nil {
+		rawBitrate = plan.AudioBitrate
+	}
+	audioBitrate := ""
+	if outputFmt == "mp3" {
+		audioBitrate = NormalizeAudioBitrate(rawBitrate)
+		if filename == "" {
+			filename = SanitizeFilename(ExtractFilename(req.URL, nil))
+		}
+		filename = ReplaceExtension(filename, "mp3")
+	}
+
+	targetFmt := strings.ToLower(strings.TrimSpace(req.TargetFormat))
+	if targetFmt == "" && plan != nil {
+		targetFmt = plan.TargetFormat
+	}
+
 	category := req.Category
 	if category == "" {
-		if req.AudioURL != "" {
+		if outputFmt == "mp3" {
+			category = CategoryMusic
+		} else if req.AudioURL != "" {
 			category = CategoryVideo
 		} else {
 			category = CategoryForFilename(filename, req.URL)
@@ -209,6 +239,9 @@ func (e *Engine) AddTask(req AddTaskRequest) (*Task, error) {
 		Cookies:       req.Cookies,
 		Headers:       req.Headers,
 		ConvertFormat: convertFmt,
+		TargetFormat:  targetFmt,
+		OutputFormat:  outputFmt,
+		AudioBitrate:  audioBitrate,
 		Plan:          plan,
 		IsHLS:         plan == nil && req.AudioURL == "" && IsHLSURL(req.URL, ""),
 		CreatedAt:     time.Now(),

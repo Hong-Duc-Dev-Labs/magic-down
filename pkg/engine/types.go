@@ -61,6 +61,9 @@ type Task struct {
 	IsHLS           bool              `json:"is_hls,omitempty"`
 	Plan            *DownloadPlan     `json:"plan,omitempty"`
 	ConvertFormat   string            `json:"convert_format,omitempty"`
+	TargetFormat    string            `json:"target_format,omitempty"`
+	OutputFormat    string            `json:"output_format,omitempty"`
+	AudioBitrate    string            `json:"audio_bitrate,omitempty"`
 	NumSegments     int               `json:"num_segments"`
 	Segments        []*Segment        `json:"segments"`
 	ErrorMessage    string            `json:"error_message,omitempty"`

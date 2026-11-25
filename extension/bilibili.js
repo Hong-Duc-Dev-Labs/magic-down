@@ -441,6 +441,38 @@
 
     if (variants.length === 0) return null;
 
+    const mp3Source =
+      variants.find((v) => v.streamType === "audio-only") ||
+      variants.find((v) => v.url) ||
+      null;
+    const mp3Variants = mp3Source
+      ? [
+          { quality: "MP3 · 320 kbps", bitrate: "320k", kbps: 320 },
+          { quality: "MP3 · 192 kbps", bitrate: "192k", kbps: 192 },
+          { quality: "MP3 · 128 kbps", bitrate: "128k", kbps: 128 }
+        ].map((preset) => ({
+          url: mp3Source.url,
+          quality: preset.quality,
+          height: 0,
+          width: 0,
+          fps: 0,
+          bandwidth: preset.kbps * 1000,
+          size: 0,
+          format: "MP3",
+          ext: "mp3",
+          outputFormat: "mp3",
+          audioBitrate: preset.bitrate,
+          isHLS: false,
+          source: "bilibili",
+          streamType: "audio-mp3",
+          hasVideo: false,
+          hasAudio: true,
+          title,
+          referrer,
+          headers: { ...reqHeaders }
+        }))
+      : [];
+
     const thumbnail = extractBilibiliThumbnail(
       (meta && (meta.cover || meta.initialState)) || rawPayload.cover || rawPayload.initialState,
       meta && meta.ogImage
@@ -451,6 +483,7 @@
       title,
       pageUrl,
       variants,
+      mp3Variants,
       thumbnail,
       at: Date.now()
     };

@@ -156,3 +156,79 @@ test("parseYouTubePlayerPayload tracks signatureCipher and DRM formats cleanly",
   assert.equal(parsed.cipherOnlyCount, 2);
   assert.equal(parsed.drmDetected, true);
 });
+
+test("parseYouTubePlayerPayload prefers H.264/avc1 MP4 over av01, pairs WebM fallback as MP4, and builds 3 MP3 variants", () => {
+  const parsed = yt.parseYouTubePlayerPayload({
+    videoId: "mp4Mp3Test1",
+    title: "4K Music Video",
+    adaptiveFormats: [
+      {
+        itag: 399,
+        url: "https://rr1.googlevideo.com/videoplayback?itag=399",
+        mimeType: 'video/mp4; codecs="av01.0.08M.08"',
+        qualityLabel: "1080p",
+        width: 1920,
+        height: 1080,
+        fps: 30,
+        bitrate: 4500000,
+        contentLength: 70000000
+      },
+      {
+        itag: 137,
+        url: "https://rr1.googlevideo.com/videoplayback?itag=137",
+        mimeType: 'video/mp4; codecs="avc1.640028"',
+        qualityLabel: "1080p",
+        width: 1920,
+        height: 1080,
+        fps: 30,
+        bitrate: 3200000,
+        contentLength: 60000000
+      },
+      {
+        itag: 313,
+        url: "https://rr1.googlevideo.com/videoplayback?itag=313",
+        mimeType: 'video/webm; codecs="vp9"',
+        qualityLabel: "2160p",
+        width: 3840,
+        height: 2160,
+        fps: 30,
+        bitrate: 15000000,
+        contentLength: 200000000
+      },
+      {
+        itag: 251,
+        url: "https://rr1.googlevideo.com/videoplayback?itag=251",
+        mimeType: 'audio/webm; codecs="opus"',
+        bitrate: 160000,
+        contentLength: 4000000
+      }
+    ]
+  });
+
+  assert.ok(parsed);
+  const muxed1080 = parsed.variants.find((v) => v.height === 1080 && v.streamType === "muxed");
+  assert.ok(muxed1080);
+  assert.equal(muxed1080.itag, 137); // avc1 preferred over higher-bitrate av01
+  assert.equal(muxed1080.format, "MP4");
+  assert.equal(muxed1080.ext, "mp4");
+  assert.equal(muxed1080.targetFormat, "mp4");
+
+  const muxed4k = parsed.variants.find((v) => v.height === 2160 && v.streamType === "muxed");
+  assert.ok(muxed4k);
+  assert.equal(muxed4k.itag, 313); // WebM-only 4K still outputs MP4 with targetFormat='mp4'
+  assert.equal(muxed4k.format, "MP4");
+  assert.equal(muxed4k.ext, "mp4");
+  assert.equal(muxed4k.targetFormat, "mp4");
+  assert.equal(muxed4k.audioUrl, "https://rr1.googlevideo.com/videoplayback?itag=251");
+
+  assert.equal(parsed.mp3Variants.length, 3);
+  assert.deepEqual(
+    parsed.mp3Variants.map((m) => [m.quality, m.outputFormat, m.audioBitrate, m.ext]),
+    [
+      ["MP3 · 320 kbps", "mp3", "320k", "mp3"],
+      ["MP3 · 192 kbps", "mp3", "192k", "mp3"],
+      ["MP3 · 128 kbps", "mp3", "128k", "mp3"]
+    ]
+  );
+  assert.equal(parsed.mp3Variants[0].url, "https://rr1.googlevideo.com/videoplayback?itag=251");
+});
