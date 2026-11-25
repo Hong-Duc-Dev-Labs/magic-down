@@ -528,7 +528,8 @@ function getMediaDedupKey(rawUrl) {
   }
 }
 
-// Weibo exposes rendition hints as ?label=mp4_720p or ?template=720x1280.24.0.
+// Weibo exposes rendition hints as ?label=mp4_720p, ?label=mp4_hd, ?label=mp4_ld,
+// ?label=mp4_2k, ?label=mp4_4k or ?template=720x1280.24.0.
 // Facebook exposes rendition hints inside base64-encoded ?efg= JSON.
 function inferQualityFromUrl(rawUrl) {
   try {
@@ -538,6 +539,12 @@ function inferQualityFromUrl(rawUrl) {
     if (labelMatch) {
       const height = Number.parseInt(labelMatch[1], 10);
       if (height >= 144 && height <= 4320) return { quality: `${height}p`, height };
+    }
+    if (label.includes("4k")) return { quality: "2160p", height: 2160 };
+    if (label.includes("2k")) return { quality: "1440p", height: 1440 };
+    if (label === "mp4_hd" || label.endsWith("_hd")) return { quality: "720p", height: 720 };
+    if (label === "mp4_ld" || label.endsWith("_ld") || label === "mp4_sd" || label.endsWith("_sd")) {
+      return { quality: "360p", height: 360 };
     }
     const template = u.searchParams.get("template") || "";
     const templateMatch = template.match(/(\d{3,4})x(\d{3,4})/i);

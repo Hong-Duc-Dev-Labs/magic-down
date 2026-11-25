@@ -223,18 +223,139 @@
     // ignore
   }
 
+  // --- Weibo JSON API variant extraction -------------------------------------
+  // Weibo feed/detail APIs return playback_list & media_info with all available
+  // resolutions (1080p/720p/480p/360p) per post. Extracting them here lets
+  // content.js show exact resolutions for the active video without stacking.
+  function isWeiboApiURL(url) {
+    try {
+      const u = new URL(url, location.href);
+      const host = u.hostname.toLowerCase();
+      if (host !== "weibo.com" && !host.endsWith(".weibo.com") && host !== "weibo.cn" && !host.endsWith(".weibo.cn")) {
+        return false;
+      }
+      return /\/(?:ajax|tv\/api|api)\//i.test(u.pathname);
+    } catch {
+      return false;
+    }
+  }
+
+  function parseWeiboQuality(label, width, height) {
+    const low = String(label || "").toLowerCase();
+    const m = low.match(/(\d{3,4})p/);
+    if (m) {
+      const h = Number.parseInt(m[1], 10);
+      if (h >= 144 && h <= 4320) return { quality: `${h}p`, height: h };
+    }
+    if (low.includes("4k")) return { quality: "2160p", height: 2160 };
+    if (low.includes("2k")) return { quality: "1440p", height: 1440 };
+    if (width > 0 && height > 0) {
+      const h = Math.min(width, height);
+      if (h >= 144 && h <= 4320) return { quality: `${h}p`, height: h };
+    }
+    if (low === "mp4_hd" || low.endsWith("_hd")) return { quality: "720p", height: 720 };
+    if (low === "mp4_ld" || low.endsWith("_ld") || low === "mp4_sd" || low.endsWith("_sd")) {
+      return { quality: "360p", height: 360 };
+    }
+    return { quality: "Original", height: 0 };
+  }
+
+  function extractWeiboGroups(data) {
+    const groups = [];
+    const stack = [data];
+    let guard = 0;
+    while (stack.length > 0 && guard < 6000) {
+      guard++;
+      const node = stack.pop();
+      if (!node || typeof node !== "object") continue;
+      if (Array.isArray(node)) {
+        for (let i = 0; i < node.length; i++) stack.push(node[i]);
+        continue;
+      }
+
+      if (Array.isArray(node.playback_list) && node.playback_list.length > 0) {
+        const variants = [];
+        for (const entry of node.playback_list) {
+          const info = entry && entry.play_info;
+          const meta = entry && entry.meta;
+          const url = info && typeof info.url === "string" ? info.url : "";
+          if (!url || !/^https?:/i.test(url)) continue;
+          const label = (meta && (meta.quality_label || meta.label)) || "";
+          const w = Number(info.width) || 0;
+          const h = Number(info.height) || 0;
+          const q = parseWeiboQuality(label, w, h);
+          variants.push({
+            url: url.slice(0, MAX_URL),
+            quality: q.quality,
+            height: q.height,
+            size: Number(info.size || (meta && meta.size)) || 0,
+            bandwidth: Number(info.bitrate || (meta && meta.bitrate)) || 0,
+            format: /webm/i.test(String(info.mime || "")) ? "WebM" : "MP4"
+          });
+        }
+        if (variants.length > 0) {
+          const id = String(node.media_id || node.media_id_str || node.object_id || variants[0].url);
+          groups.push({ id, variants });
+        }
+      }
+
+      for (const key of Object.keys(node)) {
+        const val = node[key];
+        if (val && typeof val === "object") stack.push(val);
+      }
+    }
+    return groups;
+  }
+
+  function inspectWeiboJsonText(text) {
+    if (!text || text.length > 4 * 1024 * 1024 || !text.includes("playback_list")) return;
+    try {
+      const parsed = JSON.parse(text);
+      const groups = extractWeiboGroups(parsed);
+      if (groups.length === 0) return;
+      const at = Date.now();
+      for (const g of groups.slice(0, 30)) {
+        const entry = { k: "weibo-group", id: g.id, v: g.variants, t: at };
+        items.push(entry);
+        if (items.length > MAX_ITEMS) items.splice(0, items.length - MAX_ITEMS);
+        pending.push(entry);
+        if (pending.length > MAX_ITEMS) pending.splice(0, pending.length - MAX_ITEMS);
+      }
+      scheduleFlush();
+    } catch {
+      // ignore non-JSON responses
+    }
+  }
+
   // --- fetch / XHR / sendBeacon ----------------------------------------------
   try {
     if (typeof window.fetch === "function") {
       wrapMethod(window, "fetch", (original) =>
         function (input) {
+          let url = "";
           try {
-            const url = typeof input === "string" ? input : input && input.url;
+            url = typeof input === "string" ? input : (input && input.url) || "";
             if (url) note(String(url), "fetch", "");
           } catch {
             // ignore
           }
-          return original.apply(this, arguments);
+          const promise = original.apply(this, arguments);
+          try {
+            if (url && isWeiboApiURL(url) && promise && typeof promise.then === "function") {
+              promise.then((resp) => {
+                try {
+                  if (resp && resp.ok && typeof resp.clone === "function") {
+                    resp.clone().text().then(inspectWeiboJsonText).catch(() => {});
+                  }
+                } catch {
+                  // ignore
+                }
+              }).catch(() => {});
+            }
+          } catch {
+            // ignore
+          }
+          return promise;
         }
       );
     }
@@ -247,7 +368,22 @@
       wrapMethod(XMLHttpRequest.prototype, "open", (original) =>
         function (method, url) {
           try {
-            if (url) note(String(url), "xhr", "");
+            if (url) {
+              const strUrl = String(url);
+              note(strUrl, "xhr", "");
+              if (isWeiboApiURL(strUrl) && !this.__mdWeiboHooked) {
+                this.__mdWeiboHooked = true;
+                this.addEventListener("load", () => {
+                  try {
+                    if (typeof this.responseText === "string") {
+                      inspectWeiboJsonText(this.responseText);
+                    }
+                  } catch {
+                    // ignore
+                  }
+                });
+              }
+            }
           } catch {
             // ignore
           }

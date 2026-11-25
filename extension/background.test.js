@@ -4,6 +4,7 @@ const assert = require("node:assert/strict");
 const {
   normalizeMediaUrl,
   getMediaDedupKey,
+  inferQualityFromUrl,
   classifyMediaResponse,
   addDetectedVideo,
   getTabVideoList,
@@ -129,4 +130,31 @@ test("Progressive MP4 with full Content-Length or Content-Range total preserves 
   assert.ok(media);
   assert.equal(media.size, 15728640);
   assert.equal(media.quality, "1080p");
+});
+
+test("Weibo URL quality inference handles mp4_1080p, mp4_720p, mp4_hd, mp4_ld, mp4_2k, mp4_4k and template", () => {
+  assert.deepEqual(
+    inferQualityFromUrl("https://f.video.weibocdn.com/o0/abc.mp4?label=mp4_1080p&template=1080x1920.24.0"),
+    { quality: "1080p", height: 1080 }
+  );
+  assert.deepEqual(
+    inferQualityFromUrl("https://f.video.weibocdn.com/o0/abc.mp4?label=mp4_hd"),
+    { quality: "720p", height: 720 }
+  );
+  assert.deepEqual(
+    inferQualityFromUrl("https://f.video.weibocdn.com/o0/abc.mp4?label=mp4_ld"),
+    { quality: "360p", height: 360 }
+  );
+  assert.deepEqual(
+    inferQualityFromUrl("https://f.video.weibocdn.com/o0/abc.mp4?label=mp4_2k"),
+    { quality: "1440p", height: 1440 }
+  );
+  assert.deepEqual(
+    inferQualityFromUrl("https://f.video.weibocdn.com/o0/abc.mp4?label=mp4_4k"),
+    { quality: "2160p", height: 2160 }
+  );
+  assert.deepEqual(
+    inferQualityFromUrl("https://f.video.weibocdn.com/o0/abc.mp4?template=720x1280.24.0"),
+    { quality: "720p", height: 720 }
+  );
 });

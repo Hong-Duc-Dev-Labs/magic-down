@@ -23,6 +23,8 @@
   // offered for a video in the top document.
   const SNIFF_MSG = "magicdown:media-sniff:v1";
   const sniffed = new Map(); // url -> { kind, mime, at }
+  const weiboGroups = new Map(); // groupId -> { id, at, variants }
+  const weiboUrlToGroup = new Map(); // dedupKey -> groupId
   const manifestCache = new Map(); // manifest url -> { at, ok, kind, variants, reason }
   const pendingManifests = new Set();
   const videoTiming = new WeakMap(); // video -> { at }
@@ -70,6 +72,42 @@
     }
     if (kind === "drm") {
       sniffDrm = true;
+      return;
+    }
+    if (kind === "weibo-group" && Array.isArray(item.v) && item.v.length > 0) {
+      const id = String(item.id || item.v[0].url || at);
+      const variants = item.v
+        .filter((v) => v && typeof v.url === "string" && /^https?:/i.test(v.url))
+        .map((v) => ({
+          url: v.url,
+          quality: v.quality || inferQualityFromUrl(v.url).quality,
+          height: Number(v.height) || inferQualityFromUrl(v.url).height || 0,
+          size: Number(v.size) || 0,
+          bandwidth: Number(v.bandwidth) || 0,
+          format: v.format || "MP4",
+          isHLS: false,
+          source: "weibo"
+        }))
+        .sort((a, b) => (b.height || 0) - (a.height || 0) || (b.bandwidth || 0) - (a.bandwidth || 0) || (b.size || 0) - (a.size || 0));
+      if (variants.length > 0) {
+        weiboGroups.set(id, { id, at, variants });
+        for (const v of variants) {
+          weiboUrlToGroup.set(mediaDedupKey(v.url), id);
+        }
+        while (weiboGroups.size > 60) {
+          const oldestId = weiboGroups.keys().next().value;
+          const oldest = weiboGroups.get(oldestId);
+          weiboGroups.delete(oldestId);
+          if (oldest) {
+            for (const v of oldest.variants) {
+              if (weiboUrlToGroup.get(mediaDedupKey(v.url)) === oldestId) {
+                weiboUrlToGroup.delete(mediaDedupKey(v.url));
+              }
+            }
+          }
+        }
+        scheduleRefresh();
+      }
       return;
     }
     if (!url) return;
@@ -174,6 +212,38 @@
     return found;
   }
 
+  function inferQualityFromUrl(rawUrl) {
+    try {
+      const u = new URL(rawUrl, location.href);
+      const label = (u.searchParams.get("label") || "").toLowerCase();
+      const labelMatch = label.match(/(\d{3,4})p/);
+      if (labelMatch) {
+        const height = Number.parseInt(labelMatch[1], 10);
+        if (height >= 144 && height <= 4320) return { quality: `${height}p`, height };
+      }
+      if (label.includes("4k")) return { quality: "2160p", height: 2160 };
+      if (label.includes("2k")) return { quality: "1440p", height: 1440 };
+      if (label === "mp4_hd" || label.endsWith("_hd")) return { quality: "720p", height: 720 };
+      if (label === "mp4_ld" || label.endsWith("_ld") || label === "mp4_sd" || label.endsWith("_sd")) {
+        return { quality: "360p", height: 360 };
+      }
+      const template = u.searchParams.get("template") || "";
+      const templateMatch = template.match(/(\d{3,4})x(\d{3,4})/i);
+      if (templateMatch) {
+        const height = Math.min(Number.parseInt(templateMatch[1], 10), Number.parseInt(templateMatch[2], 10));
+        if (height >= 144 && height <= 4320) return { quality: `${height}p`, height };
+      }
+      const generic = rawUrl.match(/(?:^|[_\-/=?&])(2160|1440|1080|720|540|480|360|240)p(?:$|[_\-/.&?])/i);
+      if (generic) {
+        const height = Number.parseInt(generic[1], 10);
+        return { quality: `${height}p`, height };
+      }
+    } catch {
+      // ignore
+    }
+    return { quality: "Original", height: 0 };
+  }
+
   function collectDOMVideos(videoEl) {
     const found = [];
     const seen = new Set();
@@ -185,10 +255,12 @@
       if (low.includes("webm")) fmt = "WebM";
       else if (low.includes("mkv") || low.includes("matroska")) fmt = "MKV";
       else if (low.includes("m3u8")) fmt = "HLS";
-      const h = videoEl && videoEl.videoHeight ? videoEl.videoHeight : 0;
+      const inferred = inferQualityFromUrl(src);
+      const domH = videoEl && videoEl.videoHeight ? videoEl.videoHeight : 0;
+      const h = inferred.height || domH;
       found.push({
         url: src,
-        quality: h > 0 ? `${h}p` : "Original",
+        quality: inferred.height > 0 ? inferred.quality : (domH > 0 ? `${domH}p` : "Original"),
         height: h,
         format: fmt,
         isHLS: fmt === "HLS",
@@ -736,12 +808,72 @@
     // sniffer candidates would only duplicate its byte-range or segment probes
     // (e.g. the same .mp4 seen mid-range-request) as bogus "Original" entries.
     const directCandidates = collectDOMVideos(activeVideo);
+    const networkByKey = new Map();
+    for (const item of networkVideos) {
+      if (item && item.url) networkByKey.set(mediaDedupKey(item.url), item);
+    }
+
+    if (manifestCount === 0 && directCandidates.length > 0) {
+      // The active <video> has a direct HTTP(S) src: scope strictly to this
+      // video (and its Weibo multi-resolution group if known) so earlier feed
+      // videos never stack into this player's menu.
+      let matchedWeiboGroup = null;
+      for (const item of directCandidates) {
+        const gid = weiboUrlToGroup.get(mediaDedupKey(item.url));
+        if (gid && weiboGroups.has(gid)) {
+          matchedWeiboGroup = weiboGroups.get(gid);
+          break;
+        }
+      }
+      if (matchedWeiboGroup) {
+        for (const variant of matchedWeiboGroup.variants) {
+          push(mediaDedupKey(variant.url), variant);
+        }
+      }
+      for (const item of directCandidates) {
+        if (planURLs.has(item.url)) continue;
+        const key = mediaDedupKey(item.url);
+        const net = networkByKey.get(key);
+        const enriched = net
+          ? {
+              ...item,
+              size: item.size || net.size || 0,
+              height: item.height || net.height || 0,
+              quality: item.quality !== "Original" ? item.quality : (net.quality || item.quality)
+            }
+          : item;
+        push(key, enriched);
+      }
+      return Array.from(map.values());
+    }
+
     for (const item of directCandidates) {
       if (planURLs.has(item.url)) continue;
-      push(item.url, item);
+      push(mediaDedupKey(item.url), item);
     }
+
     if (manifestCount === 0) {
-      for (const item of networkVideos) push(mediaDedupKey(item.url), item);
+      // MSE/blob player with no direct src and no manifest: scope network
+      // detections to the active video's load window so feed videos do not
+      // accumulate across posts.
+      const timing = activeVideo ? videoTiming.get(activeVideo) : null;
+      let scopedNetwork = networkVideos;
+      if (timing && timing.at && networkVideos.length > 1) {
+        const near = networkVideos.filter(
+          (item) => item && item.detectedAt >= timing.at - 4000 && item.detectedAt <= timing.at + 60000
+        );
+        if (near.length > 0) scopedNetwork = near;
+      }
+      for (const item of scopedNetwork) {
+        const key = mediaDedupKey(item.url);
+        const gid = weiboUrlToGroup.get(key);
+        if (gid && weiboGroups.has(gid)) {
+          for (const variant of weiboGroups.get(gid).variants) {
+            push(mediaDedupKey(variant.url), variant);
+          }
+        }
+        push(key, item);
+      }
       for (const item of sniffedDirectVideos()) push(mediaDedupKey(item.url), item);
     }
     return Array.from(map.values());
