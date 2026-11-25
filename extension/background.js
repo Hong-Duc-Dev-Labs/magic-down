@@ -226,6 +226,10 @@ function notifyTabVideos(tabId) {
   }
 }
 
+function isGenericQuality(quality) {
+  return !quality || quality === "Original" || quality === "HLS";
+}
+
 function addDetectedVideo(tabId, item) {
   if (tabId < 0 || !item || !item.url) return;
   let map = tabVideos.get(tabId);
@@ -234,11 +238,22 @@ function addDetectedVideo(tabId, item) {
     tabVideos.set(tabId, map);
   }
   const existing = map.get(item.url);
-  map.set(item.url, {
+  const merged = {
     ...existing,
     ...item,
     size: item.size || (existing && existing.size) || 0
-  });
+  };
+  if (existing) {
+    // A later media-playlist probe of the same URL must not downgrade the
+    // variant metadata (resolution/bandwidth) parsed from the master playlist.
+    merged.height = item.height || existing.height || 0;
+    merged.bandwidth = item.bandwidth || existing.bandwidth || 0;
+    merged.resolution = item.resolution || existing.resolution || "";
+    if (isGenericQuality(item.quality) && !isGenericQuality(existing.quality)) {
+      merged.quality = existing.quality;
+    }
+  }
+  map.set(item.url, merged);
   notifyTabVideos(tabId);
 }
 
@@ -404,46 +419,68 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
 
 // --- Context Menus & Lifecycle ---
 
-function setupContextMenus() {
-  chrome.contextMenus.removeAll(() => {
-    chrome.contextMenus.create({
-      id: "magicdown-download",
-      title: "Download with MagicDown",
-      contexts: ["link", "video", "audio"]
-    });
-
-    // Nested MagicDown menu for right-clicked images with real format conversion
-    chrome.contextMenus.create({
-      id: "magicdown-image-parent",
-      title: "MagicDown",
-      contexts: ["image"]
-    });
-    chrome.contextMenus.create({
-      id: "magicdown-img-original",
-      parentId: "magicdown-image-parent",
-      title: "Download Image (Original)",
-      contexts: ["image"]
-    });
-    chrome.contextMenus.create({
-      id: "magicdown-img-png",
-      parentId: "magicdown-image-parent",
-      title: "Save Image as PNG",
-      contexts: ["image"]
-    });
-    chrome.contextMenus.create({
-      id: "magicdown-img-jpg",
-      parentId: "magicdown-image-parent",
-      title: "Save Image as JPG",
-      contexts: ["image"]
-    });
-    chrome.contextMenus.create({
-      id: "magicdown-img-webp",
-      parentId: "magicdown-image-parent",
-      title: "Save Image as WebP",
-      contexts: ["image"]
-    });
+// create() reports "duplicate id" via runtime.lastError when the item already
+// exists (menus survive service worker restarts). Swallow that one error so a
+// cold start can heal a missing menu without wiping the registered set.
+function createContextMenu(props) {
+  chrome.contextMenus.create(props, () => {
+    const err = chrome.runtime.lastError;
+    if (err && !/duplicate id/i.test(err.message || "")) {
+      console.warn("[MagicDown] context menu create failed:", props.id, err.message);
+    }
   });
 }
+
+function ensureContextMenus() {
+  createContextMenu({
+    id: "magicdown-download",
+    title: "Download with MagicDown",
+    contexts: ["link", "video", "audio"]
+  });
+
+  // Nested MagicDown menu for right-clicked images with real format conversion
+  createContextMenu({
+    id: "magicdown-image-parent",
+    title: "MagicDown",
+    contexts: ["image"]
+  });
+  createContextMenu({
+    id: "magicdown-img-original",
+    parentId: "magicdown-image-parent",
+    title: "Download Image (Original)",
+    contexts: ["image"]
+  });
+  createContextMenu({
+    id: "magicdown-img-png",
+    parentId: "magicdown-image-parent",
+    title: "Save Image as PNG",
+    contexts: ["image"]
+  });
+  createContextMenu({
+    id: "magicdown-img-jpg",
+    parentId: "magicdown-image-parent",
+    title: "Save Image as JPG",
+    contexts: ["image"]
+  });
+  createContextMenu({
+    id: "magicdown-img-webp",
+    parentId: "magicdown-image-parent",
+    title: "Save Image as WebP",
+    contexts: ["image"]
+  });
+}
+
+function setupContextMenus() {
+  chrome.contextMenus.removeAll(() => {
+    ensureContextMenus();
+  });
+}
+
+// Menus persist across service worker restarts, but a worker that was replaced
+// while menus were never (re)registered would otherwise stay menu-less until the
+// next install/update. Re-assert them on every cold start; existing ids are
+// ignored by createContextMenu above.
+ensureContextMenus();
 
 chrome.runtime.onInstalled.addListener(async () => {
   const current = await chrome.storage.local.get([

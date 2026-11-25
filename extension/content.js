@@ -3,6 +3,7 @@
   window.__magicdownContentLoaded = true;
 
   const isExtensionEnv = typeof chrome !== "undefined" && Boolean(chrome.runtime && chrome.runtime.id);
+  const isTopFrame = window.top === window;
 
   let networkVideos = [];
   let dismissedVideos = new WeakSet();
@@ -37,6 +38,26 @@
       .slice(0, 80);
     const base = raw || "video";
     return `${base}.${ext}`;
+  }
+
+  // Walk the document plus open shadow roots: players are often mounted inside
+  // web components, where document.querySelectorAll("video") cannot see them.
+  function collectVideoElements(root) {
+    const found = [];
+    const seen = new Set();
+    const visit = (scope) => {
+      for (const video of scope.querySelectorAll("video")) {
+        if (!seen.has(video)) {
+          seen.add(video);
+          found.push(video);
+        }
+      }
+      for (const el of scope.querySelectorAll("*")) {
+        if (el.shadowRoot) visit(el.shadowRoot);
+      }
+    };
+    visit(root || document);
+    return found;
   }
 
   function collectDOMVideos(videoEl) {
@@ -196,6 +217,15 @@
         color: #64748B;
         white-space: nowrap;
       }
+      .md-empty {
+        font-size: 11.5px;
+        line-height: 1.45;
+        color: #94A3B8;
+        background: #141923;
+        border: 1px solid #212838;
+        border-radius: 11px;
+        padding: 9px 10px;
+      }
       .md-list {
         display: flex;
         flex-direction: column;
@@ -334,6 +364,14 @@
     const videos = getCombinedVideos();
     listEl.textContent = "";
 
+    if (videos.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "md-empty";
+      empty.textContent =
+        "No direct video URL detected. This player streams via blob/MSE (or DRM), so MagicDown has no file URL to hand to the desktop app.";
+      listEl.appendChild(empty);
+    }
+
     for (const v of videos) {
       const btn = document.createElement("button");
       btn.className = "md-item";
@@ -393,15 +431,19 @@
     dropdownEl.classList.remove("hidden");
   }
 
-  function positionOverlay() {
-    if (!overlayEl || !activeVideo || !document.contains(activeVideo) || dismissedVideos.has(activeVideo)) {
-      if (overlayEl) overlayEl.classList.add("hidden");
-      return;
-    }
+  function ensureHostParent() {
+    if (!hostEl) return;
+    const fsEl = document.fullscreenElement;
+    // Native <video> fullscreen is drawn on a browser layer that page content
+    // cannot overlay; for element fullscreen, move the overlay inside the
+    // fullscreen subtree so it is actually painted there.
+    const target = fsEl && fsEl.tagName !== "VIDEO" ? fsEl : document.documentElement;
+    if (hostEl.parentElement !== target) target.appendChild(hostEl);
+  }
 
-    const videos = getCombinedVideos();
-    if (videos.length === 0) {
-      overlayEl.classList.add("hidden");
+  function positionOverlay() {
+    if (!overlayEl || !activeVideo || !activeVideo.isConnected || dismissedVideos.has(activeVideo)) {
+      if (overlayEl) overlayEl.classList.add("hidden");
       return;
     }
 
@@ -411,7 +453,13 @@
       return;
     }
 
+    // Keep the control on players whose stream has no direct URL (blob/MSE):
+    // the dropdown then explains why it cannot be downloaded instead of
+    // silently leaving the user without any MagicDown affordance.
+    const videos = getCombinedVideos();
     countBadge.textContent = String(videos.length);
+    countBadge.style.display = videos.length > 0 ? "" : "none";
+
     const top = Math.max(8, rect.top + 10);
     const right = Math.max(8, window.innerWidth - rect.right + 10);
     overlayEl.style.top = `${top}px`;
@@ -421,7 +469,7 @@
   }
 
   function findPrimaryVideo() {
-    const all = Array.from(document.querySelectorAll("video"));
+    const all = collectVideoElements(document);
     let best = null;
     let bestArea = 0;
     for (const v of all) {
@@ -438,7 +486,8 @@
 
   function refresh() {
     ensureShadowUI();
-    if (!activeVideo || !document.contains(activeVideo) || dismissedVideos.has(activeVideo)) {
+    ensureHostParent();
+    if (!activeVideo || !activeVideo.isConnected || dismissedVideos.has(activeVideo)) {
       activeVideo = findPrimaryVideo();
     }
     positionOverlay();
@@ -448,7 +497,10 @@
   document.addEventListener(
     "mouseover",
     (e) => {
-      const target = e.target && e.target.closest ? e.target.closest("video") : null;
+      const path = typeof e.composedPath === "function" ? e.composedPath() : [];
+      const target =
+        path.find((node) => node && node.tagName === "VIDEO") ||
+        (e.target && e.target.closest ? e.target.closest("video") : null);
       if (target && !dismissedVideos.has(target)) {
         activeVideo = target;
         refresh();
@@ -457,26 +509,51 @@
     true
   );
 
+  // Nested scroll containers do not bubble scroll events to window, so listen
+  // in the capture phase and reposition the tag for every scrolled ancestor.
+  document.addEventListener("scroll", positionOverlay, { passive: true, capture: true });
   window.addEventListener("scroll", positionOverlay, { passive: true });
   window.addEventListener("resize", positionOverlay, { passive: true });
+  document.addEventListener(
+    "fullscreenchange",
+    () => {
+      ensureHostParent();
+      refresh();
+    },
+    true
+  );
 
-  const observer = new MutationObserver(() => refresh());
+  // Coalesce bursts of DOM mutations: refresh() performs layout reads and a
+  // deep <video> walk, which is too costly once per mutated node on busy pages.
+  let refreshTimer = 0;
+  const observer = new MutationObserver(() => {
+    if (refreshTimer) return;
+    refreshTimer = setTimeout(() => {
+      refreshTimer = 0;
+      refresh();
+    }, 150);
+  });
   observer.observe(document.documentElement, { childList: true, subtree: true });
 
   if (isExtensionEnv) {
-    chrome.runtime.onMessage.addListener((msg) => {
-      if (msg && msg.type === "videosUpdated" && Array.isArray(msg.videos)) {
-        networkVideos = msg.videos;
-        refresh();
-      }
-    });
-    chrome.runtime.sendMessage({ type: "getDetectedVideos" }, (resp) => {
-      if (chrome.runtime.lastError) return;
-      if (resp && Array.isArray(resp.videos)) {
-        networkVideos = resp.videos;
-        refresh();
-      }
-    });
+    // Tab-level network detections are shared by every frame, so only the top
+    // frame consumes them; a subframe would otherwise list streams that are not
+    // part of the video it is pinning the tag to.
+    if (isTopFrame) {
+      chrome.runtime.onMessage.addListener((msg) => {
+        if (msg && msg.type === "videosUpdated" && Array.isArray(msg.videos)) {
+          networkVideos = msg.videos;
+          refresh();
+        }
+      });
+      chrome.runtime.sendMessage({ type: "getDetectedVideos" }, (resp) => {
+        if (chrome.runtime.lastError) return;
+        if (resp && Array.isArray(resp.videos)) {
+          networkVideos = resp.videos;
+          refresh();
+        }
+      });
+    }
   } else if (Array.isArray(window.__MAGICDOWN_PREVIEW_VIDEOS)) {
     // Local preview hook for visual screenshot verification
     networkVideos = window.__MAGICDOWN_PREVIEW_VIDEOS;
