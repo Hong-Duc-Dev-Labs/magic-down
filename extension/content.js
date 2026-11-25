@@ -1124,26 +1124,52 @@
     if (hostEl.parentElement !== target) target.appendChild(hostEl);
   }
 
+  function visibleArea(rect) {
+    const x = Math.max(0, Math.min(rect.right, window.innerWidth) - Math.max(rect.left, 0));
+    const y = Math.max(0, Math.min(rect.bottom, window.innerHeight) - Math.max(rect.top, 0));
+    return x * y;
+  }
+
+  // Feed videos can be partially scrolled, hidden by a collapsed container, or
+  // removed without a mutation we notice; every positioning decision checks
+  // this instead of trusting that a connected <video> is still on screen.
+  function isVideoRenderable(video) {
+    if (!video || !video.isConnected || dismissedVideos.has(video)) return false;
+    const rect = video.getBoundingClientRect();
+    if (rect.width < 160 || rect.height < 90) return false;
+    if (visibleArea(rect) <= 0) return false;
+    try {
+      const style = window.getComputedStyle(video);
+      if (style.display === "none" || style.visibility === "hidden" || Number.parseFloat(style.opacity) === 0) {
+        return false;
+      }
+    } catch {
+      // ignore
+    }
+    return true;
+  }
+
+  function isVideoPlaying(video) {
+    return Boolean(video && !video.paused && !video.ended && video.readyState >= 2);
+  }
+
   function positionOverlay() {
     positionFrame = 0;
-    if (!overlayEl || !activeVideo || !activeVideo.isConnected || dismissedVideos.has(activeVideo)) {
-      if (overlayEl) overlayEl.classList.add("hidden");
-      return;
+    if (!overlayEl) return;
+
+    if (!isVideoRenderable(activeVideo)) {
+      // A feed scroll can leave the target off-screen. Retarget before hiding,
+      // otherwise the tag hangs where the video no longer is.
+      const candidate = findPrimaryVideo();
+      if (candidate) activeVideo = candidate;
+      if (!isVideoRenderable(activeVideo)) {
+        overlayEl.classList.add("hidden");
+        return;
+      }
     }
 
     const rect = activeVideo.getBoundingClientRect();
     const viewportH = window.innerHeight;
-    if (
-      rect.width < 160 ||
-      rect.height < 90 ||
-      rect.bottom <= 0 ||
-      rect.top >= viewportH ||
-      rect.right <= 0 ||
-      rect.left >= window.innerWidth
-    ) {
-      overlayEl.classList.add("hidden");
-      return;
-    }
 
     // Keep the control on players whose stream has no direct URL (blob/MSE):
     // the dropdown then explains why it cannot be downloaded instead of
@@ -1152,10 +1178,13 @@
     countBadge.textContent = String(videos.length);
     countBadge.style.display = videos.length > 0 ? "" : "none";
 
-    // Pin inside the active video's own box (top-right). Staying inside the box
-    // is what keeps the tag off a neighbouring feed video's controls.
-    const top = Math.min(Math.max(8, rect.top + 10), Math.max(8, viewportH - 64));
-    const right = Math.max(8, window.innerWidth - rect.right + 10);
+    // Pin inside the visible part of the active video's box (top-right). Staying
+    // inside the box keeps the tag off a neighbouring feed video's controls, and
+    // clamping to the visible area keeps tall portrait feed videos anchored.
+    const visibleTop = Math.max(0, rect.top);
+    const visibleRight = Math.min(window.innerWidth, rect.right);
+    const top = Math.min(Math.max(8, visibleTop + 10), Math.max(8, viewportH - 64));
+    const right = Math.max(8, window.innerWidth - visibleRight + 10);
     overlayEl.style.top = `${top}px`;
     overlayEl.style.right = `${right}px`;
     overlayEl.style.maxWidth = `${Math.max(200, Math.min(360, rect.width - 20))}px`;
@@ -1168,50 +1197,48 @@
     positionFrame = requestAnimationFrame(positionOverlay);
   }
 
-  // A feed can hover/auto-play several players; prefer the hovered one, then a
-  // playing video near the viewport centre so the tag follows what the user is
-  // actually watching instead of the largest box on the page.
-  function findPrimaryVideo() {
-    const all = collectVideoElements(document);
-    const viewportW = window.innerWidth;
-    const viewportH = window.innerHeight;
-    const visible = [];
-    for (const video of all) {
-      if (dismissedVideos.has(video)) continue;
-      const r = video.getBoundingClientRect();
-      if (r.width < 160 || r.height < 90) continue;
-      if (r.bottom <= 0 || r.top >= viewportH || r.right <= 0 || r.left >= viewportW) continue;
-      visible.push({ video, r });
-    }
-    if (visible.length === 0) {
-      // Fall back to the largest element even if the feed just scrolled it out;
-      // positionOverlay() hides the tag until it is visible again.
-      let best = null;
-      let bestArea = 0;
-      for (const video of all) {
-        if (dismissedVideos.has(video)) continue;
-        const r = video.getBoundingClientRect();
-        const area = r.width * r.height;
-        if (r.width >= 160 && r.height >= 90 && area > bestArea) {
-          best = video;
-          bestArea = area;
-        }
+  // Feed pages stack transparent click/control layers over <video>, so a hover
+  // event may never reach the element. Hit-test the video boxes by pointer
+  // coordinates as a fallback.
+  function findVideoAtPoint(clientX, clientY) {
+    let best = null;
+    let bestArea = Infinity;
+    for (const video of collectVideoElements(document)) {
+      if (!isVideoRenderable(video)) continue;
+      const rect = video.getBoundingClientRect();
+      if (clientX < rect.left || clientX > rect.right || clientY < rect.top || clientY > rect.bottom) continue;
+      const area = rect.width * rect.height;
+      if (area <= bestArea) {
+        best = video;
+        bestArea = area;
       }
-      return best;
     }
+    return best;
+  }
+
+  // A feed can auto-play several players; prefer the hovered one, then a
+  // playing video nearest the viewport centre, so the tag follows what the user
+  // is actually watching rather than the largest box on the page.
+  function findPrimaryVideo() {
+    const visible = [];
+    for (const video of collectVideoElements(document)) {
+      if (!isVideoRenderable(video)) continue;
+      visible.push({ video, rect: video.getBoundingClientRect() });
+    }
+    if (visible.length === 0) return null;
     if (hoveredVideo) {
       const hit = visible.find((entry) => entry.video === hoveredVideo);
       if (hit) return hit.video;
     }
+    const centerX = window.innerWidth / 2;
+    const centerY = window.innerHeight / 2;
     let best = null;
     let bestScore = -Infinity;
-    for (const { video, r } of visible) {
-      const centerX = r.left + r.width / 2;
-      const centerY = r.top + r.height / 2;
-      const distance = Math.hypot(centerX - viewportW / 2, centerY - viewportH / 2);
-      let score = -distance;
-      if (!video.paused && !video.ended) score += 1e6;
-      score += Math.min((r.width * r.height) / 1e6, 4);
+    for (const { video, rect } of visible) {
+      const visibleCenterX = (Math.max(0, rect.left) + Math.min(window.innerWidth, rect.right)) / 2;
+      const visibleCenterY = (Math.max(0, rect.top) + Math.min(window.innerHeight, rect.bottom)) / 2;
+      const distance = Math.hypot(visibleCenterX - centerX, visibleCenterY - centerY) * 10;
+      const score = (isVideoPlaying(video) ? 1e9 : 0) + visibleArea(rect) - distance;
       if (score > bestScore) {
         bestScore = score;
         best = video;
@@ -1220,14 +1247,25 @@
     return best;
   }
 
+  function activateVideo(video) {
+    if (dropdownOpen) return;
+    if (!isVideoRenderable(video) || activeVideo === video) return;
+    activeVideo = video;
+    refresh();
+  }
+
   function hookVideo(video) {
     if (!video || hookedVideos.has(video)) return;
     hookedVideos.add(video);
     const stamp = () => {
       videoTiming.set(video, { at: Date.now() });
+      activateVideo(video);
       scheduleRefresh();
     };
-    for (const event of ["play", "loadedmetadata", "loadeddata", "durationchange"]) {
+    // Autoplay-muted feed videos announce themselves via canplay/playing; media
+    // events from a shadow root do not reach document capture listeners, so the
+    // element itself must be observed.
+    for (const event of ["play", "playing", "canplay", "canplaythrough", "loadedmetadata", "loadeddata", "durationchange"]) {
       video.addEventListener(event, stamp, { passive: true });
     }
     video.addEventListener("resize", schedulePosition, { passive: true });
@@ -1237,16 +1275,13 @@
     ensureShadowUI();
     ensureHostParent();
     for (const video of collectVideoElements(document)) hookVideo(video);
-    if (!activeVideo || !activeVideo.isConnected || dismissedVideos.has(activeVideo)) {
+    if (!isVideoRenderable(activeVideo)) {
       activeVideo = findPrimaryVideo();
-    } else {
+    } else if (!dropdownOpen && hoveredVideo && isVideoRenderable(hoveredVideo) && hoveredVideo !== activeVideo) {
+      activeVideo = hoveredVideo;
+    } else if (!dropdownOpen && !isVideoPlaying(activeVideo)) {
       const candidate = findPrimaryVideo();
-      // Hover wins, and a playing video that scrolled to the centre takes over
-      // from a paused one; otherwise keep the current target stable.
-      if (candidate && hoveredVideo && candidate === hoveredVideo) activeVideo = candidate;
-      else if (candidate && !candidate.paused && (activeVideo.paused || !activeVideo.isConnected)) {
-        activeVideo = candidate;
-      }
+      if (candidate && candidate !== activeVideo && isVideoPlaying(candidate)) activeVideo = candidate;
     }
     // Position synchronously: requestAnimationFrame is paused while a window
     // is occluded/minimized, and a page load must not wait for a frame to show
@@ -1263,42 +1298,86 @@
     }, 150);
   }
 
-  // Hovering a video pins the floating tag to that player
+  // Hovering a video pins the floating tag to that player. A page overlay may
+  // swallow the event, so fall back to a coordinate hit-test against video boxes.
+  let hoverThrottleTimer = 0;
+  function handlePointerHover(e) {
+    if (dropdownOpen) return;
+    const path = typeof e.composedPath === "function" ? e.composedPath() : [];
+    let target =
+      path.find((node) => node && node.tagName === "VIDEO") ||
+      (e.target && e.target.closest ? e.target.closest("video") : null);
+    if (!target && Number.isFinite(e.clientX) && Number.isFinite(e.clientY)) {
+      target = findVideoAtPoint(e.clientX, e.clientY);
+    }
+    if (!target) {
+      const overOwnUI = path.some((node) => node === hostEl);
+      if (!overOwnUI) hoveredVideo = null;
+      return;
+    }
+    if (dismissedVideos.has(target) || !isVideoRenderable(target)) return;
+    hoveredVideo = target;
+    if (activeVideo !== target) {
+      activeVideo = target;
+      refresh();
+    } else {
+      schedulePosition();
+    }
+  }
+
+  document.addEventListener("mouseover", handlePointerHover, true);
   document.addEventListener(
-    "mouseover",
+    "pointermove",
     (e) => {
-      const path = typeof e.composedPath === "function" ? e.composedPath() : [];
-      const target =
-        path.find((node) => node && node.tagName === "VIDEO") ||
-        (e.target && e.target.closest ? e.target.closest("video") : null);
-      if (target && !dismissedVideos.has(target)) {
-        hoveredVideo = target;
-        if (activeVideo !== target) {
-          activeVideo = target;
-          refresh();
-        } else {
-          schedulePosition();
-        }
-      }
+      if (hoverThrottleTimer) return;
+      hoverThrottleTimer = setTimeout(() => {
+        hoverThrottleTimer = 0;
+        handlePointerHover(e);
+      }, 120);
     },
-    true
+    { passive: true, capture: true }
   );
 
-  // Playback/media events do not bubble, but a capture listener still sees
-  // them on the way down; the 150ms coalescer keeps feed bursts cheap.
-  for (const event of ["play", "loadedmetadata", "playing", "pause", "ended"]) {
+  // Playback/media events do not bubble, but a capture listener still sees them
+  // on the way down for light-DOM players (shadow players are hooked directly).
+  for (const event of ["play", "playing", "canplay", "canplaythrough"]) {
+    document.addEventListener(
+      event,
+      (e) => {
+        const target = e.target;
+        if (target && target.tagName === "VIDEO") {
+          videoTiming.set(target, { at: Date.now() });
+          activateVideo(target);
+        }
+        scheduleRefresh();
+      },
+      { passive: true, capture: true }
+    );
+  }
+  for (const event of ["pause", "ended", "loadedmetadata", "loadeddata", "durationchange"]) {
     document.addEventListener(event, scheduleRefresh, { passive: true, capture: true });
   }
 
   // Nested scroll containers do not bubble scroll events to window, so listen
-  // in the capture phase and reposition the tag for every scrolled ancestor.
-  // Repositioning goes through requestAnimationFrame so the tag tracks the
-  // scrolled video without drifting and without a style write per event.
-  document.addEventListener("scroll", schedulePosition, { passive: true, capture: true });
-  window.addEventListener("scroll", schedulePosition, { passive: true });
+  // in the capture phase. Each burst re-checks that the target video is still on
+  // screen and retargets before painting, so the tag never drifts or hangs.
+  function handleViewportChange() {
+    if (positionFrame) return;
+    positionFrame = requestAnimationFrame(() => {
+      positionFrame = 0;
+      if (!isVideoRenderable(activeVideo)) {
+        const candidate = findPrimaryVideo();
+        if (candidate) activeVideo = candidate;
+      }
+      positionOverlay();
+    });
+  }
+
+  document.addEventListener("scroll", handleViewportChange, { passive: true, capture: true });
+  window.addEventListener("scroll", handleViewportChange, { passive: true });
   window.addEventListener("resize", () => {
     scheduleRefresh();
-    schedulePosition();
+    handleViewportChange();
   }, { passive: true });
   document.addEventListener("visibilitychange", () => {
     if (!document.hidden) refresh();

@@ -1,5 +1,6 @@
 const HOST_NAME = "com.magicdown.downloader";
 const MAX_HISTORY = 25;
+const MAX_TAB_VIDEOS = 40;
 
 const DEFAULT_SETTINGS = {
   interceptEnabled: true,
@@ -260,7 +261,8 @@ function getTabVideoList(tabId) {
   return Array.from(map.values()).sort((a, b) => {
     if ((b.height || 0) !== (a.height || 0)) return (b.height || 0) - (a.height || 0);
     if ((b.bandwidth || 0) !== (a.bandwidth || 0)) return (b.bandwidth || 0) - (a.bandwidth || 0);
-    return (b.size || 0) - (a.size || 0);
+    if ((b.size || 0) !== (a.size || 0)) return (b.size || 0) - (a.size || 0);
+    return (b.detectedAt || 0) - (a.detectedAt || 0);
   });
 }
 
@@ -302,7 +304,8 @@ function addDetectedVideo(tabId, item) {
   const merged = {
     ...existing,
     ...item,
-    size: item.size || (existing && existing.size) || 0
+    size: item.size || (existing && existing.size) || 0,
+    detectedAt: Date.now()
   };
   if (existing) {
     // A later media-playlist probe of the same URL must not downgrade the
@@ -315,6 +318,12 @@ function addDetectedVideo(tabId, item) {
     }
   }
   map.set(item.url, merged);
+  // A long feed can expose hundreds of media URLs; keep the newest entries.
+  while (map.size > MAX_TAB_VIDEOS) {
+    const oldestKey = map.keys().next().value;
+    if (!oldestKey || oldestKey === item.url) break;
+    map.delete(oldestKey);
+  }
   notifyTabVideos(tabId);
 }
 
@@ -400,43 +409,179 @@ async function inspectHLSPlaylist(tabId, playlistUrl) {
   }
 }
 
+function parseContentRange(value) {
+  if (!value) return null;
+  const match = String(value).match(/bytes\s+(\d+)-(\d+)\/(\d+|\*)/i);
+  if (!match) return null;
+  const start = Number.parseInt(match[1], 10);
+  const total = match[3] === "*" ? 0 : Number.parseInt(match[3], 10);
+  if (!Number.isFinite(start) || start < 0) return null;
+  return { start, total: Number.isFinite(total) && total > 0 ? total : 0 };
+}
+
+// Facebook requests one stream in byte-range chunks by appending bytestart /
+// byteend to the same URL. Stripping them collapses hundreds of chunk requests
+// into one candidate and yields the full-stream URL.
+function normalizeMediaUrl(rawUrl) {
+  try {
+    const u = new URL(rawUrl);
+    const host = u.hostname.toLowerCase();
+    const isFbcdn = host === "fbcdn.net" || host.endsWith(".fbcdn.net");
+    const looksLikeMediaPath = /\.(?:mp4|m4v|m4s|webm|flv|mov|mkv|ts)$/i.test(u.pathname);
+    const hasRangeParams = u.searchParams.has("bytestart") || u.searchParams.has("byteend");
+    // bytestart/byteend are Facebook's chunk selectors; the same params on a
+    // media-extension URL are the same pattern behind a proxy/CDN hostname.
+    if (hasRangeParams && (isFbcdn || looksLikeMediaPath)) {
+      u.searchParams.delete("bytestart");
+      u.searchParams.delete("byteend");
+      return { url: u.toString(), strippedRange: true };
+    }
+    return { url: u.toString(), strippedRange: false };
+  } catch {
+    return { url: rawUrl, strippedRange: false };
+  }
+}
+
+// Weibo exposes rendition hints as ?label=mp4_720p or ?template=720x1280.24.0.
+function inferQualityFromUrl(rawUrl) {
+  try {
+    const u = new URL(rawUrl);
+    const label = (u.searchParams.get("label") || "").toLowerCase();
+    const labelMatch = label.match(/(\d{3,4})p/);
+    if (labelMatch) {
+      const height = Number.parseInt(labelMatch[1], 10);
+      if (height >= 144 && height <= 4320) return { quality: `${height}p`, height };
+    }
+    const template = u.searchParams.get("template") || "";
+    const templateMatch = template.match(/(\d{3,4})x(\d{3,4})/i);
+    if (templateMatch) {
+      const height = Math.min(Number.parseInt(templateMatch[1], 10), Number.parseInt(templateMatch[2], 10));
+      if (height >= 144 && height <= 4320) return { quality: `${height}p`, height };
+    }
+    const generic = rawUrl.match(/(?:^|[_\-/=?&])(2160|1440|1080|720|540|480|360|240)p(?:$|[_\-/.&?])/i);
+    if (generic) {
+      const height = Number.parseInt(generic[1], 10);
+      return { quality: `${height}p`, height };
+    }
+  } catch {
+    // ignore
+  }
+  return { quality: "Original", height: 0 };
+}
+
+// Weibo/Facebook CDNs often serve video bytes without a media extension and as
+// application/octet-stream; URL shape and range params are the only signals
+// webRequest gives us.
+function isKnownSocialVideoURL(rawUrl) {
+  try {
+    const u = new URL(rawUrl);
+    const host = u.hostname.toLowerCase();
+    const path = u.pathname.toLowerCase();
+    const label = (u.searchParams.get("label") || "").toLowerCase();
+    if (host === "weibocdn.com" || host.endsWith(".weibocdn.com")) {
+      return (
+        label.startsWith("mp4_") ||
+        u.searchParams.has("template") ||
+        path.includes("/o0/") ||
+        path.includes("/o1/") ||
+        path.includes(".mp4") ||
+        path.includes(".flv")
+      );
+    }
+    if (host.endsWith(".sinaimg.cn")) {
+      return label.startsWith("mp4_") || path.includes("video");
+    }
+    if (host === "fbcdn.net" || host.endsWith(".fbcdn.net")) {
+      return (
+        path.includes(".mp4") ||
+        host.startsWith("video") ||
+        u.searchParams.has("bytestart") ||
+        u.searchParams.has("byteend")
+      );
+    }
+  } catch {
+    // ignore
+  }
+  return false;
+}
+
 function classifyMediaResponse(url, headers) {
-  const lowerUrl = url.toLowerCase().split("?")[0];
+  const { url: mediaUrl, strippedRange } = normalizeMediaUrl(url);
+  const lowerPath = mediaUrl.toLowerCase().split("?")[0].split("#")[0];
   let contentType = "";
   let contentLength = 0;
+  let contentRange = null;
 
   if (Array.isArray(headers)) {
     for (const h of headers) {
       const name = (h.name || "").toLowerCase();
       if (name === "content-type") contentType = (h.value || "").toLowerCase();
       if (name === "content-length") contentLength = Number.parseInt(h.value || "0", 10) || 0;
+      if (name === "content-range") contentRange = parseContentRange(h.value);
     }
   }
 
-  // HLS playlist
-  if (
-    lowerUrl.endsWith(".m3u8") ||
-    contentType.includes("mpegurl") ||
-    contentType.includes("x-mpegurl")
-  ) {
-    return { kind: "hls", format: "HLS", size: contentLength };
+  // Audio-only DASH tracks are not a video candidate.
+  if (contentType.startsWith("audio/") && !contentType.includes("mpegurl")) {
+    return null;
   }
 
-  // Skip tiny segment/range probes (< 256 KB) for direct video files
+  // A 206 response only reports the chunk length; Content-Range carries the
+  // full resource size, which is what the tiny-probe filter must judge.
+  const effectiveSize = (contentRange && contentRange.total) || contentLength;
+  const quality = inferQualityFromUrl(mediaUrl);
+  const tiny = effectiveSize > 0 && effectiveSize < 256 * 1024;
+
+  if (lowerPath.endsWith(".m3u8") || contentType.includes("mpegurl") || contentType.includes("x-mpegurl")) {
+    return { kind: "hls", url: mediaUrl, format: "HLS", size: effectiveSize, ...quality };
+  }
+
+  // DASH manifests are parsed by the page's content script (it has DOMParser and
+  // the frame-local player); a bare MPD URL is not a downloadable file.
+  if (lowerPath.endsWith(".mpd") || contentType.includes("dash+xml")) {
+    return null;
+  }
+
+  const formatsByExt = [
+    [".mp4", "MP4"],
+    [".m4v", "MP4"],
+    [".webm", "WebM"],
+    [".mkv", "MKV"],
+    [".mov", "MOV"],
+    [".flv", "FLV"]
+  ];
+
   if (contentType.startsWith("video/") && !contentType.includes("mp2t")) {
     let format = "MP4";
-    if (contentType.includes("webm") || lowerUrl.endsWith(".webm")) format = "WebM";
-    else if (contentType.includes("matroska") || lowerUrl.endsWith(".mkv")) format = "MKV";
-    else if (contentType.includes("quicktime") || lowerUrl.endsWith(".mov")) format = "MOV";
-    if (contentLength > 0 && contentLength < 256 * 1024) return null;
-    return { kind: "direct", format, size: contentLength };
+    if (contentType.includes("webm") || lowerPath.endsWith(".webm")) format = "WebM";
+    else if (contentType.includes("matroska") || lowerPath.endsWith(".mkv")) format = "MKV";
+    else if (contentType.includes("quicktime") || lowerPath.endsWith(".mov")) format = "MOV";
+    else if (contentType.includes("flv") || lowerPath.endsWith(".flv")) format = "FLV";
+    if (tiny) return null;
+    return { kind: "direct", url: mediaUrl, format, size: effectiveSize, ...quality };
   }
 
-  for (const [ext, fmt] of [[".mp4", "MP4"], [".webm", "WebM"], [".mkv", "MKV"], [".mov", "MOV"]]) {
-    if (lowerUrl.endsWith(ext)) {
-      if (contentLength > 0 && contentLength < 256 * 1024) return null;
-      return { kind: "direct", format: fmt, size: contentLength };
+  for (const [ext, format] of formatsByExt) {
+    if (lowerPath.endsWith(ext)) {
+      if (tiny) return null;
+      return { kind: "direct", url: mediaUrl, format, size: effectiveSize, ...quality };
     }
+  }
+
+  // application/octet-stream (Weibo) or extension-less CDN chunks: only trust
+  // known media hosts, explicit range params, or a rendition label.
+  const looksBinary = contentType.includes("octet-stream") || contentType.includes("binary/") || contentType === "";
+  if (looksBinary || strippedRange) {
+    if (!isKnownSocialVideoURL(mediaUrl) && !strippedRange) return null;
+    if (tiny) return null;
+    const format = lowerPath.includes(".flv") ? "FLV" : "MP4";
+    return { kind: "direct", url: mediaUrl, format, size: effectiveSize, ...quality };
+  }
+
+  if (isKnownSocialVideoURL(mediaUrl)) {
+    if (tiny) return null;
+    const format = lowerPath.includes(".flv") ? "FLV" : "MP4";
+    return { kind: "direct", url: mediaUrl, format, size: effectiveSize, ...quality };
   }
   return null;
 }
@@ -451,11 +596,12 @@ if (chrome.webRequest && chrome.webRequest.onHeadersReceived) {
       if (!media) return;
 
       if (media.kind === "hls") {
-        inspectHLSPlaylist(details.tabId, details.url);
+        inspectHLSPlaylist(details.tabId, media.url);
       } else {
         addDetectedVideo(details.tabId, {
-          url: details.url,
-          quality: "Original",
+          url: media.url,
+          quality: media.quality || "Original",
+          height: media.height || 0,
           format: media.format,
           size: media.size,
           isHLS: false
