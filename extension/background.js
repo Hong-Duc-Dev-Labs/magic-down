@@ -300,16 +300,17 @@ function addDetectedVideo(tabId, item) {
     map = new Map();
     tabVideos.set(tabId, map);
   }
-  const existing = map.get(item.url);
+  const key = getMediaDedupKey(item.url);
+  const existing = map.get(key);
   const merged = {
     ...existing,
     ...item,
-    size: item.size || (existing && existing.size) || 0,
+    size: Math.max(item.size || 0, (existing && existing.size) || 0),
     detectedAt: Date.now()
   };
   if (existing) {
-    // A later media-playlist probe of the same URL must not downgrade the
-    // variant metadata (resolution/bandwidth) parsed from the master playlist.
+    // A later media-playlist probe or chunk of the same stream must not
+    // downgrade the variant metadata (resolution/bandwidth) already known.
     merged.height = item.height || existing.height || 0;
     merged.bandwidth = item.bandwidth || existing.bandwidth || 0;
     merged.resolution = item.resolution || existing.resolution || "";
@@ -317,11 +318,11 @@ function addDetectedVideo(tabId, item) {
       merged.quality = existing.quality;
     }
   }
-  map.set(item.url, merged);
+  map.set(key, merged);
   // A long feed can expose hundreds of media URLs; keep the newest entries.
   while (map.size > MAX_TAB_VIDEOS) {
     const oldestKey = map.keys().next().value;
-    if (!oldestKey || oldestKey === item.url) break;
+    if (!oldestKey || oldestKey === key) break;
     map.delete(oldestKey);
   }
   notifyTabVideos(tabId);
@@ -419,21 +420,83 @@ function parseContentRange(value) {
   return { start, total: Number.isFinite(total) && total > 0 ? total : 0 };
 }
 
-// Facebook requests one stream in byte-range chunks by appending bytestart /
-// byteend to the same URL. Stripping them collapses hundreds of chunk requests
-// into one candidate and yields the full-stream URL.
+const RANGE_QUERY_PARAMS = new Set([
+  "bytestart",
+  "byteend",
+  "byte_start",
+  "byte_end",
+  "range",
+  "bytes"
+]);
+
+const EPHEMERAL_QUERY_PARAMS = new Set([
+  ...RANGE_QUERY_PARAMS,
+  "rn",
+  "rbuf",
+  "sq",
+  "rid",
+  "_nc_rid",
+  "cb",
+  "cachebuster",
+  "_"
+]);
+
+function isFbcdnHost(host) {
+  return host === "fbcdn.net" || host.endsWith(".fbcdn.net");
+}
+
+function parseFacebookEfg(rawUrl) {
+  try {
+    const u = new URL(rawUrl);
+    if (!isFbcdnHost(u.hostname.toLowerCase())) return null;
+    const raw = u.searchParams.get("efg");
+    if (!raw || raw.length > 2048) return null;
+    const base64 = raw.replace(/-/g, "+").replace(/_/g, "/");
+    const padded = base64 + "=".repeat((4 - (base64.length % 4)) % 4);
+    const decoded = atob(padded);
+    const parsed = JSON.parse(decoded);
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function isDashSegmentUrl(rawUrl, contentType) {
+  const lowerPath = String(rawUrl || "").toLowerCase().split("?")[0].split("#")[0];
+  if (/\.(?:m4s|cmfv|cmfa|cmf|f4f|f4s|m4f)$/i.test(lowerPath)) {
+    return true;
+  }
+  const ct = String(contentType || "").toLowerCase();
+  if (ct.includes("iso.segment")) {
+    return true;
+  }
+  return false;
+}
+
+// Facebook and similar DASH CDNs request one stream in byte-range chunks by
+// appending bytestart/byteend/range/bytes to the same URL. Stripping them
+// collapses hundreds of chunk requests into one candidate and yields the
+// full-stream URL.
 function normalizeMediaUrl(rawUrl) {
   try {
     const u = new URL(rawUrl);
     const host = u.hostname.toLowerCase();
-    const isFbcdn = host === "fbcdn.net" || host.endsWith(".fbcdn.net");
+    const isFbcdn = isFbcdnHost(host);
     const looksLikeMediaPath = /\.(?:mp4|m4v|m4s|webm|flv|mov|mkv|ts)$/i.test(u.pathname);
-    const hasRangeParams = u.searchParams.has("bytestart") || u.searchParams.has("byteend");
-    // bytestart/byteend are Facebook's chunk selectors; the same params on a
-    // media-extension URL are the same pattern behind a proxy/CDN hostname.
-    if (hasRangeParams && (isFbcdn || looksLikeMediaPath)) {
-      u.searchParams.delete("bytestart");
-      u.searchParams.delete("byteend");
+    const rangeKeys = [];
+    for (const key of u.searchParams.keys()) {
+      if (RANGE_QUERY_PARAMS.has(key.toLowerCase())) {
+        rangeKeys.push(key);
+      }
+    }
+    const hasFbRange = rangeKeys.some((k) => {
+      const low = k.toLowerCase();
+      return low === "bytestart" || low === "byteend" || low === "byte_start" || low === "byte_end";
+    });
+    if (rangeKeys.length > 0 && (isFbcdn || looksLikeMediaPath || hasFbRange)) {
+      for (const key of rangeKeys) {
+        u.searchParams.delete(key);
+      }
       return { url: u.toString(), strippedRange: true };
     }
     return { url: u.toString(), strippedRange: false };
@@ -442,7 +505,31 @@ function normalizeMediaUrl(rawUrl) {
   }
 }
 
+// Canonical key for deduplicating detected media streams. Facebook serves
+// chunks of the same stream across edge subdomains and with per-request
+// tracking params, so key fbcdn.net assets by their pathname.
+function getMediaDedupKey(rawUrl) {
+  try {
+    const u = new URL(rawUrl);
+    const host = u.hostname.toLowerCase();
+    if (isFbcdnHost(host) && u.pathname && u.pathname !== "/") {
+      return `fbcdn.net${u.pathname}`;
+    }
+    const kept = [];
+    for (const [k, v] of u.searchParams.entries()) {
+      if (EPHEMERAL_QUERY_PARAMS.has(k.toLowerCase())) continue;
+      kept.push([k, v]);
+    }
+    kept.sort((a, b) => (a[0] === b[0] ? (a[1] < b[1] ? -1 : a[1] > b[1] ? 1 : 0) : a[0] < b[0] ? -1 : 1));
+    const search = kept.map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`).join("&");
+    return `${u.origin}${u.pathname}${search ? `?${search}` : ""}`;
+  } catch {
+    return String(rawUrl || "");
+  }
+}
+
 // Weibo exposes rendition hints as ?label=mp4_720p or ?template=720x1280.24.0.
+// Facebook exposes rendition hints inside base64-encoded ?efg= JSON.
 function inferQualityFromUrl(rawUrl) {
   try {
     const u = new URL(rawUrl);
@@ -457,6 +544,14 @@ function inferQualityFromUrl(rawUrl) {
     if (templateMatch) {
       const height = Math.min(Number.parseInt(templateMatch[1], 10), Number.parseInt(templateMatch[2], 10));
       if (height >= 144 && height <= 4320) return { quality: `${height}p`, height };
+    }
+    const efg = parseFacebookEfg(rawUrl);
+    if (efg && typeof efg.vencode_tag === "string") {
+      const efgMatch = efg.vencode_tag.match(/(\d{3,4})p/i);
+      if (efgMatch) {
+        const height = Number.parseInt(efgMatch[1], 10);
+        if (height >= 144 && height <= 4320) return { quality: `${height}p`, height };
+      }
     }
     const generic = rawUrl.match(/(?:^|[_\-/=?&])(2160|1440|1080|720|540|480|360|240)p(?:$|[_\-/.&?])/i);
     if (generic) {
@@ -526,11 +621,25 @@ function classifyMediaResponse(url, headers) {
     return null;
   }
 
+  // Individual DASH segment files (.m4s, .cmfv, etc.) are not standalone videos.
+  if (isDashSegmentUrl(mediaUrl, contentType)) {
+    return null;
+  }
+
+  // Facebook audio-only DASH tracks often arrive as video/mp4 or octet-stream
+  // with an audio vencode_tag in the efg metadata.
+  const efg = parseFacebookEfg(mediaUrl);
+  if (efg && typeof efg.vencode_tag === "string" && /audio/i.test(efg.vencode_tag) && !/video/i.test(efg.vencode_tag)) {
+    return null;
+  }
+
   // A 206 response only reports the chunk length; Content-Range carries the
-  // full resource size, which is what the tiny-probe filter must judge.
-  const effectiveSize = (contentRange && contentRange.total) || contentLength;
+  // full resource size. When query range params (bytestart/byteend/range) were
+  // stripped from a 200 OK chunk response, contentLength is only the chunk size
+  // (e.g. 352 KB), not the full video size.
+  const effectiveSize = (contentRange && contentRange.total) || (strippedRange ? 0 : contentLength);
   const quality = inferQualityFromUrl(mediaUrl);
-  const tiny = effectiveSize > 0 && effectiveSize < 256 * 1024;
+  const tiny = !strippedRange && effectiveSize > 0 && effectiveSize < 256 * 1024;
 
   if (lowerPath.endsWith(".m3u8") || contentType.includes("mpegurl") || contentType.includes("x-mpegurl")) {
     return { kind: "hls", url: mediaUrl, format: "HLS", size: effectiveSize, ...quality };
@@ -586,7 +695,7 @@ function classifyMediaResponse(url, headers) {
   return null;
 }
 
-if (chrome.webRequest && chrome.webRequest.onHeadersReceived) {
+if (typeof chrome !== "undefined" && chrome.webRequest && chrome.webRequest.onHeadersReceived) {
   chrome.webRequest.onHeadersReceived.addListener(
     (details) => {
       if (details.tabId < 0 || details.statusCode < 200 || details.statusCode >= 300) {
@@ -613,16 +722,18 @@ if (chrome.webRequest && chrome.webRequest.onHeadersReceived) {
   );
 }
 
-chrome.tabs.onRemoved.addListener((tabId) => {
-  tabVideos.delete(tabId);
-});
-
-chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
-  if (changeInfo.status === "loading" && changeInfo.url) {
+if (typeof chrome !== "undefined" && chrome.tabs) {
+  chrome.tabs.onRemoved.addListener((tabId) => {
     tabVideos.delete(tabId);
-    updateTabBadge(tabId);
-  }
-});
+  });
+
+  chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+    if (changeInfo.status === "loading" && changeInfo.url) {
+      tabVideos.delete(tabId);
+      updateTabBadge(tabId);
+    }
+  });
+}
 
 // --- Context Menus & Lifecycle ---
 
@@ -687,27 +798,33 @@ function setupContextMenus() {
 // while menus were never (re)registered would otherwise stay menu-less until the
 // next install/update. Re-assert them on every cold start; existing ids are
 // ignored by createContextMenu above.
-ensureContextMenus();
+if (typeof chrome !== "undefined" && chrome.contextMenus) {
+  ensureContextMenus();
+}
 
-chrome.runtime.onInstalled.addListener(async () => {
-  const current = await chrome.storage.local.get([
-    "interceptEnabled",
-    "extensions",
-    "minFileSizeMB",
-    "excludedDomains",
-    "theme"
-  ]);
-  await chrome.storage.local.set({
-    interceptEnabled: current.interceptEnabled ?? DEFAULT_SETTINGS.interceptEnabled,
-    extensions: current.extensions ?? DEFAULT_SETTINGS.extensions,
-    minFileSizeMB: current.minFileSizeMB ?? DEFAULT_SETTINGS.minFileSizeMB,
-    excludedDomains: current.excludedDomains ?? DEFAULT_SETTINGS.excludedDomains,
-    theme: current.theme ?? DEFAULT_SETTINGS.theme
+if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.onInstalled) {
+  chrome.runtime.onInstalled.addListener(async () => {
+    const current = await chrome.storage.local.get([
+      "interceptEnabled",
+      "extensions",
+      "minFileSizeMB",
+      "excludedDomains",
+      "theme"
+    ]);
+    await chrome.storage.local.set({
+      interceptEnabled: current.interceptEnabled ?? DEFAULT_SETTINGS.interceptEnabled,
+      extensions: current.extensions ?? DEFAULT_SETTINGS.extensions,
+      minFileSizeMB: current.minFileSizeMB ?? DEFAULT_SETTINGS.minFileSizeMB,
+      excludedDomains: current.excludedDomains ?? DEFAULT_SETTINGS.excludedDomains,
+      theme: current.theme ?? DEFAULT_SETTINGS.theme
+    });
+    setupContextMenus();
   });
-  setupContextMenus();
-});
+}
 
-chrome.runtime.onStartup.addListener(setupContextMenus);
+if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.onStartup) {
+  chrome.runtime.onStartup.addListener(setupContextMenus);
+}
 
 const IMAGE_MENU_FORMATS = {
   "magicdown-img-original": "",
@@ -716,90 +833,110 @@ const IMAGE_MENU_FORMATS = {
   "magicdown-img-webp": "webp"
 };
 
-chrome.contextMenus.onClicked.addListener(async (info) => {
-  if (info.menuItemId in IMAGE_MENU_FORMATS) {
-    const targetUrl = info.srcUrl || info.linkUrl;
-    if (!targetUrl) return;
-    await forwardDownload({
-      url: targetUrl,
-      referrer: info.pageUrl || "",
-      convertFormat: IMAGE_MENU_FORMATS[info.menuItemId]
-    });
-    return;
-  }
+if (typeof chrome !== "undefined" && chrome.contextMenus && chrome.contextMenus.onClicked) {
+  chrome.contextMenus.onClicked.addListener(async (info) => {
+    if (info.menuItemId in IMAGE_MENU_FORMATS) {
+      const targetUrl = info.srcUrl || info.linkUrl;
+      if (!targetUrl) return;
+      await forwardDownload({
+        url: targetUrl,
+        referrer: info.pageUrl || "",
+        convertFormat: IMAGE_MENU_FORMATS[info.menuItemId]
+      });
+      return;
+    }
 
-  if (info.menuItemId === "magicdown-download") {
-    const targetUrl = info.linkUrl || info.srcUrl;
-    if (!targetUrl) return;
-    await forwardDownload({
-      url: targetUrl,
-      referrer: info.pageUrl || ""
-    });
-  }
-});
-
-chrome.downloads.onCreated.addListener(async (downloadItem) => {
-  const settings = await getSettings();
-  if (!settings.interceptEnabled) {
-    return;
-  }
-  if (!shouldIntercept(downloadItem, settings)) {
-    return;
-  }
-
-  const url = downloadItem.finalUrl || downloadItem.url;
-
-  try {
-    await chrome.downloads.pause(downloadItem.id);
-  } catch {
-    // ignore
-  }
-
-  const resp = await forwardDownload({
-    url,
-    filename: downloadItem.filename || "",
-    referrer: downloadItem.referrer || ""
+    if (info.menuItemId === "magicdown-download") {
+      const targetUrl = info.linkUrl || info.srcUrl;
+      if (!targetUrl) return;
+      await forwardDownload({
+        url: targetUrl,
+        referrer: info.pageUrl || ""
+      });
+    }
   });
+}
 
-  if (resp && resp.success) {
+if (typeof chrome !== "undefined" && chrome.downloads && chrome.downloads.onCreated) {
+  chrome.downloads.onCreated.addListener(async (downloadItem) => {
+    const settings = await getSettings();
+    if (!settings.interceptEnabled) {
+      return;
+    }
+    if (!shouldIntercept(downloadItem, settings)) {
+      return;
+    }
+
+    const url = downloadItem.finalUrl || downloadItem.url;
+
     try {
-      await chrome.downloads.cancel(downloadItem.id);
-      await chrome.downloads.erase({ id: downloadItem.id });
+      await chrome.downloads.pause(downloadItem.id);
     } catch {
       // ignore
     }
-  } else {
-    try {
-      await chrome.downloads.resume(downloadItem.id);
-    } catch {
-      // ignore
-    }
-  }
-});
 
-chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (message.type === "ping") {
-    sendNativeMessage({ action: "ping" }).then(sendResponse);
-    return true;
-  }
-  if (message.type === "download") {
-    forwardDownload({
-      url: message.url,
-      filename: message.filename || "",
-      referrer: message.referrer || "",
-      convertFormat: message.convertFormat || "",
-      plan: message.plan || null
-    }).then(sendResponse);
-    return true;
-  }
-  if (message.type === "fetchManifestText") {
-    fetchManifestText(message.url).then(sendResponse);
-    return true;
-  }
-  if (message.type === "getDetectedVideos") {
-    const tabId = typeof message.tabId === "number" ? message.tabId : (sender.tab ? sender.tab.id : -1);
-    sendResponse({ videos: getTabVideoList(tabId) });
+    const resp = await forwardDownload({
+      url,
+      filename: downloadItem.filename || "",
+      referrer: downloadItem.referrer || ""
+    });
+
+    if (resp && resp.success) {
+      try {
+        await chrome.downloads.cancel(downloadItem.id);
+        await chrome.downloads.erase({ id: downloadItem.id });
+      } catch {
+        // ignore
+      }
+    } else {
+      try {
+        await chrome.downloads.resume(downloadItem.id);
+      } catch {
+        // ignore
+      }
+    }
+  });
+}
+
+if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.onMessage) {
+  chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    if (message.type === "ping") {
+      sendNativeMessage({ action: "ping" }).then(sendResponse);
+      return true;
+    }
+    if (message.type === "download") {
+      forwardDownload({
+        url: message.url,
+        filename: message.filename || "",
+        referrer: message.referrer || "",
+        convertFormat: message.convertFormat || "",
+        plan: message.plan || null
+      }).then(sendResponse);
+      return true;
+    }
+    if (message.type === "fetchManifestText") {
+      fetchManifestText(message.url).then(sendResponse);
+      return true;
+    }
+    if (message.type === "getDetectedVideos") {
+      const tabId = typeof message.tabId === "number" ? message.tabId : (sender.tab ? sender.tab.id : -1);
+      sendResponse({ videos: getTabVideoList(tabId) });
+      return false;
+    }
     return false;
-  }
-  return false;
-});
+  });
+}
+
+if (typeof module !== "undefined" && module.exports) {
+  module.exports = {
+    normalizeMediaUrl,
+    getMediaDedupKey,
+    parseFacebookEfg,
+    isDashSegmentUrl,
+    inferQualityFromUrl,
+    classifyMediaResponse,
+    addDetectedVideo,
+    getTabVideoList,
+    tabVideos
+  };
+}

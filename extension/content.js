@@ -660,11 +660,32 @@
     return (near.length > 0 ? near : all).slice(0, 3);
   }
 
+  function mediaDedupKey(rawUrl) {
+    try {
+      const u = new URL(rawUrl);
+      const host = u.hostname.toLowerCase();
+      if ((host === "fbcdn.net" || host.endsWith(".fbcdn.net")) && u.pathname && u.pathname !== "/") {
+        return `fbcdn.net${u.pathname}`;
+      }
+      const ephemeral = new Set(["bytestart", "byteend", "byte_start", "byte_end", "range", "bytes", "rn", "rbuf", "sq", "rid", "_nc_rid", "cb", "cachebuster", "_"]);
+      const kept = [];
+      for (const [k, v] of u.searchParams.entries()) {
+        if (ephemeral.has(k.toLowerCase())) continue;
+        kept.push([k, v]);
+      }
+      kept.sort((a, b) => (a[0] === b[0] ? (a[1] < b[1] ? -1 : a[1] > b[1] ? 1 : 0) : a[0] < b[0] ? -1 : 1));
+      const search = kept.map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`).join("&");
+      return `${u.origin}${u.pathname}${search ? `?${search}` : ""}`;
+    } catch {
+      return String(rawUrl || "");
+    }
+  }
+
   function sniffedDirectVideos() {
     const found = [];
     for (const [url, meta] of sniffed) {
       if (!isDirectMediaURL(url)) continue;
-      if (/[?&](?:bytestart|byteend)=/i.test(url)) continue;
+      if (/[?&](?:bytestart|byteend|byte_start|byte_end|range|bytes)=/i.test(url)) continue;
       const format = url.toLowerCase().endsWith(".webm") ? "WebM" : "MP4";
       found.push({ url, quality: "Original", format, isHLS: false, source: meta.kind || "sniff", at: meta.at });
     }
@@ -720,8 +741,8 @@
       push(item.url, item);
     }
     if (manifestCount === 0) {
-      for (const item of networkVideos) push(item.url, item);
-      for (const item of sniffedDirectVideos()) push(item.url, item);
+      for (const item of networkVideos) push(mediaDedupKey(item.url), item);
+      for (const item of sniffedDirectVideos()) push(mediaDedupKey(item.url), item);
     }
     return Array.from(map.values());
   }
