@@ -59,11 +59,19 @@ type App struct {
 	quitting bool
 
 	// Injectable OS hooks (default to real Windows implementations, overridable in tests)
-	autostartSetter func(bool) error
-	nativeRegFn     func() (string, error)
-	nativeStatusFn  func() nativemessaging.RegistrationStatus
-	nativeStatus    nativemessaging.RegistrationStatus
-	nativeRegMsg    string
+	autostartSetter     func(bool) error
+	nativeRegFn         func() (string, error)
+	nativeStatusFn      func() nativemessaging.RegistrationStatus
+	detectBrowsersFn    func() []nativemessaging.BrowserInfo
+	integrateBrowsersFn func([]nativemessaging.BrowserInfo, string, string, bool) []nativemessaging.BrowserInstallResult
+	nativeStatus        nativemessaging.RegistrationStatus
+	nativeRegMsg        string
+
+	// Detected Chromium browsers for Welcome Setup & Settings integration
+	detectedBrowsers []nativemessaging.BrowserInfo
+	selectedBrowsers map[string]bool
+	browserResults   map[string]nativemessaging.BrowserInstallResult
+	extensionDir     string
 
 	darkMode       bool
 	filterStatus   string       // "All", "Downloading", "Completed", "Queued", "Failed"
@@ -126,6 +134,11 @@ func NewApp(eng *engine.Engine, srv *ipc.Server) *App {
 		autostartSetter:           autostart.SetEnabled,
 		nativeRegFn:               func() (string, error) { return nativemessaging.RegisterHost("", nativemessaging.DefaultExtensionID) },
 		nativeStatusFn:            nativemessaging.CheckRegistration,
+		detectBrowsersFn:          nativemessaging.DetectInstalledBrowsers,
+		integrateBrowsersFn:       nativemessaging.IntegrateBrowsers,
+		selectedBrowsers:          make(map[string]bool),
+		browserResults:            make(map[string]nativemessaging.BrowserInstallResult),
+		extensionDir:              nativemessaging.ResolveExtensionDir(),
 		darkMode:                  true,
 		filterStatus:              "All",
 		filterCategory:            CatAll,
@@ -148,6 +161,7 @@ func NewApp(eng *engine.Engine, srv *ipc.Server) *App {
 		onboardingRunInTray:       cfg.CloseToTray || cfg.MinimizeToTray,
 	}
 	app.refreshNativeStatus()
+	app.refreshDetectedBrowsers()
 	return app
 }
 
@@ -155,6 +169,57 @@ func (a *App) refreshNativeStatus() {
 	if a.nativeStatusFn != nil {
 		a.nativeStatus = a.nativeStatusFn()
 	}
+}
+
+func (a *App) refreshDetectedBrowsers() {
+	if a.detectBrowsersFn == nil {
+		return
+	}
+	a.detectedBrowsers = a.detectBrowsersFn()
+	if a.selectedBrowsers == nil {
+		a.selectedBrowsers = make(map[string]bool)
+	}
+	for _, b := range a.detectedBrowsers {
+		if _, exists := a.selectedBrowsers[b.ID]; !exists && b.Installed {
+			a.selectedBrowsers[b.ID] = true
+		}
+	}
+}
+
+func (a *App) selectedBrowserList() []nativemessaging.BrowserInfo {
+	var list []nativemessaging.BrowserInfo
+	for _, b := range a.detectedBrowsers {
+		if b.Installed && a.selectedBrowsers[b.ID] {
+			list = append(list, b)
+		}
+	}
+	return list
+}
+
+func (a *App) integrateSelectedBrowsers(openBrowserUI bool) {
+	if a.integrateBrowsersFn == nil {
+		return
+	}
+	selected := a.selectedBrowserList()
+	if len(selected) == 0 {
+		a.nativeRegMsg = "Select at least one installed browser to integrate."
+		return
+	}
+	results := a.integrateBrowsersFn(selected, "", nativemessaging.DefaultExtensionID, openBrowserUI)
+	if a.browserResults == nil {
+		a.browserResults = make(map[string]nativemessaging.BrowserInstallResult)
+	}
+	okCount := 0
+	for _, r := range results {
+		a.browserResults[r.BrowserID] = r
+		if r.Err == nil && r.NativeHostOK {
+			okCount++
+		}
+	}
+	a.refreshNativeStatus()
+	a.refreshDetectedBrowsers()
+	a.nativeRegMsg = fmt.Sprintf("Integrated %d/%d browser(s).", okCount, len(results))
+	a.statusMessage = a.nativeRegMsg
 }
 
 // IsInTray reports whether the main window is currently hidden in the system tray.
@@ -572,6 +637,7 @@ func (a *App) OpenOnboardingModal() {
 	a.onboardingError = ""
 	a.nativeRegMsg = ""
 	a.refreshNativeStatus()
+	a.refreshDetectedBrowsers()
 	a.showAddModal = false
 	a.showSettingsModal = false
 	a.showOnboardingModal = true
@@ -1563,22 +1629,80 @@ func (a *App) renderOnboardingModal(c *ui.Context, pal Palette) {
 				})
 			})
 
-			// Native Messaging Registration Card
-			ui.Row(c).Padding(10, 12).Radius(8).Background(pal.InputBg).Border(1, pal.Border).AlignItems(ui.Center).Justify(ui.SpaceBetween).Children(func() {
-				ui.Column(c).Gap(2).Children(func() {
-					ui.Text(c, "Chrome / Edge Browser Extension").FontSize(12).FontWeight(600).TextColor(pal.TextPrimary)
-					if a.nativeStatus.IsReady() {
-						ui.Text(c, "Native Messaging host is registered and ready").FontSize(11).TextColor(pal.Success)
-					} else {
-						ui.Text(c, "Register Native Messaging host so Chrome/Edge can send downloads").FontSize(11).TextColor(pal.TextMuted)
+			// Browser Extension & Native Messaging Auto-Integration
+			ui.Column(c).Gap(8).Padding(10, 12).Radius(8).Background(pal.InputBg).Border(1, pal.Border).Children(func() {
+				ui.Row(c).AlignItems(ui.Center).Justify(ui.SpaceBetween).Children(func() {
+					ui.Column(c).Gap(2).Children(func() {
+						ui.Text(c, "Browser Extension Integration").FontSize(12).FontWeight(600).TextColor(pal.TextPrimary)
+						ui.Text(c, "Select installed Chromium browsers to register Native Messaging & open Extensions").FontSize(11).TextColor(pal.TextMuted)
+					})
+					if toolbarButton(c, pal, nil, "Install Selected", false, false) {
+						a.integrateSelectedBrowsers(true)
 					}
 				})
-				regLabel := "Register Now"
-				if a.nativeStatus.IsReady() {
-					regLabel = "Re-register"
+
+				installedCount := 0
+				for _, b := range a.detectedBrowsers {
+					if !b.Installed {
+						continue
+					}
+					installedCount++
+					checked := a.selectedBrowsers[b.ID]
+					row := ui.Row(c).
+						Padding(6, 8).
+						Radius(6).
+						Background(pal.Canvas).
+						Border(1, pal.Border).
+						AlignItems(ui.Center).
+						Justify(ui.SpaceBetween).
+						Cursor(ui.CursorPointer).
+						Focusable()
+					row.Children(func() {
+						ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
+							boxBg := pal.InputBg
+							boxBorder := pal.BorderStrong
+							if checked {
+								boxBg = pal.Accent
+								boxBorder = pal.Accent
+							}
+							ui.Row(c).Width(16).Height(16).Radius(4).Background(boxBg).Border(1, boxBorder).Center().Children(func() {
+								if checked {
+									ui.Icon(c, iconCheck).Width(10).Height(10).TextColor(pal.AccentText)
+								}
+							})
+							ui.Text(c, b.Name).FontSize(12).FontWeight(600).TextColor(pal.TextPrimary)
+						})
+
+						statusLabel := "Ready to integrate"
+						statusColor := pal.TextMuted
+						if res, hasRes := a.browserResults[b.ID]; hasRes {
+							statusLabel = res.StatusText
+							if res.Err != nil {
+								statusColor = pal.Danger
+							} else {
+								statusColor = pal.Success
+							}
+						} else if b.NativeRegistered {
+							statusLabel = "Native Host registered"
+							statusColor = pal.Success
+						}
+						ui.Text(c, statusLabel).FontSize(11).TextColor(statusColor)
+					})
+					if row.Clicked() {
+						a.selectedBrowsers[b.ID] = !checked
+					}
 				}
-				if toolbarButton(c, pal, nil, regLabel, false, false) {
-					a.registerNativeMessaging()
+				if installedCount == 0 {
+					ui.Text(c, "No supported Chromium browser detected automatically. You can still load the extension folder manually.").FontSize(11).TextColor(pal.TextMuted)
+				}
+				if a.extensionDir != "" {
+					ui.Row(c).Gap(8).AlignItems(ui.Center).Justify(ui.SpaceBetween).Children(func() {
+						ui.Text(c, "Extension folder: "+a.extensionDir).FontSize(10).TextColor(pal.TextMuted).SingleLine()
+						if toolbarButton(c, pal, iconClipboard, "Copy Path", false, false) {
+							c.WriteClipboard(a.extensionDir)
+							a.nativeRegMsg = "Copied extension folder path to clipboard"
+						}
+					})
 				}
 			})
 			if a.nativeRegMsg != "" {
@@ -1626,6 +1750,10 @@ func (a *App) completeOnboarding() {
 			return
 		}
 	}
+	if len(a.selectedBrowserList()) > 0 {
+		a.integrateSelectedBrowsers(true)
+	}
+
 	cfg := a.engine.Config()
 	cfg.DownloadDir = dir
 	cfg.AutoCategorize = a.onboardingAutoCategorize

@@ -64,6 +64,16 @@ if (Test-Path $SrcIcon) {
 }
 Copy-Item -Path (Join-Path $PSScriptRoot "uninstall.ps1") -Destination $InstalledUninstall -Force
 
+# Bundle browser extension folder so Welcome Setup can load/copy it directly
+$SrcExtDir = Join-Path $RepoRoot "extension"
+if (Test-Path $SrcExtDir) {
+    $DestExtDir = Join-Path $InstallDir "extension"
+    if (Test-Path $DestExtDir) {
+        Remove-Item -Path $DestExtDir -Recurse -Force
+    }
+    Copy-Item -Path $SrcExtDir -Destination $DestExtDir -Recurse -Force
+}
+
 # Bundle ffmpeg.exe if present in repo root or dist/
 foreach ($ffCandidate in @((Join-Path $DistDir "ffmpeg.exe"), (Join-Path $RepoRoot "ffmpeg.exe"))) {
     if (Test-Path $ffCandidate) {

@@ -107,6 +107,31 @@ func TestOnboardingFlowAndConfigPersistence(t *testing.T) {
 	app.nativeStatusFn = func() nativemessaging.RegistrationStatus {
 		return nativemessaging.RegistrationStatus{ManifestExists: true, ChromeReady: true}
 	}
+	app.detectBrowsersFn = func() []nativemessaging.BrowserInfo {
+		return []nativemessaging.BrowserInfo{
+			{ID: "chrome", Name: "Google Chrome", Installed: true, ExecutablePath: `C:\chrome.exe`},
+			{ID: "edge", Name: "Microsoft Edge", Installed: true, ExecutablePath: `C:\msedge.exe`},
+			{ID: "brave", Name: "Brave", Installed: false},
+		}
+	}
+	var integratedIDs []string
+	app.integrateBrowsersFn = func(selected []nativemessaging.BrowserInfo, hostBin, extID string, openUI bool) []nativemessaging.BrowserInstallResult {
+		var out []nativemessaging.BrowserInstallResult
+		for _, b := range selected {
+			integratedIDs = append(integratedIDs, b.ID)
+			out = append(out, nativemessaging.BrowserInstallResult{
+				BrowserID:    b.ID,
+				BrowserName:  b.Name,
+				NativeHostOK: true,
+				StatusText:   "Native Host registered",
+			})
+		}
+		return out
+	}
+	app.selectedBrowsers = make(map[string]bool)
+	app.refreshDetectedBrowsers()
+	// Uncheck Edge so only Chrome is integrated.
+	app.selectedBrowsers["edge"] = false
 
 	if !app.showOnboardingModal {
 		t.Fatalf("expected onboarding modal to open on first run")
@@ -131,6 +156,9 @@ func TestOnboardingFlowAndConfigPersistence(t *testing.T) {
 	}
 	if !autostartCalled || !autostartValue {
 		t.Fatalf("expected autostartSetter(true) to be called")
+	}
+	if len(integratedIDs) != 1 || integratedIDs[0] != "chrome" {
+		t.Fatalf("expected only chrome to be integrated, got %v", integratedIDs)
 	}
 	eng.Close()
 
