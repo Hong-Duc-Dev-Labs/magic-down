@@ -12,12 +12,14 @@
     in the repository root if not provided.
 #>
 param(
-    [Parameter(Mandatory = $true)]
+    [Parameter(Mandatory = $false)]
     [ValidatePattern("^[a-p]{32}$")]
-    [string]$ExtensionId,
+    [string]$ExtensionId = "cndchhhjghchjigecgkjclembafgjaje",
 
     [Parameter(Mandatory = $false)]
-    [string]$HostBinaryPath
+    [string]$HostBinaryPath,
+
+    [switch]$Rebuild
 )
 
 $ErrorActionPreference = "Stop"
@@ -27,12 +29,14 @@ $RepoRoot = Split-Path -Parent $PSScriptRoot
 
 if (-not $HostBinaryPath) {
     $HostBinaryPath = Join-Path $RepoRoot "magicdown-host.exe"
-    Write-Host "Building magicdown-host.exe..."
-    Push-Location $RepoRoot
-    try {
-        go build -o $HostBinaryPath ./cmd/magicdown-host
-    } finally {
-        Pop-Location
+    if ($Rebuild -or -not (Test-Path $HostBinaryPath)) {
+        Write-Host "Building magicdown-host.exe..."
+        Push-Location $RepoRoot
+        try {
+            go build -o $HostBinaryPath ./cmd/magicdown-host
+        } finally {
+            Pop-Location
+        }
     }
 }
 

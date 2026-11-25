@@ -63,15 +63,17 @@ Optional flags:
 1. Open `chrome://extensions` (Chrome) or `edge://extensions` (Edge).
 2. Enable **Developer mode**.
 3. Click **Load unpacked** and select the `extension/` folder in this repository.
-4. Copy the generated 32-character **Extension ID**.
+   - `extension/manifest.json` includes a fixed public `"key"`, so the unpacked extension always gets the deterministic Extension ID: `cndchhhjghchjigecgkjclembafgjaje`.
 
 ### 3. Register the Native Messaging Host
 
-Run the PowerShell script with your Extension ID:
+Run the PowerShell script (defaults to `cndchhhjghchjigecgkjclembafgjaje`):
 
 ```powershell
-.\scripts\install-host.ps1 -ExtensionId <your-32-char-extension-id>
+.\scripts\install-host.ps1
 ```
+
+(You can also pass `-ExtensionId <custom-32-char-id>` or `-Rebuild` if needed.)
 
 This writes `%LOCALAPPDATA%\MagicDown\com.magicdown.downloader.json` and registers it under `HKCU:\Software\Google\Chrome\NativeMessagingHosts\com.magicdown.downloader` and `HKCU:\Software\Microsoft\Edge\NativeMessagingHosts\com.magicdown.downloader`.
 
