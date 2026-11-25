@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -7,48 +7,172 @@
   <link rel="stylesheet" href="popup.css" />
 </head>
 <body>
-  <div class="container">
+  <div class="app">
+    <!-- Top Header -->
     <header class="header">
       <div class="brand">
-        <span class="title">MagicDown</span>
-        <span class="subtitle">Browser Integration</span>
+        <div class="brand-logo" aria-hidden="true">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z"/>
+          </svg>
+        </div>
+        <div class="brand-text">
+          <span class="brand-name">MagicDown</span>
+          <span class="brand-version">v1.0</span>
+        </div>
       </div>
-      <span id="statusBadge" class="badge badge-checking">Checking...</span>
+
+      <div class="header-actions">
+        <button id="statusPill" class="status-pill status-checking" title="Click to re-check Desktop App connection">
+          <span class="status-dot"></span>
+          <span id="statusText">Checking...</span>
+          <svg class="retry-icon" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/><path d="M16 16h5v5"/>
+          </svg>
+        </button>
+
+        <button id="themeToggleBtn" class="icon-btn" title="Toggle Dark / Light Mode" aria-label="Toggle theme">
+          <svg id="iconSun" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/>
+          </svg>
+          <svg id="iconMoon" class="hidden" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/>
+          </svg>
+        </button>
+      </div>
     </header>
 
-    <section class="card">
-      <div class="row">
-        <div>
-          <div class="label">Intercept Browser Downloads</div>
-          <div class="hint">Forward matching files to MagicDown</div>
+    <!-- Main Body -->
+    <main class="content">
+      <!-- Auto-Intercept & Site Exclusion Control Card -->
+      <section class="card control-card">
+        <div class="control-row">
+          <div class="control-info">
+            <div class="control-title">Auto-Intercept Downloads</div>
+            <div class="control-sub">Accelerate matching browser downloads</div>
+          </div>
+          <label class="switch">
+            <input type="checkbox" id="interceptToggle" />
+            <span class="slider"></span>
+          </label>
         </div>
-        <label class="switch">
-          <input type="checkbox" id="interceptToggle" />
-          <span class="slider"></span>
-        </label>
-      </div>
-    </section>
 
-    <section class="card">
-      <label class="label" for="extensionsInput">File Type Filter (extensions)</label>
-      <div class="hint">Comma-separated (use * for all files)</div>
-      <textarea id="extensionsInput" rows="3" placeholder="zip, rar, 7z, exe, mp4, pdf"></textarea>
-      <div class="actions">
-        <button id="saveExtsBtn" class="btn btn-primary">Save Filter</button>
-        <button id="refreshBtn" class="btn">Check Connection</button>
-      </div>
-    </section>
+        <div class="divider"></div>
 
-    <section class="card">
-      <label class="label" for="quickUrlInput">Quick Add URL</label>
-      <div class="quick-row">
-        <input type="url" id="quickUrlInput" placeholder="https://example.com/file.zip" />
-        <button id="sendUrlBtn" class="btn btn-primary">Send</button>
-      </div>
-    </section>
+        <div class="control-row" id="excludeSiteRow">
+          <div class="control-info">
+            <div class="control-title">Exclude Current Site</div>
+            <div class="control-sub mono" id="currentSiteLabel">No active web page</div>
+          </div>
+          <label class="switch">
+            <input type="checkbox" id="excludeSiteToggle" />
+            <span class="slider"></span>
+          </label>
+        </div>
+      </section>
 
-    <div id="feedback" class="feedback"></div>
+      <!-- Quick Send URL -->
+      <section class="quick-send">
+        <div class="input-wrap">
+          <svg class="input-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>
+            <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
+          </svg>
+          <input type="url" id="quickUrlInput" placeholder="Paste direct URL to download..." autocomplete="off" />
+        </div>
+        <button id="sendUrlBtn" class="btn-primary">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
+          </svg>
+          <span>Download</span>
+        </button>
+      </section>
+
+      <!-- Inline Toast Feedback -->
+      <div id="toast" class="toast hidden" role="status"></div>
+
+      <!-- Segmented Tabs -->
+      <div class="tabs" role="tablist">
+        <button id="tabActivityBtn" class="tab active" role="tab" aria-selected="true">
+          <span>Activity</span>
+          <span id="activityCount" class="tab-badge">0</span>
+        </button>
+        <button id="tabFiltersBtn" class="tab" role="tab" aria-selected="false">
+          <span>Filters</span>
+          <span id="extCount" class="tab-badge">0</span>
+        </button>
+      </div>
+
+      <!-- Tab Panel: Activity -->
+      <section id="panelActivity" class="panel">
+        <div class="panel-header">
+          <span class="section-label">RECENT HANDOFFS</span>
+          <button id="clearHistoryBtn" class="ghost-link">Clear</button>
+        </div>
+
+        <div id="activityList" class="activity-list"></div>
+
+        <div id="activityEmpty" class="empty-state hidden">
+          <div class="empty-icon">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
+            </svg>
+          </div>
+          <div class="empty-title">No recent downloads</div>
+          <div class="empty-sub">Files intercepted or sent to MagicDown will appear here.</div>
+        </div>
+      </section>
+
+      <!-- Tab Panel: Filters -->
+      <section id="panelFilters" class="panel hidden">
+        <div class="filter-group">
+          <div class="panel-header">
+            <span class="section-label">FILE EXTENSIONS</span>
+            <span class="hint-text">Use * for all files</span>
+          </div>
+          <div id="extChips" class="chips"></div>
+          <div class="chip-add-row">
+            <input type="text" id="addExtInput" placeholder="Add extension (e.g. dmg, tar)" autocomplete="off" />
+            <button id="addExtBtn" class="btn-secondary">Add</button>
+          </div>
+        </div>
+
+        <div class="divider"></div>
+
+        <div class="filter-row-inline">
+          <div class="control-info">
+            <div class="control-title">Minimum File Size</div>
+            <div class="control-sub">Skip files smaller than threshold (0 = all)</div>
+          </div>
+          <div class="size-input-wrap">
+            <input type="number" id="minSizeInput" min="0" max="10240" step="1" value="0" />
+            <span class="unit">MB</span>
+          </div>
+        </div>
+
+        <div class="divider"></div>
+
+        <div class="filter-group">
+          <div class="panel-header">
+            <span class="section-label">EXCLUDED DOMAINS</span>
+            <span class="hint-text">Never intercept</span>
+          </div>
+          <div id="domainChips" class="chips"></div>
+          <div class="chip-add-row">
+            <input type="text" id="addDomainInput" placeholder="Add domain (e.g. intranet.local)" autocomplete="off" />
+            <button id="addDomainBtn" class="btn-secondary">Add</button>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <!-- Footer -->
+    <footer class="footer">
+      <span class="footer-left">Host: com.magicdown.downloader</span>
+      <span class="footer-right" id="footerStatus">IPC :28888</span>
+    </footer>
   </div>
+
   <script src="popup.js"></script>
 </body>
 </html>
