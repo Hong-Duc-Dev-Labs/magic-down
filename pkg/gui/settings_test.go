@@ -65,3 +65,34 @@ func TestSettingsApplyRetriesAndSpeedLimit(t *testing.T) {
 	app.openSettingsModal()
 	tester.Frame()
 }
+
+func TestSettingsAutoCheckUpdatesPersistenceAndRender(t *testing.T) {
+	tempDir := t.TempDir()
+	eng, err := engine.NewEngine(engine.DefaultConfig(tempDir, filepath.Join(tempDir, "state.json")))
+	if err != nil {
+		t.Fatalf("failed to init engine: %v", err)
+	}
+	defer eng.Close()
+
+	if !eng.Config().AutoCheckUpdates {
+		t.Fatalf("expected AutoCheckUpdates to default to true")
+	}
+
+	app := NewApp(eng, nil)
+	app.openSettingsModal()
+	app.settingAutoCheckUpdates = false
+	app.saveSettings()
+	if eng.Config().AutoCheckUpdates {
+		t.Fatalf("expected AutoCheckUpdates=false after save")
+	}
+
+	// Render settings modal in update-available and downloading states without panic.
+	tester := ui.NewTester(app.View, 1120, 700)
+	tester.SetScale(1)
+	app.openSettingsModal()
+	app.updateMu.Lock()
+	app.updateStatus = "available"
+	app.updateMessage = "New version v2.0.0 available"
+	app.updateMu.Unlock()
+	tester.Frame()
+}

@@ -1,0 +1,50 @@
+name: Release Windows
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version tag (e.g. v0.2.0)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Run Go tests
+        run: go test ./...
+
+      - name: Build Windows release archive and checksums
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ inputs.version || github.ref_name }}
+        run: |
+          ./scripts/build-release.ps1 `
+            -OutDir dist `
+            -Version "$env:RELEASE_VERSION" `
+            -GitHubRepo "${{ github.repository }}"
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.version || github.ref_name }}
+          generate_release_notes: true
+          files: |
+            dist/MagicDown-windows-amd64.zip
+            dist/magicdown.exe
+            dist/checksums.txt

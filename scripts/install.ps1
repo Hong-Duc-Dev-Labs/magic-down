@@ -12,6 +12,9 @@ param(
     [ValidatePattern("^[a-p]{32}$")]
     [string]$ExtensionId = "cndchhhjghchjigecgkjclembafgjaje",
 
+    [string]$Version = "0.1.0",
+    [string]$GitHubRepo = "",
+
     [switch]$SkipBuild,
     [switch]$NoDesktopShortcut,
     [switch]$EnableAutostart,
@@ -21,7 +24,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 $AppName = "MagicDown"
-$AppVersion = "1.0.0"
+$AppVersion = $Version.TrimStart("v", "V")
 $Publisher = "MagicDown"
 $HostName = "com.magicdown.downloader"
 $RepoRoot = Split-Path -Parent $PSScriptRoot
@@ -29,7 +32,15 @@ $DistDir = Join-Path $RepoRoot "dist"
 $InstallDir = Join-Path $env:LOCALAPPDATA "Programs\MagicDown"
 
 if (-not $SkipBuild) {
-    & (Join-Path $PSScriptRoot "build-release.ps1") -OutDir $DistDir
+    $buildArgs = @{
+        OutDir  = $DistDir
+        Version = $AppVersion
+        SkipZip = $true
+    }
+    if ($GitHubRepo) {
+        $buildArgs["GitHubRepo"] = $GitHubRepo
+    }
+    & (Join-Path $PSScriptRoot "build-release.ps1") @buildArgs
 }
 
 $SrcGuiExe = Join-Path $DistDir "magicdown.exe"

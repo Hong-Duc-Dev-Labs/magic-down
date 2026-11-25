@@ -1,6 +1,7 @@
 package gui
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -17,6 +18,8 @@ import (
 	"magicdown/pkg/engine"
 	"magicdown/pkg/ipc"
 	"magicdown/pkg/nativemessaging"
+	"magicdown/pkg/updater"
+	"magicdown/pkg/version"
 )
 
 // WindowController abstracts native window caption and tray visibility actions
@@ -112,7 +115,19 @@ type App struct {
 	settingLaunchAtStartup  bool
 	settingMinimizeToTray   bool
 	settingCloseToTray      bool
+	settingAutoCheckUpdates bool
 	settingsError           string
+
+	// Auto-updater state (protected by updateMu)
+	quitFn             func()
+	checkUpdateFn      func(context.Context) (*updater.CheckResult, error)
+	downloadAndApplyFn func(context.Context, *updater.ReleaseInfo, updater.ProgressFunc) error
+	updateMu           sync.Mutex
+	updateStatus       string // "", "checking", "up_to_date", "available", "downloading", "applying", "error"
+	updateRelease      *updater.ReleaseInfo
+	updateMessage      string
+	updateDownloaded   int64
+	updateTotal        int64
 
 	// First-run Welcome / Onboarding modal state
 	showOnboardingModal       bool
@@ -154,6 +169,7 @@ func NewApp(eng *engine.Engine, srv *ipc.Server) *App {
 		settingLaunchAtStartup:    cfg.LaunchAtStartup,
 		settingMinimizeToTray:     cfg.MinimizeToTray,
 		settingCloseToTray:        cfg.CloseToTray,
+		settingAutoCheckUpdates:   cfg.AutoCheckUpdates,
 		showOnboardingModal:       !cfg.OnboardingCompleted,
 		onboardingDownloadDir:     cfg.DownloadDir,
 		onboardingAutoCategorize:  cfg.AutoCategorize,
@@ -619,6 +635,7 @@ func (a *App) openSettingsModal() {
 	a.settingLaunchAtStartup = cfg.LaunchAtStartup
 	a.settingMinimizeToTray = cfg.MinimizeToTray
 	a.settingCloseToTray = cfg.CloseToTray
+	a.settingAutoCheckUpdates = cfg.AutoCheckUpdates
 	a.settingsError = ""
 	a.nativeRegMsg = ""
 	a.refreshNativeStatus()
@@ -1460,6 +1477,9 @@ func (a *App) renderSettingsModal(c *ui.Context, pal Palette) {
 				ui.Text(c, a.nativeRegMsg).FontSize(11).TextColor(pal.Accent)
 			}
 
+			// Software Updates card
+			a.renderUpdateCard(c, pal)
+
 			if a.settingsError != "" {
 				ui.Row(c).Padding(8, 10).Radius(6).Background(pal.DangerSoft).Gap(6).AlignItems(ui.Center).Children(func() {
 					ui.Icon(c, iconAlert).Width(14).Height(14).TextColor(pal.Danger)
@@ -1497,6 +1517,252 @@ func (a *App) registerNativeMessaging() {
 	a.refreshNativeStatus()
 	a.nativeRegMsg = "Registered Native Messaging: " + filepath.Base(path)
 	a.statusMessage = "Chrome/Edge Native Messaging registered"
+}
+
+// SetQuitFunc registers a callback used to cleanly exit the application (e.g. before self-update restart).
+func (a *App) SetQuitFunc(fn func()) {
+	a.quitFn = fn
+}
+
+// StartAutoUpdateCheck runs a background update check on startup if enabled in config.
+func (a *App) StartAutoUpdateCheck() {
+	if !a.engine.Config().AutoCheckUpdates {
+		return
+	}
+	a.triggerUpdateCheck()
+}
+
+func (a *App) invalidateUI() {
+	if a.winCtrl != nil {
+		a.winCtrl.Invalidate()
+	}
+}
+
+func (a *App) newUpdater() *updater.Updater {
+	cfg := a.engine.Config()
+	return updater.New(updater.Options{
+		Repo:           cfg.UpdateRepo,
+		CurrentVersion: version.Version,
+	})
+}
+
+func (a *App) triggerUpdateCheck() {
+	a.updateMu.Lock()
+	if a.updateStatus == "checking" || a.updateStatus == "downloading" || a.updateStatus == "applying" {
+		a.updateMu.Unlock()
+		return
+	}
+	a.updateStatus = "checking"
+	a.updateMessage = "Checking for updates..."
+	a.updateMu.Unlock()
+	a.invalidateUI()
+
+	checkFn := a.checkUpdateFn
+	if checkFn == nil {
+		u := a.newUpdater()
+		checkFn = u.CheckForUpdate
+	}
+
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+
+		res, err := checkFn(ctx)
+		a.updateMu.Lock()
+		if err != nil {
+			a.updateStatus = "error"
+			a.updateMessage = "Update check failed: " + err.Error()
+		} else if res.UpdateAvailable && res.Release != nil {
+			a.updateStatus = "available"
+			a.updateRelease = res.Release
+			a.updateMessage = fmt.Sprintf("New version %s available", res.LatestVersion)
+		} else {
+			a.updateStatus = "up_to_date"
+			a.updateRelease = res.Release
+			a.updateMessage = fmt.Sprintf("You're up to date (%s)", version.NormalizedVersion())
+		}
+		a.updateMu.Unlock()
+		a.invalidateUI()
+	}()
+}
+
+func (a *App) triggerDownloadAndInstall() {
+	a.updateMu.Lock()
+	if a.updateStatus == "downloading" || a.updateStatus == "applying" || a.updateRelease == nil {
+		a.updateMu.Unlock()
+		return
+	}
+	rel := a.updateRelease
+	a.updateStatus = "downloading"
+	a.updateDownloaded = 0
+	a.updateTotal = rel.AssetSize
+	a.updateMessage = "Downloading update..."
+	a.updateMu.Unlock()
+	a.invalidateUI()
+
+	applyFn := a.downloadAndApplyFn
+	if applyFn == nil {
+		u := a.newUpdater()
+		applyFn = func(ctx context.Context, info *updater.ReleaseInfo, onProgress updater.ProgressFunc) error {
+			dlDir, err := os.MkdirTemp("", "magicdown-update-dl-*")
+			if err != nil {
+				return err
+			}
+			archivePath, err := u.DownloadAsset(ctx, info, dlDir, onProgress)
+			if err != nil {
+				return err
+			}
+			if err := u.VerifySHA256(ctx, archivePath, info.AssetName, info.ChecksumURL); err != nil {
+				return err
+			}
+			stagingDir, err := os.MkdirTemp("", "magicdown-update-stage-*")
+			if err != nil {
+				return err
+			}
+			if err := updater.StageUpdate(archivePath, stagingDir); err != nil {
+				return err
+			}
+			_ = os.RemoveAll(dlDir)
+
+			exePath, err := os.Executable()
+			if err != nil {
+				return err
+			}
+			installDir := filepath.Dir(exePath)
+			relaunchExe := filepath.Join(installDir, "magicdown.exe")
+			_, err = updater.LaunchApplyScript(stagingDir, installDir, os.Getpid(), relaunchExe)
+			return err
+		}
+	}
+
+	go func() {
+		ctx := context.Background()
+		err := applyFn(ctx, rel, func(downloaded, total int64) {
+			a.updateMu.Lock()
+			a.updateDownloaded = downloaded
+			a.updateTotal = total
+			a.updateMu.Unlock()
+			a.invalidateUI()
+		})
+
+		a.updateMu.Lock()
+		if err != nil {
+			a.updateStatus = "error"
+			a.updateMessage = "Update failed: " + err.Error()
+			a.updateMu.Unlock()
+			a.invalidateUI()
+			return
+		}
+		a.updateStatus = "applying"
+		a.updateMessage = "Applying update & restarting MagicDown..."
+		a.updateMu.Unlock()
+		a.invalidateUI()
+
+		if a.quitFn != nil {
+			time.Sleep(300 * time.Millisecond)
+			a.quitFn()
+		}
+	}()
+}
+
+func summarizeReleaseNotes(body string) string {
+	lines := strings.Split(strings.ReplaceAll(body, "\r\n", "\n"), "\n")
+	var kept []string
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		kept = append(kept, trimmed)
+		if len(kept) >= 2 {
+			break
+		}
+	}
+	summary := strings.Join(kept, " • ")
+	if len(summary) > 140 {
+		summary = summary[:137] + "..."
+	}
+	return summary
+}
+
+func (a *App) renderUpdateCard(c *ui.Context, pal Palette) {
+	a.updateMu.Lock()
+	status := a.updateStatus
+	msg := a.updateMessage
+	rel := a.updateRelease
+	downloaded := a.updateDownloaded
+	total := a.updateTotal
+	a.updateMu.Unlock()
+
+	ui.Column(c).Padding(10, 12).Radius(8).Background(pal.InputBg).Border(1, pal.Border).Gap(8).Children(func() {
+		ui.Row(c).AlignItems(ui.Center).Justify(ui.SpaceBetween).Children(func() {
+			ui.Column(c).Gap(2).Children(func() {
+				ui.Text(c, fmt.Sprintf("Software Updates  •  %s", version.DisplayVersion())).FontSize(12).FontWeight(600).TextColor(pal.TextPrimary)
+				ui.Text(c, "Auto-check on startup").FontSize(11).TextColor(pal.TextMuted)
+			})
+			ui.Row(c).Gap(6).AlignItems(ui.Center).Children(func() {
+				if segmentOption(c, pal, "Auto", a.settingAutoCheckUpdates) {
+					a.settingAutoCheckUpdates = true
+				}
+				if segmentOption(c, pal, "Manual", !a.settingAutoCheckUpdates) {
+					a.settingAutoCheckUpdates = false
+				}
+				checkLabel := "Check for Updates"
+				if status == "checking" {
+					checkLabel = "Checking..."
+				}
+				if toolbarButton(c, pal, nil, checkLabel, false, status == "checking" || status == "downloading" || status == "applying") {
+					a.triggerUpdateCheck()
+				}
+			})
+		})
+
+		if msg != "" {
+			msgColor := pal.TextSecondary
+			if status == "error" {
+				msgColor = pal.Danger
+			} else if status == "available" || status == "applying" {
+				msgColor = pal.Accent
+			}
+			ui.Text(c, msg).FontSize(11).TextColor(msgColor)
+		}
+
+		if status == "available" && rel != nil {
+			if summary := summarizeReleaseNotes(rel.Body); summary != "" {
+				ui.Text(c, summary).FontSize(11).TextColor(pal.TextMuted)
+			}
+			ui.Row(c).AlignItems(ui.Center).Justify(ui.SpaceBetween).Gap(8).Children(func() {
+				ui.Text(c, "App will restart automatically to apply.").FontSize(10).TextColor(pal.TextMuted)
+				if primaryCTA(c, pal, iconDownload, "Download & Install Update") {
+					a.triggerDownloadAndInstall()
+				}
+			})
+		}
+
+		if status == "downloading" {
+			pct := 0.0
+			if total > 0 {
+				pct = float64(downloaded) / float64(total)
+				if pct > 1 {
+					pct = 1
+				}
+			}
+			ui.Row(c).Height(6).Radius(3).Background(pal.Border).Children(func() {
+				barW := int(pct * 460)
+				if barW < 4 && downloaded > 0 {
+					barW = 4
+				}
+				if barW > 0 {
+					ui.Row(c).Width(float32(barW)).Height(6).Radius(3).Background(pal.Accent)
+				}
+			})
+			progressLabel := fmt.Sprintf("Downloading... %s", FormatBytes(downloaded))
+			if total > 0 {
+				progressLabel = fmt.Sprintf("Downloading... %s / %s (%.0f%%)", FormatBytes(downloaded), FormatBytes(total), pct*100)
+			}
+			ui.Text(c, progressLabel).FontSize(10).FontFeatures("tnum").TextColor(pal.TextMuted)
+		}
+	})
 }
 
 func (a *App) saveSettings() {
@@ -1547,6 +1813,7 @@ func (a *App) saveSettings() {
 	cfg.LaunchAtStartup = a.settingLaunchAtStartup
 	cfg.MinimizeToTray = a.settingMinimizeToTray
 	cfg.CloseToTray = a.settingCloseToTray
+	cfg.AutoCheckUpdates = a.settingAutoCheckUpdates
 	a.engine.UpdateConfig(cfg)
 
 	a.settingMaxRetries = strconv.Itoa(retries)

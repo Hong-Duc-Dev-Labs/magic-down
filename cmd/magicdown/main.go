@@ -122,6 +122,10 @@ func main() {
 			}
 			mygo.App.Quit()
 		}
+		appUI.SetQuitFunc(func() {
+			quitApp(nil, nil)
+		})
+		appUI.StartAutoUpdateCheck()
 
 		trayMenu := mygo.NewMenu([]*mygo.MenuItem{
 			{

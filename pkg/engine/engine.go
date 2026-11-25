@@ -64,6 +64,8 @@ type persistedConfig struct {
 	MinimizeToTray         *bool   `json:"minimize_to_tray,omitempty"`
 	CloseToTray            *bool   `json:"close_to_tray,omitempty"`
 	OnboardingCompleted    *bool   `json:"onboarding_completed,omitempty"`
+	AutoCheckUpdates       *bool   `json:"auto_check_updates,omitempty"`
+	UpdateRepo             *string `json:"update_repo,omitempty"`
 }
 
 // NewEngine initializes a new download engine.
@@ -653,6 +655,8 @@ func (e *Engine) saveConfig() error {
 		MinimizeToTray:         &cfg.MinimizeToTray,
 		CloseToTray:            &cfg.CloseToTray,
 		OnboardingCompleted:    &cfg.OnboardingCompleted,
+		AutoCheckUpdates:       &cfg.AutoCheckUpdates,
+		UpdateRepo:             &cfg.UpdateRepo,
 	}
 	data, err := json.MarshalIndent(pc, "", "  ")
 	if err != nil {
@@ -705,6 +709,12 @@ func (e *Engine) loadConfig() {
 	}
 	if pc.OnboardingCompleted != nil {
 		e.config.OnboardingCompleted = *pc.OnboardingCompleted
+	}
+	if pc.AutoCheckUpdates != nil {
+		e.config.AutoCheckUpdates = *pc.AutoCheckUpdates
+	}
+	if pc.UpdateRepo != nil {
+		e.config.UpdateRepo = *pc.UpdateRepo
 	}
 	e.limiter.setRate(e.config.SpeedLimitKBps * 1024)
 }

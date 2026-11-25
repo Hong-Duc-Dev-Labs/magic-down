@@ -97,6 +97,8 @@ type Config struct {
 	MinimizeToTray         bool   `json:"minimize_to_tray"`
 	CloseToTray            bool   `json:"close_to_tray"`
 	OnboardingCompleted    bool   `json:"onboarding_completed"`
+	AutoCheckUpdates       bool   `json:"auto_check_updates"`
+	UpdateRepo             string `json:"update_repo,omitempty"`
 }
 
 // DefaultConfig returns reasonable default configuration values.
@@ -112,5 +114,6 @@ func DefaultConfig(downloadDir, statePath string) Config {
 		MinimizeToTray:         true,
 		CloseToTray:            true,
 		OnboardingCompleted:    false,
+		AutoCheckUpdates:       true,
 	}
 }
