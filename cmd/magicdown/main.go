@@ -67,10 +67,12 @@ func main() {
 
 	mygo.App.WhenReady(func() {
 		mygo.NewWindow(mygo.WindowOptions{
-			Title:   "MagicDown - Download Manager",
-			Width:   1040,
-			Height:  660,
-			Content: ui.View(appUI.View),
+			Title:     "MagicDown",
+			Width:     1120,
+			Height:    700,
+			MinWidth:  920,
+			MinHeight: 580,
+			Content:   ui.View(appUI.View),
 		})
 	})
 

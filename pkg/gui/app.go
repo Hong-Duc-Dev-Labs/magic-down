@@ -2,7 +2,10 @@ package gui
 
 import (
 	"fmt"
-	"strconv"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -12,50 +15,76 @@ import (
 	"magicdown/pkg/ipc"
 )
 
-// App holds the UI state for the MagicDown MyGo Native UI desktop application.
+// App holds the UI state for MagicDown's MyGo Native UI desktop application.
 type App struct {
 	engine    *engine.Engine
 	ipcServer *ipc.Server
 
-	filterStatus   string
+	darkMode       bool
+	filterStatus   string       // "All", "Downloading", "Completed", "Queued", "Failed"
+	filterCategory FileCategory // CatAll or specific category
+	searchQuery    string
 	selectedTaskID string
 
-	// Add URL modal state
+	// Add Download modal state
 	showAddModal  bool
 	inputURL      string
 	inputFilename string
-	inputSegments string
+	inputSaveDir  string
+	inputSegments int
 	addError      string
 
 	// Settings modal state
 	showSettingsModal    bool
 	settingDownloadDir   string
-	settingMaxConcurrent string
-	settingSegments      string
+	settingMaxConcurrent int
+	settingSegments      int
 	settingsError        string
 
 	statusMessage string
 }
 
-// NewApp creates a new MagicDown UI state instance.
+// NewApp creates a new MagicDown UI state instance with sleek dark mode enabled by default.
 func NewApp(eng *engine.Engine, srv *ipc.Server) *App {
 	cfg := eng.Config()
 	return &App{
 		engine:               eng,
 		ipcServer:            srv,
+		darkMode:             true,
 		filterStatus:         "All",
-		inputSegments:        strconv.Itoa(cfg.DefaultSegments),
+		filterCategory:       CatAll,
+		inputSaveDir:         cfg.DownloadDir,
+		inputSegments:        cfg.DefaultSegments,
 		settingDownloadDir:   cfg.DownloadDir,
-		settingMaxConcurrent: strconv.Itoa(cfg.MaxConcurrentDownloads),
-		settingSegments:      strconv.Itoa(cfg.DefaultSegments),
+		settingMaxConcurrent: cfg.MaxConcurrentDownloads,
+		settingSegments:      cfg.DefaultSegments,
 	}
+}
+
+func (a *App) palette() Palette {
+	if a.darkMode {
+		return DarkPalette()
+	}
+	return LightPalette()
 }
 
 // View renders the entire desktop interface for each frame.
 func (a *App) View(c *ui.Context) {
+	pal := a.palette()
+	c.SetTheme(pal.UITheme)
+
+	// Global keyboard shortcuts
+	if c.Shortcut(ui.Cmd, ui.KeyN) && !a.showAddModal {
+		a.openAddModal()
+	}
+	if c.Shortcut(0, ui.KeyEscape) {
+		a.showAddModal = false
+		a.showSettingsModal = false
+	}
+
 	tasks := a.engine.GetTasks()
 
-	// Schedule refresh: animate smoothly while downloads are active, poll lightly otherwise for IPC arrivals.
+	// Animate smoothly while downloads are active; poll lightly otherwise for IPC arrivals.
 	if a.engine.ActiveCount() > 0 {
 		c.AnimationFrame()
 	} else {
@@ -63,347 +92,645 @@ func (a *App) View(c *ui.Context) {
 	}
 
 	var totalSpeed int64
-	counts := map[string]int{
+	statusCounts := map[string]int{
 		"All":         len(tasks),
 		"Downloading": 0,
-		"Queued":      0,
-		"Paused":      0,
 		"Completed":   0,
+		"Queued":      0,
+		"Failed":      0,
 	}
+	catCounts := map[FileCategory]int{
+		CatDocuments: 0,
+		CatMedia:     0,
+		CatArchives:  0,
+		CatPrograms:  0,
+		CatOther:     0,
+	}
+
+	var selectedTask *engine.Task
+	completedCount := 0
 	for _, t := range tasks {
+		if t.ID == a.selectedTaskID {
+			selectedTask = t
+		}
 		totalSpeed += t.Speed
 		switch t.Status {
 		case engine.StatusDownloading, engine.StatusProbing:
-			counts["Downloading"]++
-		case engine.StatusQueued:
-			counts["Queued"]++
-		case engine.StatusPaused, engine.StatusFailed, engine.StatusCancelled:
-			counts["Paused"]++
+			statusCounts["Downloading"]++
 		case engine.StatusCompleted:
-			counts["Completed"]++
+			statusCounts["Completed"]++
+			completedCount++
+		case engine.StatusQueued, engine.StatusPaused:
+			statusCounts["Queued"]++
+		case engine.StatusFailed, engine.StatusCancelled:
+			statusCounts["Failed"]++
 		}
+		catCounts[ClassifyFile(t.Filename, t.URL)]++
 	}
 
-	// Main vertical container
-	ui.Column(c).Fill().Children(func() {
-		a.renderToolbar(c, totalSpeed)
-		ui.Divider(c)
+	// Root window layout: Left Sidebar + Right Main Column
+	ui.Row(c).Fill().AlignItems(ui.Stretch).Background(pal.Canvas).TextColor(pal.TextPrimary).Children(func() {
+		a.renderSidebar(c, pal, statusCounts, catCounts)
 
-		// Main body: Sidebar + Download List
-		ui.Row(c).Fill().Grow(1).Children(func() {
-			a.renderSidebar(c, counts, totalSpeed)
-			ui.Divider(c)
-			a.renderDownloadList(c, tasks)
+		// Main right column: Header + List + Status Bar
+		ui.Column(c).Fill().Grow(1).Children(func() {
+			a.renderHeader(c, pal, selectedTask, completedCount)
+			a.renderDownloadList(c, pal, tasks)
+			a.renderStatusBar(c, pal, statusCounts["Downloading"], statusCounts["Queued"], totalSpeed)
 		})
-
-		ui.Divider(c)
-		a.renderFooter(c, tasks)
 	})
 
 	// Modals
-	a.renderAddURLModal(c)
-	a.renderSettingsModal(c)
+	a.renderAddModal(c, pal)
+	a.renderSettingsModal(c, pal)
 }
 
-func (a *App) renderToolbar(c *ui.Context, totalSpeed int64) {
-	ui.Row(c).Padding(10, 14).Gap(8).Children(func() {
-		if ui.PrimaryButton(c, "+ Add URL").Clicked() {
-			cfg := a.engine.Config()
-			a.inputURL = ""
-			a.inputFilename = ""
-			a.inputSegments = strconv.Itoa(cfg.DefaultSegments)
-			a.addError = ""
-			a.showAddModal = true
-		}
-
-		if ui.Button(c, "Resume").Clicked() {
-			if a.selectedTaskID != "" {
-				if err := a.engine.ResumeTask(a.selectedTaskID); err != nil {
-					a.statusMessage = err.Error()
-				} else {
-					a.statusMessage = "Resumed selected download"
-				}
-			} else {
-				a.engine.ResumeAll()
-				a.statusMessage = "Resumed all paused downloads"
-			}
-		}
-
-		if ui.Button(c, "Pause").Clicked() {
-			if a.selectedTaskID != "" {
-				if err := a.engine.PauseTask(a.selectedTaskID); err != nil {
-					a.statusMessage = err.Error()
-				} else {
-					a.statusMessage = "Paused selected download"
-				}
-			} else {
-				a.engine.PauseAll()
-				a.statusMessage = "Paused all active downloads"
-			}
-		}
-
-		if ui.Button(c, "Cancel").Clicked() {
-			if a.selectedTaskID != "" {
-				if err := a.engine.CancelTask(a.selectedTaskID); err != nil {
-					a.statusMessage = err.Error()
-				} else {
-					a.statusMessage = "Cancelled selected download"
-				}
-			}
-		}
-
-		if ui.Button(c, "Delete").Clicked() {
-			if a.selectedTaskID != "" {
-				if err := a.engine.DeleteTask(a.selectedTaskID, false); err != nil {
-					a.statusMessage = err.Error()
-				} else {
-					a.selectedTaskID = ""
-					a.statusMessage = "Removed download from list"
-				}
-			}
-		}
-
-		if ui.Button(c, "Settings").Clicked() {
-			cfg := a.engine.Config()
-			a.settingDownloadDir = cfg.DownloadDir
-			a.settingMaxConcurrent = strconv.Itoa(cfg.MaxConcurrentDownloads)
-			a.settingSegments = strconv.Itoa(cfg.DefaultSegments)
-			a.settingsError = ""
-			a.showSettingsModal = true
-		}
-
-		ui.Spacer(c)
-
-		ipcPort := ipc.DefaultPort
-		if a.ipcServer != nil {
-			ipcPort = a.ipcServer.Port()
-		}
-		infoText := fmt.Sprintf("IPC :%d  |  Active: %d  |  Speed: %s",
-			ipcPort, a.engine.ActiveCount(), FormatSpeed(totalSpeed))
-		ui.Text(c, infoText).FontSize(12).TextColor(ui.RGB(130, 140, 155)).SingleLine()
-	})
-}
-
-func (a *App) renderSidebar(c *ui.Context, counts map[string]int, totalSpeed int64) {
-	categories := []struct {
-		key   string
-		label string
-	}{
-		{"All", "All Downloads"},
-		{"Downloading", "Downloading"},
-		{"Queued", "Queued"},
-		{"Paused", "Paused / Stopped"},
-		{"Completed", "Completed"},
+func (a *App) openAddModal() {
+	cfg := a.engine.Config()
+	a.inputURL = ""
+	a.inputFilename = ""
+	a.inputSaveDir = cfg.DownloadDir
+	a.inputSegments = cfg.DefaultSegments
+	if a.inputSegments != 4 && a.inputSegments != 8 && a.inputSegments != 16 {
+		a.inputSegments = 8
 	}
+	a.addError = ""
+	a.showSettingsModal = false
+	a.showAddModal = true
+}
 
-	ui.Column(c).Width(200).Shrink(0).Padding(12).Gap(6).Background(ui.RGBA(128, 128, 128, 0.06)).Children(func() {
-		ui.Text(c, "MagicDown").FontSize(18).Bold()
-		ui.Text(c, "Download Manager").FontSize(11).TextColor(ui.RGB(130, 140, 155))
-		ui.Box(c).Height(8)
+func (a *App) openSettingsModal() {
+	cfg := a.engine.Config()
+	a.settingDownloadDir = cfg.DownloadDir
+	a.settingMaxConcurrent = cfg.MaxConcurrentDownloads
+	a.settingSegments = cfg.DefaultSegments
+	a.settingsError = ""
+	a.showAddModal = false
+	a.showSettingsModal = true
+}
 
-		for _, cat := range categories {
-			label := fmt.Sprintf("%s (%d)", cat.label, counts[cat.key])
-			var btn ui.Element
-			if a.filterStatus == cat.key {
-				btn = ui.PrimaryButton(c, label)
-			} else {
-				btn = ui.Button(c, label)
+func (a *App) renderSidebar(c *ui.Context, pal Palette, statusCounts map[string]int, catCounts map[FileCategory]int) {
+	ui.Column(c).
+		Width(220).
+		Shrink(0).
+		Background(pal.Sidebar).
+		BorderWidth(0, 1, 0, 0).
+		BorderColor(pal.Border).
+		Padding(16, 12, 12, 12).
+		Gap(14).
+		Children(func() {
+			// Brand header
+			ui.Row(c).Padding(2, 6).Gap(10).AlignItems(ui.Center).Children(func() {
+				ui.Row(c).Width(30).Height(30).Radius(8).Background(pal.Accent).Center().Shrink(0).Children(func() {
+					ui.Icon(c, iconBolt).Width(16).Height(16).TextColor(pal.AccentText)
+				})
+				ui.Column(c).Gap(1).Grow(1).Children(func() {
+					ui.Row(c).Gap(6).AlignItems(ui.Center).Children(func() {
+						ui.Text(c, "MagicDown").FontSize(15).FontWeight(700).TextColor(pal.TextPrimary).SingleLine()
+						ui.Box(c).Padding(1, 5).Radius(4).Background(pal.BadgeBg).Children(func() {
+							ui.Text(c, "v1.0").FontSize(10).FontWeight(600).TextColor(pal.TextMuted).SingleLine()
+						})
+					})
+					ui.Text(c, "Download Manager").FontSize(11).TextColor(pal.TextMuted).SingleLine()
+				})
+			})
+
+			// Status section
+			ui.Column(c).Gap(3).Children(func() {
+				ui.Text(c, "DOWNLOADS").FontSize(10).FontWeight(700).TextColor(pal.TextMuted).Padding(0, 10, 4, 10)
+				statusNav := []struct {
+					key   string
+					label string
+					icon  *ui.SVG
+				}{
+					{"All", "All Downloads", iconInbox},
+					{"Downloading", "Downloading", iconDownload},
+					{"Completed", "Completed", iconCheck},
+					{"Queued", "Queued & Paused", iconClock},
+					{"Failed", "Failed", iconAlert},
+				}
+				for _, item := range statusNav {
+					active := a.filterStatus == item.key && a.filterCategory == CatAll
+					if navPill(c, pal, item.icon, item.label, statusCounts[item.key], active) {
+						a.filterStatus = item.key
+						a.filterCategory = CatAll
+					}
+				}
+			})
+
+			// Categories section
+			ui.Column(c).Gap(3).Children(func() {
+				ui.Text(c, "CATEGORIES").FontSize(10).FontWeight(700).TextColor(pal.TextMuted).Padding(0, 10, 4, 10)
+				catNav := []struct {
+					cat   FileCategory
+					label string
+					icon  *ui.SVG
+				}{
+					{CatDocuments, "Documents", iconDoc},
+					{CatMedia, "Media", iconMedia},
+					{CatArchives, "Archives", iconArchive},
+					{CatPrograms, "Programs", iconProgram},
+					{CatOther, "Other", iconFile},
+				}
+				for _, item := range catNav {
+					active := a.filterCategory == item.cat
+					if navPill(c, pal, item.icon, item.label, catCounts[item.cat], active) {
+						if a.filterCategory == item.cat {
+							a.filterCategory = CatAll
+						} else {
+							a.filterCategory = item.cat
+							a.filterStatus = "All"
+						}
+					}
+				}
+			})
+
+			ui.Spacer(c)
+
+			// Bottom pinned utility controls
+			ui.Column(c).Gap(3).BorderWidth(1, 0, 0, 0).BorderColor(pal.Border).Padding(10, 0, 0, 0).Children(func() {
+				themeIcon := iconSun
+				themeLabel := "Light Mode"
+				if !a.darkMode {
+					themeIcon = iconMoon
+					themeLabel = "Dark Mode"
+				}
+				if navPill(c, pal, themeIcon, themeLabel, -1, false) {
+					a.darkMode = !a.darkMode
+				}
+				if navPill(c, pal, iconSettings, "Settings", -1, a.showSettingsModal) {
+					a.openSettingsModal()
+				}
+			})
+		})
+}
+
+func (a *App) renderHeader(c *ui.Context, pal Palette, selected *engine.Task, completedCount int) {
+	canResume := selected != nil && (selected.Status == engine.StatusPaused || selected.Status == engine.StatusFailed || selected.Status == engine.StatusQueued)
+	canPause := selected != nil && (selected.Status == engine.StatusDownloading || selected.Status == engine.StatusProbing)
+	canDelete := selected != nil
+	canClearDone := completedCount > 0
+
+	ui.Row(c).
+		Height(60).
+		Shrink(0).
+		Padding(0, 20).
+		Gap(10).
+		Background(pal.Header).
+		BorderWidth(0, 0, 1, 0).
+		BorderColor(pal.Border).
+		AlignItems(ui.Center).
+		Children(func() {
+			// Search field container
+			ui.Row(c).
+				Width(260).
+				Padding(0, 10).
+				Gap(7).
+				Radius(8).
+				Background(pal.InputBg).
+				Border(1, pal.Border).
+				AlignItems(ui.Center).
+				Children(func() {
+					ui.Icon(c, iconSearch).Width(14).Height(14).TextColor(pal.TextMuted).Shrink(0)
+					ui.TextInput(c, &a.searchQuery).
+						Placeholder("Search downloads...").
+						Background(ui.Transparent).
+						Border(0, ui.Transparent).
+						Padding(6, 0).
+						Grow(1)
+				})
+
+			ui.Spacer(c)
+
+			// Contextual action buttons
+			if toolbarButton(c, pal, iconPlay, "Resume", !canResume, false) {
+				if err := a.engine.ResumeTask(selected.ID); err != nil {
+					a.statusMessage = err.Error()
+				} else {
+					a.statusMessage = "Resumed " + selected.Filename
+				}
 			}
-			if btn.Clicked() {
-				a.filterStatus = cat.key
-			}
-		}
 
-		ui.Spacer(c)
-		ui.Divider(c)
-		ui.Box(c).Height(4)
-		cfg := a.engine.Config()
-		ui.Text(c, fmt.Sprintf("Max Concurrent: %d", cfg.MaxConcurrentDownloads)).FontSize(11).TextColor(ui.RGB(130, 140, 155))
-		ui.Text(c, fmt.Sprintf("Default Segments: %d", cfg.DefaultSegments)).FontSize(11).TextColor(ui.RGB(130, 140, 155))
-		ui.Text(c, fmt.Sprintf("Total Speed: %s", FormatSpeed(totalSpeed))).FontSize(11).TextColor(ui.RGB(130, 140, 155))
-	})
+			if toolbarButton(c, pal, iconPause, "Pause", !canPause, false) {
+				if err := a.engine.PauseTask(selected.ID); err != nil {
+					a.statusMessage = err.Error()
+				} else {
+					a.statusMessage = "Paused " + selected.Filename
+				}
+			}
+
+			if toolbarButton(c, pal, iconTrash, "Delete", !canDelete, true) {
+				if err := a.engine.DeleteTask(selected.ID, false); err != nil {
+					a.statusMessage = err.Error()
+				} else {
+					a.statusMessage = "Removed " + selected.Filename
+					a.selectedTaskID = ""
+				}
+			}
+
+			if toolbarButton(c, pal, iconCheck, "Clear Done", !canClearDone, false) {
+				removed := 0
+				for _, t := range a.engine.GetTasks() {
+					if t.Status == engine.StatusCompleted {
+						if err := a.engine.DeleteTask(t.ID, false); err == nil {
+							removed++
+							if a.selectedTaskID == t.ID {
+								a.selectedTaskID = ""
+							}
+						}
+					}
+				}
+				a.statusMessage = fmt.Sprintf("Cleared %d completed download(s)", removed)
+			}
+
+			// Primary CTA
+			if primaryCTA(c, pal, iconPlus, "New Download") {
+				a.openAddModal()
+			}
+		})
 }
 
 func (a *App) filterTasks(tasks []*engine.Task) []*engine.Task {
-	if a.filterStatus == "All" {
-		return tasks
-	}
+	query := strings.ToLower(strings.TrimSpace(a.searchQuery))
 	filtered := make([]*engine.Task, 0, len(tasks))
 	for _, t := range tasks {
+		// Category filter
+		if a.filterCategory != CatAll && ClassifyFile(t.Filename, t.URL) != a.filterCategory {
+			continue
+		}
+		// Status filter
 		switch a.filterStatus {
 		case "Downloading":
-			if t.Status == engine.StatusDownloading || t.Status == engine.StatusProbing {
-				filtered = append(filtered, t)
-			}
-		case "Queued":
-			if t.Status == engine.StatusQueued {
-				filtered = append(filtered, t)
-			}
-		case "Paused":
-			if t.Status == engine.StatusPaused || t.Status == engine.StatusFailed || t.Status == engine.StatusCancelled {
-				filtered = append(filtered, t)
+			if t.Status != engine.StatusDownloading && t.Status != engine.StatusProbing {
+				continue
 			}
 		case "Completed":
-			if t.Status == engine.StatusCompleted {
-				filtered = append(filtered, t)
+			if t.Status != engine.StatusCompleted {
+				continue
+			}
+		case "Queued":
+			if t.Status != engine.StatusQueued && t.Status != engine.StatusPaused {
+				continue
+			}
+		case "Failed":
+			if t.Status != engine.StatusFailed && t.Status != engine.StatusCancelled {
+				continue
 			}
 		}
+		// Search filter
+		if query != "" {
+			if !strings.Contains(strings.ToLower(t.Filename), query) &&
+				!strings.Contains(strings.ToLower(t.URL), query) {
+				continue
+			}
+		}
+		filtered = append(filtered, t)
 	}
 	return filtered
 }
 
-func (a *App) renderDownloadList(c *ui.Context, allTasks []*engine.Task) {
+func (a *App) renderDownloadList(c *ui.Context, pal Palette, allTasks []*engine.Task) {
 	filtered := a.filterTasks(allTasks)
 
-	ui.Column(c).Fill().Grow(1).Children(func() {
-		// Table Header
-		ui.Row(c).Padding(8, 12).Gap(10).Background(ui.RGBA(128, 128, 128, 0.08)).Children(func() {
-			ui.Text(c, "Name").Bold().FontSize(12).Width(240).SingleLine()
-			ui.Text(c, "Size").Bold().FontSize(12).Width(130).SingleLine()
-			ui.Text(c, "Progress").Bold().FontSize(12).Grow(1).SingleLine()
-			ui.Text(c, "Speed").Bold().FontSize(12).Width(90).SingleLine()
-			ui.Text(c, "Status").Bold().FontSize(12).Width(95).SingleLine()
-			ui.Text(c, "ETA").Bold().FontSize(12).Width(70).SingleLine()
-		})
-		ui.Divider(c)
+	if len(filtered) == 0 {
+		a.renderEmptyState(c, pal, len(allTasks) == 0)
+		return
+	}
 
-		if len(filtered) == 0 {
-			ui.Column(c).Fill().Center().Padding(32).Gap(8).Children(func() {
-				ui.Text(c, "No downloads in this category").FontSize(15).Bold().TextColor(ui.RGB(130, 140, 155))
-				ui.Text(c, "Click '+ Add URL' or download a file from Chrome/Edge with the MagicDown extension.").FontSize(12).TextColor(ui.RGB(130, 140, 155))
-			})
-			return
-		}
-
-		// Scrollable rows
-		ui.Scroll(c).Fill().Grow(1).Children(func() {
-			ui.Column(c).Fill().Children(func() {
-				for _, task := range filtered {
-					a.renderTaskRow(c, task)
-					ui.Divider(c)
-				}
-			})
+	ui.Scroll(c).Fill().Grow(1).Children(func() {
+		ui.Column(c).Fill().Padding(16, 20).Gap(10).Children(func() {
+			for _, task := range filtered {
+				a.renderDownloadCard(c, pal, task)
+			}
 		})
 	})
 }
 
-func (a *App) renderTaskRow(c *ui.Context, task *engine.Task) {
+func (a *App) renderEmptyState(c *ui.Context, pal Palette, noDownloadsAtAll bool) {
+	ui.Column(c).Fill().Grow(1).Center().Padding(40).Gap(12).Children(func() {
+		ui.Row(c).Width(56).Height(56).Radius(14).Background(pal.Card).Border(1, pal.Border).Center().Children(func() {
+			ui.Icon(c, iconDownload).Width(24).Height(24).TextColor(pal.Accent)
+		})
+
+		title := "No downloads yet"
+		subtitle := "Add a URL or click any file in Chrome/Edge to accelerate downloads with multi-segment streams."
+		if !noDownloadsAtAll {
+			title = "No matching downloads"
+			subtitle = "Try clearing your search query or switching to another status or category."
+		}
+
+		ui.Text(c, title).FontSize(16).FontWeight(600).TextColor(pal.TextPrimary)
+		ui.Text(c, subtitle).FontSize(13).TextColor(pal.TextSecondary).MaxWidth(420)
+
+		ui.Box(c).Height(4)
+		if noDownloadsAtAll {
+			if primaryCTA(c, pal, iconPlus, "Add New Download") {
+				a.openAddModal()
+			}
+		} else if toolbarButton(c, pal, iconRefresh, "Reset Filters", false, false) {
+			a.filterStatus = "All"
+			a.filterCategory = CatAll
+			a.searchQuery = ""
+		}
+	})
+}
+
+func (a *App) renderDownloadCard(c *ui.Context, pal Palette, task *engine.Task) {
 	isSelected := a.selectedTaskID == task.ID
-	bg := ui.Transparent
+	cat := ClassifyFile(task.Filename, task.URL)
+	catIcon, catFg, catBg := categoryVisual(cat, pal)
+
+	card := ui.Column(c).
+		Padding(14, 16).
+		Gap(10).
+		Radius(10).
+		Cursor(ui.CursorPointer).
+		Focusable()
+
+	bg := pal.Card
+	border := pal.Border
 	if isSelected {
-		bg = ui.RGBA(59, 130, 246, 0.16)
+		bg = pal.CardSelected
+		border = pal.Accent
+	} else if card.Hovered() {
+		bg = pal.CardHover
+		border = pal.BorderStrong
 	}
 
-	pct := task.ProgressPercentage()
 	name := task.Filename
 	if name == "" {
-		name = task.URL
+		name = extractHost(task.URL)
+	}
+	host := extractHost(task.URL)
+	pct := task.ProgressPercentage()
+
+	barColor := pal.Accent
+	switch task.Status {
+	case engine.StatusCompleted:
+		barColor = pal.Success
+	case engine.StatusPaused, engine.StatusQueued:
+		barColor = pal.Warning
+	case engine.StatusFailed, engine.StatusCancelled:
+		barColor = pal.Danger
 	}
 
-	sizeText := FormatBytes(task.DownloadedBytes)
-	if task.TotalBytes > 0 {
-		sizeText = fmt.Sprintf("%s / %s", FormatBytes(task.DownloadedBytes), FormatBytes(task.TotalBytes))
+	segLabel := "1 stream"
+	if task.SupportsRanges && len(task.Segments) > 1 {
+		segLabel = fmt.Sprintf("%d segs", len(task.Segments))
+	} else if task.NumSegments > 1 {
+		segLabel = fmt.Sprintf("%d segs", task.NumSegments)
 	}
 
-	row := ui.Row(c).Padding(10, 12).Gap(10).Background(bg).Focusable().Children(func() {
-		ui.Text(c, name).Width(240).SingleLine().Ellipsis("...")
-		ui.Text(c, sizeText).FontSize(12).Width(130).SingleLine()
+	card.Background(bg).Border(1, border).Children(func() {
+		// Top row: Category icon + Filename/Host + Status Pill + Inline quick actions
+		ui.Row(c).Gap(12).AlignItems(ui.Center).Children(func() {
+			// File category badge
+			ui.Row(c).Width(38).Height(38).Radius(9).Background(catBg).Center().Shrink(0).Children(func() {
+				ui.Icon(c, catIcon).Width(18).Height(18).TextColor(catFg)
+			})
 
-		// Progress column: bar + percentage text
-		ui.Column(c).Grow(1).Gap(4).Children(func() {
-			ui.Row(c).Gap(8).Children(func() {
-				ui.Progress(c, pct/100.0).Grow(1)
-				ui.Text(c, fmt.Sprintf("%.1f%%", pct)).FontSize(11).Width(44).SingleLine()
+			// Title + metadata
+			ui.Column(c).Gap(3).Grow(1).Children(func() {
+				ui.Text(c, name).FontSize(14).FontWeight(600).TextColor(pal.TextPrimary).SingleLine().Ellipsis("...")
+				ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
+					ui.Text(c, host).FontSize(12).TextColor(pal.TextSecondary).SingleLine().Ellipsis("...")
+					ui.Box(c).Padding(1, 6).Radius(4).Background(pal.BadgeBg).Shrink(0).Children(func() {
+						ui.Text(c, segLabel).FontSize(10).FontWeight(600).FontFeatures("tnum").TextColor(pal.TextMuted).SingleLine()
+					})
+					if task.ErrorMessage != "" {
+						ui.Text(c, task.ErrorMessage).FontSize(11).TextColor(pal.Danger).SingleLine().Ellipsis("...")
+					}
+				})
+			})
+
+			// Status badge
+			statusBadge(c, pal, task.Status)
+
+			// Inline quick action icons
+			ui.Row(c).Gap(2).AlignItems(ui.Center).Shrink(0).Children(func() {
+				switch task.Status {
+				case engine.StatusDownloading, engine.StatusProbing:
+					if rowIconButton(c, pal, iconPause, false) {
+						_ = a.engine.PauseTask(task.ID)
+						a.statusMessage = "Paused " + name
+					}
+				case engine.StatusPaused, engine.StatusQueued:
+					if rowIconButton(c, pal, iconPlay, false) {
+						_ = a.engine.ResumeTask(task.ID)
+						a.statusMessage = "Resumed " + name
+					}
+				case engine.StatusFailed, engine.StatusCancelled:
+					if rowIconButton(c, pal, iconRefresh, false) {
+						_ = a.engine.ResumeTask(task.ID)
+						a.statusMessage = "Retrying " + name
+					}
+				}
+
+				if task.SavePath != "" {
+					if rowIconButton(c, pal, iconFolder, false) {
+						openInFileManager(task.SavePath)
+						a.statusMessage = "Opened folder for " + name
+					}
+				}
+
+				if rowIconButton(c, pal, iconTrash, true) {
+					_ = a.engine.DeleteTask(task.ID, false)
+					if a.selectedTaskID == task.ID {
+						a.selectedTaskID = ""
+					}
+					a.statusMessage = "Removed " + name
+				}
 			})
 		})
 
-		ui.Text(c, FormatSpeed(task.Speed)).FontSize(12).Width(90).SingleLine()
-		ui.Text(c, string(task.Status)).FontSize(12).Bold().TextColor(statusColor(task.Status)).Width(95).SingleLine()
-		ui.Text(c, FormatETA(task.ETA)).FontSize(12).Width(70).SingleLine()
+		// Bottom row: Rounded progress bar + right-aligned tabular metrics
+		ui.Row(c).Gap(14).AlignItems(ui.Center).Children(func() {
+			ui.Progress(c, pct/100.0).
+				Height(6).
+				Radius(999).
+				Background(pal.TrackBg).
+				TextColor(barColor).
+				Grow(1)
+
+			// Tabular metrics
+			sizeText := FormatBytes(task.DownloadedBytes)
+			if task.TotalBytes > 0 {
+				sizeText = fmt.Sprintf("%s / %s", FormatBytes(task.DownloadedBytes), FormatBytes(task.TotalBytes))
+			}
+
+			ui.Row(c).Gap(10).AlignItems(ui.Center).Shrink(0).Children(func() {
+				ui.Text(c, sizeText).FontSize(12).FontFeatures("tnum").TextColor(pal.TextSecondary).SingleLine()
+
+				if task.Status == engine.StatusDownloading && task.Speed > 0 {
+					ui.Text(c, "•").FontSize(11).TextColor(pal.TextMuted)
+					ui.Text(c, FormatSpeed(task.Speed)).FontSize(12).FontWeight(600).FontFeatures("tnum").TextColor(pal.Accent).SingleLine()
+					if task.ETA > 0 {
+						ui.Text(c, "•").FontSize(11).TextColor(pal.TextMuted)
+						ui.Text(c, FormatETA(task.ETA)).FontSize(12).FontFeatures("tnum").TextColor(pal.TextSecondary).SingleLine()
+					}
+				}
+
+				ui.Text(c, fmt.Sprintf("%.1f%%", pct)).
+					FontSize(12).
+					FontWeight(600).
+					FontFeatures("tnum").
+					TextColor(pal.TextPrimary).
+					MinWidth(52).
+					SingleLine()
+			})
+		})
 	})
 
-	if row.Clicked() {
+	if card.Clicked() {
 		a.selectedTaskID = task.ID
 	}
 }
 
-func statusColor(st engine.TaskStatus) ui.Color {
-	switch st {
-	case engine.StatusDownloading, engine.StatusProbing:
-		return ui.RGB(59, 130, 246) // Blue
-	case engine.StatusCompleted:
-		return ui.RGB(34, 197, 94) // Green
-	case engine.StatusPaused:
-		return ui.RGB(245, 158, 11) // Amber
-	case engine.StatusFailed, engine.StatusCancelled:
-		return ui.RGB(239, 68, 68) // Red
-	default:
-		return ui.RGB(148, 163, 184) // Slate
+func (a *App) renderStatusBar(c *ui.Context, pal Palette, activeCount, queuedCount int, totalSpeed int64) {
+	ipcPort := ipc.DefaultPort
+	ipcConnected := false
+	if a.ipcServer != nil {
+		ipcPort = a.ipcServer.Port()
+		ipcConnected = ipcPort > 0
 	}
-}
 
-func (a *App) renderFooter(c *ui.Context, tasks []*engine.Task) {
-	footerText := a.statusMessage
-	if a.selectedTaskID != "" {
-		for _, t := range tasks {
-			if t.ID == a.selectedTaskID {
-				segInfo := "Single-stream"
-				if t.SupportsRanges && len(t.Segments) > 1 {
-					segInfo = fmt.Sprintf("%d segments", len(t.Segments))
-				}
-				footerText = fmt.Sprintf("Selected: %s  |  %s  |  Save: %s", t.Filename, segInfo, t.SavePath)
-				if t.ErrorMessage != "" {
-					footerText += "  |  Error: " + t.ErrorMessage
-				}
-				break
+	dotColor := pal.Success
+	ipcLabel := fmt.Sprintf("Extension IPC :%d Ready", ipcPort)
+	if !ipcConnected {
+		dotColor = pal.Warning
+		ipcLabel = "IPC Offline"
+	}
+
+	ui.Row(c).
+		Height(34).
+		Shrink(0).
+		Padding(0, 20).
+		Gap(12).
+		Background(pal.Header).
+		BorderWidth(1, 0, 0, 0).
+		BorderColor(pal.Border).
+		AlignItems(ui.Center).
+		Children(func() {
+			ui.Row(c).Gap(6).AlignItems(ui.Center).Shrink(0).Children(func() {
+				ui.Box(c).Width(7).Height(7).Radius(999).Background(dotColor)
+				ui.Text(c, ipcLabel).FontSize(11).FontWeight(500).TextColor(pal.TextSecondary).SingleLine()
+			})
+
+			if a.statusMessage != "" {
+				ui.Text(c, "|").FontSize(11).TextColor(pal.BorderStrong)
+				ui.Text(c, a.statusMessage).FontSize(11).TextColor(pal.TextMuted).SingleLine().Ellipsis("...")
 			}
-		}
-	}
-	if footerText == "" {
-		footerText = fmt.Sprintf("Ready  |  Download folder: %s", a.engine.Config().DownloadDir)
-	}
 
-	ui.Row(c).Padding(6, 12).Children(func() {
-		ui.Text(c, footerText).FontSize(11).TextColor(ui.RGB(130, 140, 155)).SingleLine().Ellipsis("...")
-	})
+			ui.Spacer(c)
+
+			summary := fmt.Sprintf("Active: %d   •   Queued: %d   •   Speed: %s",
+				activeCount, queuedCount, FormatSpeed(totalSpeed))
+			ui.Text(c, summary).FontSize(11).FontWeight(500).FontFeatures("tnum").TextColor(pal.TextSecondary).SingleLine()
+		})
 }
 
-func (a *App) renderAddURLModal(c *ui.Context) {
+func (a *App) renderAddModal(c *ui.Context, pal Palette) {
 	if !a.showAddModal {
 		return
 	}
+	if c.Shortcut(0, ui.KeyEnter) {
+		a.submitAddDownload(true)
+		return
+	}
+
 	ui.Modal(c, &a.showAddModal, func() {
-		ui.Column(c).Width(480).Gap(12).Children(func() {
-			ui.Text(c, "Add New Download").FontSize(18).Bold()
-
-			ui.Column(c).Gap(4).Children(func() {
-				ui.Text(c, "URL").FontSize(12).Bold()
-				ui.TextInput(c, &a.inputURL).Placeholder("https://example.com/file.zip").Width(480)
+		ui.Column(c).Width(520).Gap(16).Children(func() {
+			// Modal Header
+			ui.Row(c).AlignItems(ui.Center).Justify(ui.SpaceBetween).Children(func() {
+				ui.Row(c).Gap(10).AlignItems(ui.Center).Children(func() {
+					ui.Row(c).Width(32).Height(32).Radius(8).Background(pal.AccentSoft).Center().Children(func() {
+						ui.Icon(c, iconPlus).Width(16).Height(16).TextColor(pal.Accent)
+					})
+					ui.Column(c).Gap(1).Children(func() {
+						ui.Text(c, "New Download").FontSize(16).FontWeight(700).TextColor(pal.TextPrimary)
+						ui.Text(c, "Enter a direct HTTP/HTTPS link to accelerate").FontSize(12).TextColor(pal.TextMuted)
+					})
+				})
+				if rowIconButton(c, pal, iconClose, false) {
+					a.showAddModal = false
+				}
 			})
 
-			ui.Column(c).Gap(4).Children(func() {
-				ui.Text(c, "Filename (optional)").FontSize(12).Bold()
-				ui.TextInput(c, &a.inputFilename).Placeholder("Leave blank to auto-detect from server/URL").Width(480)
+			ui.Divider(c)
+
+			// URL Field + Clipboard Paste button
+			ui.Column(c).Gap(6).Children(func() {
+				ui.Text(c, "Download URL").FontSize(12).FontWeight(600).TextColor(pal.TextSecondary)
+				ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
+					ui.TextInput(c, &a.inputURL).
+						Placeholder("https://example.com/archive.zip").
+						Background(pal.InputBg).
+						Border(1, pal.Border).
+						Radius(7).
+						Grow(1)
+					if toolbarButton(c, pal, iconClipboard, "Paste", false, false) {
+						clip := strings.TrimSpace(c.ReadClipboard())
+						if clip != "" {
+							a.inputURL = clip
+							a.addError = ""
+						}
+					}
+				})
+				if strings.TrimSpace(a.inputFilename) == "" && strings.HasPrefix(strings.TrimSpace(a.inputURL), "http") {
+					preview := engine.ExtractFilename(strings.TrimSpace(a.inputURL), nil)
+					ui.Text(c, "Auto-detected filename: "+preview).FontSize(11).TextColor(pal.Accent)
+				}
 			})
 
-			ui.Column(c).Gap(4).Children(func() {
-				ui.Text(c, "Concurrent Segments (1-16)").FontSize(12).Bold()
-				ui.TextInput(c, &a.inputSegments).Width(120)
+			// Filename & Save Dir
+			ui.Column(c).Gap(6).Children(func() {
+				ui.Text(c, "Filename (optional)").FontSize(12).FontWeight(600).TextColor(pal.TextSecondary)
+				ui.TextInput(c, &a.inputFilename).
+					Placeholder("Leave blank to auto-detect from server or URL").
+					Background(pal.InputBg).
+					Border(1, pal.Border).
+					Radius(7)
+			})
+
+			ui.Column(c).Gap(6).Children(func() {
+				ui.Text(c, "Save Directory").FontSize(12).FontWeight(600).TextColor(pal.TextSecondary)
+				ui.TextInput(c, &a.inputSaveDir).
+					Background(pal.InputBg).
+					Border(1, pal.Border).
+					Radius(7)
+			})
+
+			// Segment Count Selector
+			ui.Column(c).Gap(6).Children(func() {
+				ui.Text(c, "Concurrent Segments").FontSize(12).FontWeight(600).TextColor(pal.TextSecondary)
+				ui.Row(c).Gap(8).Children(func() {
+					for _, seg := range []int{4, 8, 16} {
+						if segmentOption(c, pal, fmt.Sprintf("%d connections", seg), a.inputSegments == seg) {
+							a.inputSegments = seg
+						}
+					}
+				})
 			})
 
 			if a.addError != "" {
-				ui.Text(c, a.addError).FontSize(12).TextColor(ui.RGB(239, 68, 68))
+				ui.Row(c).Padding(8, 10).Radius(6).Background(pal.DangerSoft).Gap(6).AlignItems(ui.Center).Children(func() {
+					ui.Icon(c, iconAlert).Width(14).Height(14).TextColor(pal.Danger)
+					ui.Text(c, a.addError).FontSize(12).TextColor(pal.Danger)
+				})
 			}
 
-			ui.Row(c).Gap(8).Children(func() {
+			ui.Divider(c)
+
+			// Modal Footer
+			ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
 				ui.Spacer(c)
-				if ui.Button(c, "Cancel").Clicked() {
+				if toolbarButton(c, pal, nil, "Cancel", false, false) {
 					a.showAddModal = false
 				}
-				if ui.Button(c, "Add to Queue").Clicked() {
+				if toolbarButton(c, pal, iconClock, "Add to Queue", false, false) {
 					a.submitAddDownload(false)
 				}
-				if ui.PrimaryButton(c, "Download Now").Clicked() {
+				if primaryCTA(c, pal, iconDownload, "Start Download") {
 					a.submitAddDownload(true)
 				}
 			})
@@ -418,14 +745,15 @@ func (a *App) submitAddDownload(autoStart bool) {
 		return
 	}
 
-	segs, err := strconv.Atoi(strings.TrimSpace(a.inputSegments))
-	if err != nil || segs < 1 || segs > 16 {
+	segs := a.inputSegments
+	if segs < 1 || segs > 16 {
 		segs = a.engine.Config().DefaultSegments
 	}
 
 	task, err := a.engine.AddTask(engine.AddTaskRequest{
 		URL:         rawURL,
 		Filename:    strings.TrimSpace(a.inputFilename),
+		SaveDir:     strings.TrimSpace(a.inputSaveDir),
 		NumSegments: segs,
 		AutoStart:   autoStart,
 	})
@@ -439,40 +767,108 @@ func (a *App) submitAddDownload(autoStart bool) {
 	a.showAddModal = false
 }
 
-func (a *App) renderSettingsModal(c *ui.Context) {
+func (a *App) renderSettingsModal(c *ui.Context, pal Palette) {
 	if !a.showSettingsModal {
 		return
 	}
-	ui.Modal(c, &a.showSettingsModal, func() {
-		ui.Column(c).Width(480).Gap(12).Children(func() {
-			ui.Text(c, "MagicDown Settings").FontSize(18).Bold()
 
-			ui.Column(c).Gap(4).Children(func() {
-				ui.Text(c, "Download Directory").FontSize(12).Bold()
-				ui.TextInput(c, &a.settingDownloadDir).Width(480)
+	ui.Modal(c, &a.showSettingsModal, func() {
+		ui.Column(c).Width(520).Gap(16).Children(func() {
+			// Header
+			ui.Row(c).AlignItems(ui.Center).Justify(ui.SpaceBetween).Children(func() {
+				ui.Row(c).Gap(10).AlignItems(ui.Center).Children(func() {
+					ui.Row(c).Width(32).Height(32).Radius(8).Background(pal.AccentSoft).Center().Children(func() {
+						ui.Icon(c, iconSettings).Width(16).Height(16).TextColor(pal.Accent)
+					})
+					ui.Column(c).Gap(1).Children(func() {
+						ui.Text(c, "Settings").FontSize(16).FontWeight(700).TextColor(pal.TextPrimary)
+						ui.Text(c, "Configure downloads, concurrency, and browser integration").FontSize(12).TextColor(pal.TextMuted)
+					})
+				})
+				if rowIconButton(c, pal, iconClose, false) {
+					a.showSettingsModal = false
+				}
 			})
 
-			ui.Row(c).Gap(16).Children(func() {
-				ui.Column(c).Gap(4).Children(func() {
-					ui.Text(c, "Max Concurrent Downloads").FontSize(12).Bold()
-					ui.TextInput(c, &a.settingMaxConcurrent).Width(140)
+			ui.Divider(c)
+
+			// Download Directory
+			ui.Column(c).Gap(6).Children(func() {
+				ui.Text(c, "Default Download Directory").FontSize(12).FontWeight(600).TextColor(pal.TextSecondary)
+				ui.TextInput(c, &a.settingDownloadDir).
+					Background(pal.InputBg).
+					Border(1, pal.Border).
+					Radius(7)
+			})
+
+			// Max Concurrent Downloads
+			ui.Column(c).Gap(6).Children(func() {
+				ui.Text(c, "Max Concurrent Downloads").FontSize(12).FontWeight(600).TextColor(pal.TextSecondary)
+				ui.Row(c).Gap(8).Children(func() {
+					for _, n := range []int{1, 2, 3, 5, 8} {
+						if segmentOption(c, pal, fmt.Sprintf("%d", n), a.settingMaxConcurrent == n) {
+							a.settingMaxConcurrent = n
+						}
+					}
 				})
-				ui.Column(c).Gap(4).Children(func() {
-					ui.Text(c, "Default Segments").FontSize(12).Bold()
-					ui.TextInput(c, &a.settingSegments).Width(140)
+			})
+
+			// Default Segments
+			ui.Column(c).Gap(6).Children(func() {
+				ui.Text(c, "Default Segments per File").FontSize(12).FontWeight(600).TextColor(pal.TextSecondary)
+				ui.Row(c).Gap(8).Children(func() {
+					for _, seg := range []int{4, 8, 16} {
+						if segmentOption(c, pal, fmt.Sprintf("%d connections", seg), a.settingSegments == seg) {
+							a.settingSegments = seg
+						}
+					}
+				})
+			})
+
+			// Appearance toggle
+			ui.Column(c).Gap(6).Children(func() {
+				ui.Text(c, "Appearance").FontSize(12).FontWeight(600).TextColor(pal.TextSecondary)
+				ui.Row(c).Gap(8).Children(func() {
+					if segmentOption(c, pal, "Dark Theme", a.darkMode) {
+						a.darkMode = true
+					}
+					if segmentOption(c, pal, "Light Theme", !a.darkMode) {
+						a.darkMode = false
+					}
+				})
+			})
+
+			// Native Messaging & IPC Status Info Card
+			ipcPort := ipc.DefaultPort
+			if a.ipcServer != nil {
+				ipcPort = a.ipcServer.Port()
+			}
+			ui.Row(c).Padding(10, 12).Radius(8).Background(pal.InputBg).Border(1, pal.Border).AlignItems(ui.Center).Justify(ui.SpaceBetween).Children(func() {
+				ui.Column(c).Gap(2).Children(func() {
+					ui.Text(c, "Chrome / Edge Native Messaging").FontSize(12).FontWeight(600).TextColor(pal.TextPrimary)
+					ui.Text(c, fmt.Sprintf("Host: com.magicdown.downloader  •  IPC 127.0.0.1:%d", ipcPort)).FontSize(11).FontFeatures("tnum").TextColor(pal.TextMuted)
+				})
+				ui.Row(c).Padding(3, 8).Radius(999).Background(pal.SuccessSoft).Gap(5).AlignItems(ui.Center).Children(func() {
+					ui.Box(c).Width(6).Height(6).Radius(999).Background(pal.Success)
+					ui.Text(c, "Listening").FontSize(11).FontWeight(600).TextColor(pal.Success)
 				})
 			})
 
 			if a.settingsError != "" {
-				ui.Text(c, a.settingsError).FontSize(12).TextColor(ui.RGB(239, 68, 68))
+				ui.Row(c).Padding(8, 10).Radius(6).Background(pal.DangerSoft).Gap(6).AlignItems(ui.Center).Children(func() {
+					ui.Icon(c, iconAlert).Width(14).Height(14).TextColor(pal.Danger)
+					ui.Text(c, a.settingsError).FontSize(12).TextColor(pal.Danger)
+				})
 			}
+
+			ui.Divider(c)
 
 			ui.Row(c).Gap(8).Children(func() {
 				ui.Spacer(c)
-				if ui.Button(c, "Cancel").Clicked() {
+				if toolbarButton(c, pal, nil, "Cancel", false, false) {
 					a.showSettingsModal = false
 				}
-				if ui.PrimaryButton(c, "Save Settings").Clicked() {
+				if primaryCTA(c, pal, iconCheck, "Save Changes") {
 					a.saveSettings()
 				}
 			})
@@ -481,20 +877,18 @@ func (a *App) renderSettingsModal(c *ui.Context) {
 }
 
 func (a *App) saveSettings() {
-	maxC, err := strconv.Atoi(strings.TrimSpace(a.settingMaxConcurrent))
-	if err != nil || maxC < 1 || maxC > 20 {
-		a.settingsError = "Max concurrent downloads must be between 1 and 20."
-		return
-	}
-	segs, err := strconv.Atoi(strings.TrimSpace(a.settingSegments))
-	if err != nil || segs < 1 || segs > 16 {
-		a.settingsError = "Default segments must be between 1 and 16."
-		return
-	}
 	dir := strings.TrimSpace(a.settingDownloadDir)
 	if dir == "" {
 		a.settingsError = "Download directory cannot be empty."
 		return
+	}
+	maxC := a.settingMaxConcurrent
+	if maxC < 1 || maxC > 20 {
+		maxC = 3
+	}
+	segs := a.settingSegments
+	if segs < 1 || segs > 16 {
+		segs = 8
 	}
 
 	cfg := a.engine.Config()
@@ -505,4 +899,16 @@ func (a *App) saveSettings() {
 
 	a.statusMessage = "Settings saved"
 	a.showSettingsModal = false
+}
+
+func openInFileManager(targetPath string) {
+	go func() {
+		if runtime.GOOS == "windows" {
+			if _, err := os.Stat(targetPath); err == nil {
+				_ = exec.Command("explorer.exe", "/select,"+targetPath).Start()
+				return
+			}
+			_ = exec.Command("explorer.exe", filepath.Dir(targetPath)).Start()
+		}
+	}()
 }

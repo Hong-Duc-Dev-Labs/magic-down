@@ -13,6 +13,7 @@
 *.tmp
 temp_downloads/
 downloads/
+screenshots/
 
 # IDE / OS files
 .vscode/
