@@ -1325,6 +1325,80 @@ async function forwardBatchDownload({ items, pageUrl = "", subfolder = "", heade
   return resp;
 }
 
+const PROTOCOL_VERSION = 1;
+const HANDSHAKE_HEARTBEAT_MS = 30000;
+const HANDSHAKE_MAX_BACKOFF_MS = 60000;
+let handshakeBackoffMs = 2000;
+let handshakeTimer = null;
+
+function detectBrowserId(ua) {
+  const agent = typeof ua === "string"
+    ? ua
+    : (typeof navigator !== "undefined" && navigator.userAgent ? navigator.userAgent : "");
+  if (/\bEdg\//i.test(agent)) return "edge";
+  if (/\bOPR\//i.test(agent)) return "opera";
+  if (/\bVivaldi\//i.test(agent)) return "vivaldi";
+  if (/\bCocCoc/i.test(agent)) return "coccoc";
+  return "chrome";
+}
+
+function buildHelloPayload(options = {}) {
+  let extVer = options.extensionVersion || "";
+  if (!extVer && typeof chrome !== "undefined" && chrome.runtime && typeof chrome.runtime.getManifest === "function") {
+    try {
+      extVer = chrome.runtime.getManifest().version || "";
+    } catch {
+      extVer = "";
+    }
+  }
+  return {
+    type: "HELLO",
+    action: "hello",
+    protocolVersion: PROTOCOL_VERSION,
+    extensionVersion: extVer || "0.1.0",
+    browser: options.browser || detectBrowserId(options.userAgent)
+  };
+}
+
+async function performHandshake() {
+  const payload = buildHelloPayload();
+  const resp = await sendNativeMessage(payload);
+  if (resp && resp.type === "WELCOME" && resp.status === "connected" && resp.success) {
+    handshakeBackoffMs = 2000;
+    return { connected: true, welcome: resp };
+  }
+  return { connected: false, error: (resp && resp.error) || "handshake failed" };
+}
+
+function scheduleNextHandshake(delayMs) {
+  if (handshakeTimer) clearTimeout(handshakeTimer);
+  handshakeTimer = setTimeout(async () => {
+    const res = await performHandshake();
+    if (res.connected) {
+      scheduleNextHandshake(HANDSHAKE_HEARTBEAT_MS);
+    } else {
+      handshakeBackoffMs = Math.min(handshakeBackoffMs * 2, HANDSHAKE_MAX_BACKOFF_MS);
+      scheduleNextHandshake(handshakeBackoffMs);
+    }
+  }, delayMs);
+}
+
+if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.id) {
+  performHandshake().then((res) => {
+    scheduleNextHandshake(res.connected ? HANDSHAKE_HEARTBEAT_MS : handshakeBackoffMs);
+  });
+  if (chrome.runtime.onStartup) {
+    chrome.runtime.onStartup.addListener(() => {
+      performHandshake();
+    });
+  }
+  if (chrome.runtime.onInstalled) {
+    chrome.runtime.onInstalled.addListener(() => {
+      performHandshake();
+    });
+  }
+}
+
 if (typeof module !== "undefined" && module.exports) {
   module.exports = {
     normalizeMediaUrl,
@@ -1340,6 +1414,8 @@ if (typeof module !== "undefined" && module.exports) {
     getTabVideoList,
     buildDownloadPayload,
     buildBatchDownloadPayload,
+    detectBrowserId,
+    buildHelloPayload,
     tabVideos,
     tabFbAudios
   };

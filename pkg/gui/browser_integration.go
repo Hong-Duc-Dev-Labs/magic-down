@@ -18,7 +18,24 @@ func (a *App) refreshBrowsers() {
 
 func (a *App) browserIntegrationStatuses() []nativemessaging.BrowserIntegrationStatus {
 	cfg, _ := nativemessaging.LoadExtensionIDConfig("")
-	return nativemessaging.BuildBrowserIntegrationStatuses(a.detectedBrowsers, cfg, a.browserConnStates)
+	merged := make(map[string]nativemessaging.ExtensionConnectionState, len(a.browserConnStates))
+	for k, v := range a.browserConnStates {
+		merged[k] = v
+	}
+	if a.ipcServer != nil {
+		for browserID, rec := range a.ipcServer.GetHandshakeSnapshots() {
+			cur := merged[browserID]
+			cur.Connected = rec.Connected
+			cur.ExtensionVersion = rec.ExtensionVersion
+			cur.LastHandshakeAt = rec.LastSeenAt
+			if rec.Connected {
+				cur.Waiting = false
+				cur.LastError = ""
+			}
+			merged[browserID] = cur
+		}
+	}
+	return nativemessaging.BuildBrowserIntegrationStatuses(a.detectedBrowsers, cfg, merged)
 }
 
 func (a *App) installExtensionForBrowser(st nativemessaging.BrowserIntegrationStatus) {

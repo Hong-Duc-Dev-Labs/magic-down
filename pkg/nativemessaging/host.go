@@ -5,48 +5,59 @@ import (
 	"errors"
 	"io"
 	"os"
+	"strings"
 
 	"magicdown/pkg/ipc"
+	"magicdown/pkg/version"
 )
 
 // InboundMessage represents a message received from the browser extension.
 type InboundMessage struct {
-	Action        string            `json:"action"`
-	URL           string            `json:"url,omitempty"`
-	AudioURL      string            `json:"audio_url,omitempty"`
-	Filename      string            `json:"filename,omitempty"`
-	Referrer      string            `json:"referrer,omitempty"`
-	Cookies       string            `json:"cookies,omitempty"`
-	Headers       map[string]string `json:"headers,omitempty"`
-	NumSegments   int               `json:"num_segments,omitempty"`
-	TotalBytes    int64             `json:"total_bytes,omitempty"`
-	ConvertFormat string                   `json:"convert_format,omitempty"`
-	TargetFormat  string                   `json:"target_format,omitempty"`
-	OutputFormat  string                   `json:"output_format,omitempty"`
-	AudioBitrate  string                   `json:"audio_bitrate,omitempty"`
-	Plan          json.RawMessage          `json:"plan,omitempty"`
-	AutoStart     bool                     `json:"auto_start,omitempty"`
-	SkipDialog    bool                     `json:"skip_dialog,omitempty"`
-	Subfolder     string                   `json:"subfolder,omitempty"`
-	Items         []ipc.AddDownloadRequest `json:"items,omitempty"`
+	Type             string                   `json:"type,omitempty"`
+	ProtocolVersion  int                      `json:"protocolVersion,omitempty"`
+	ExtensionVersion string                   `json:"extensionVersion,omitempty"`
+	Browser          string                   `json:"browser,omitempty"`
+	Action           string                   `json:"action"`
+	URL              string                   `json:"url,omitempty"`
+	AudioURL         string                   `json:"audio_url,omitempty"`
+	Filename         string                   `json:"filename,omitempty"`
+	Referrer         string                   `json:"referrer,omitempty"`
+	Cookies          string                   `json:"cookies,omitempty"`
+	Headers          map[string]string        `json:"headers,omitempty"`
+	NumSegments      int                      `json:"num_segments,omitempty"`
+	TotalBytes       int64                    `json:"total_bytes,omitempty"`
+	ConvertFormat    string                   `json:"convert_format,omitempty"`
+	TargetFormat     string                   `json:"target_format,omitempty"`
+	OutputFormat     string                   `json:"output_format,omitempty"`
+	AudioBitrate     string                   `json:"audio_bitrate,omitempty"`
+	Plan             json.RawMessage          `json:"plan,omitempty"`
+	AutoStart        bool                     `json:"auto_start,omitempty"`
+	SkipDialog       bool                     `json:"skip_dialog,omitempty"`
+	Subfolder        string                   `json:"subfolder,omitempty"`
+	Items            []ipc.AddDownloadRequest `json:"items,omitempty"`
 }
 
 // OutboundMessage represents a response sent back to the browser extension.
 type OutboundMessage struct {
-	Success    bool   `json:"success"`
-	Action     string `json:"action,omitempty"`
-	Message    string `json:"message,omitempty"`
-	TaskID     string `json:"taskId,omitempty"`
-	Filename   string `json:"filename,omitempty"`
-	Added      int    `json:"added,omitempty"`
-	Failed     int    `json:"failed,omitempty"`
-	AppRunning bool   `json:"app_running,omitempty"`
-	Error      string `json:"error,omitempty"`
+	Type            string `json:"type,omitempty"`
+	ProtocolVersion int    `json:"protocolVersion,omitempty"`
+	HostVersion     string `json:"hostVersion,omitempty"`
+	Status          string `json:"status,omitempty"`
+	Success         bool   `json:"success"`
+	Action          string `json:"action,omitempty"`
+	Message         string `json:"message,omitempty"`
+	TaskID          string `json:"taskId,omitempty"`
+	Filename        string `json:"filename,omitempty"`
+	Added           int    `json:"added,omitempty"`
+	Failed          int    `json:"failed,omitempty"`
+	AppRunning      bool   `json:"app_running,omitempty"`
+	Error           string `json:"error,omitempty"`
 }
 
 // Handler processes native messaging messages and talks to the IPC client.
 type Handler struct {
-	ipcClient *ipc.Client
+	ipcClient   *ipc.Client
+	lastBrowser string
 }
 
 // NewHandler creates a handler using the given IPC client.
@@ -65,7 +76,54 @@ func (h *Handler) HandleMessage(msgBytes []byte) ([]byte, error) {
 		return json.Marshal(resp)
 	}
 
-	switch in.Action {
+	action := strings.ToLower(strings.TrimSpace(in.Action))
+	if strings.EqualFold(strings.TrimSpace(in.Type), "HELLO") {
+		action = "hello"
+	}
+
+	switch action {
+	case "hello":
+		browser := strings.ToLower(strings.TrimSpace(in.Browser))
+		if browser == "" {
+			browser = "chrome"
+		}
+		h.lastBrowser = browser
+		protoVer := in.ProtocolVersion
+		if protoVer <= 0 {
+			protoVer = 1
+		}
+		welcome, err := h.ipcClient.SendHello(ipc.HelloRequest{
+			Type:             "HELLO",
+			ProtocolVersion:  protoVer,
+			ExtensionVersion: in.ExtensionVersion,
+			Browser:          browser,
+			HostVersion:      version.Version,
+		})
+		if err != nil {
+			resp := OutboundMessage{
+				Type:            "WELCOME",
+				ProtocolVersion: 1,
+				HostVersion:     version.Version,
+				Status:          "offline",
+				Success:         false,
+				Action:          "hello",
+				AppRunning:      false,
+				Error:           "MagicDown desktop app is not running: " + err.Error(),
+			}
+			return json.Marshal(resp)
+		}
+		resp := OutboundMessage{
+			Type:            "WELCOME",
+			ProtocolVersion: welcome.ProtocolVersion,
+			HostVersion:     welcome.HostVersion,
+			Status:          welcome.Status,
+			Success:         true,
+			Action:          "hello",
+			AppRunning:      true,
+			Message:         "connected",
+		}
+		return json.Marshal(resp)
+
 	case "ping":
 		appRunning := h.ipcClient.IsAppRunning()
 		resp := OutboundMessage{
@@ -96,11 +154,11 @@ func (h *Handler) HandleMessage(msgBytes []byte) ([]byte, error) {
 		return json.Marshal(resp)
 
 	case "download":
-		if in.URL == "" {
+		if err := ipc.ValidateHTTPURL(in.URL); err != nil {
 			resp := OutboundMessage{
 				Success: false,
 				Action:  "download",
-				Error:   "missing download URL",
+				Error:   err.Error(),
 			}
 			return json.Marshal(resp)
 		}
@@ -213,7 +271,12 @@ func RunStdioHost(in io.Reader, out io.Writer, port int) error {
 	handler := NewHandler(client)
 
 	LogEvent("INFO", "host_startup", map[string]any{"ipc_port": port})
-	defer LogEvent("INFO", "host_shutdown", map[string]any{"ipc_port": port})
+	defer func() {
+		if handler.lastBrowser != "" {
+			_ = client.SendDisconnect(handler.lastBrowser)
+		}
+		LogEvent("INFO", "host_shutdown", map[string]any{"ipc_port": port, "browser": handler.lastBrowser})
+	}()
 
 	for {
 		msgBytes, err := ReadMessage(in)

@@ -117,7 +117,10 @@ func TestConfigEndpointAppliesSettings(t *testing.T) {
 	cfg.StateFilePath = `C:\should\be\ignored.json`
 	body, _ := json.Marshal(cfg)
 
-	resp, err := http.Post(base, "application/json", bytes.NewReader(body))
+	req, _ := http.NewRequest(http.MethodPost, base, bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(TokenHeader, server.AuthToken())
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("POST /config failed: %v", err)
 	}
@@ -137,7 +140,9 @@ func TestConfigEndpointAppliesSettings(t *testing.T) {
 		t.Fatalf("state path should be process-owned, got %q", updated.StateFilePath)
 	}
 
-	getResp, err := http.Get(base)
+	getReq, _ := http.NewRequest(http.MethodGet, base, nil)
+	getReq.Header.Set(TokenHeader, server.AuthToken())
+	getResp, err := http.DefaultClient.Do(getReq)
 	if err != nil {
 		t.Fatalf("GET /config failed: %v", err)
 	}

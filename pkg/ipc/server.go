@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"magicdown/pkg/engine"
+	"magicdown/pkg/version"
 )
 
 const DefaultPort = 28888
@@ -68,6 +70,34 @@ type StatusResponse struct {
 	TotalTasks      int    `json:"total_tasks"`
 }
 
+// HelloRequest is sent by Native Messaging Host when an extension initiates HELLO handshake.
+type HelloRequest struct {
+	Type             string `json:"type"`
+	ProtocolVersion  int    `json:"protocolVersion"`
+	ExtensionVersion string `json:"extensionVersion"`
+	Browser          string `json:"browser"`
+	HostVersion      string `json:"hostVersion,omitempty"`
+}
+
+// WelcomeResponse is returned by /handshake/hello upon valid handshake.
+type WelcomeResponse struct {
+	Type            string `json:"type"`
+	ProtocolVersion int    `json:"protocolVersion"`
+	HostVersion     string `json:"hostVersion"`
+	AppVersion      string `json:"appVersion"`
+	Status          string `json:"status"`
+}
+
+// HandshakeRecord tracks real extension connectivity per browser.
+type HandshakeRecord struct {
+	Browser          string    `json:"browser"`
+	ExtensionVersion string    `json:"extensionVersion"`
+	ProtocolVersion  int       `json:"protocolVersion"`
+	HostVersion      string    `json:"hostVersion"`
+	Connected        bool      `json:"connected"`
+	LastSeenAt       time.Time `json:"lastSeenAt"`
+}
+
 // Server provides the local HTTP IPC server for MagicDown desktop app.
 type Server struct {
 	engine             *engine.Engine
@@ -76,6 +106,10 @@ type Server struct {
 	listener           net.Listener
 	mu                 sync.Mutex
 	running            bool
+	authToken          string
+	tokenPath          string
+	handshakeTTL       time.Duration
+	handshakes         map[string]HandshakeRecord
 	onIncomingDownload func(AddDownloadRequest)
 }
 
@@ -94,9 +128,44 @@ func NewServer(eng *engine.Engine, port int) *Server {
 		port = DefaultPort
 	}
 	return &Server{
-		engine: eng,
-		port:   port,
+		engine:       eng,
+		port:         port,
+		tokenPath:    DefaultTokenPath(),
+		handshakeTTL: 90 * time.Second,
+		handshakes:   make(map[string]HandshakeRecord),
 	}
+}
+
+// AuthToken returns the active session IPC auth token.
+func (s *Server) AuthToken() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.authToken
+}
+
+// SetHandshakeTTL overrides the expiration window for extension heartbeats (used in tests).
+func (s *Server) SetHandshakeTTL(d time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if d > 0 {
+		s.handshakeTTL = d
+	}
+}
+
+// GetHandshakeSnapshots returns a copy of current browser handshake states,
+// automatically marking expired entries as disconnected.
+func (s *Server) GetHandshakeSnapshots() map[string]HandshakeRecord {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now()
+	out := make(map[string]HandshakeRecord, len(s.handshakes))
+	for k, rec := range s.handshakes {
+		if rec.Connected && s.handshakeTTL > 0 && now.Sub(rec.LastSeenAt) > s.handshakeTTL {
+			rec.Connected = false
+		}
+		out[k] = rec
+	}
+	return out
 }
 
 // Start begins listening on localhost.
@@ -106,6 +175,19 @@ func (s *Server) Start() error {
 
 	if s.running {
 		return nil
+	}
+
+	if s.authToken == "" {
+		tok, err := GenerateAuthToken()
+		if err != nil {
+			return fmt.Errorf("failed to generate IPC auth token: %w", err)
+		}
+		s.authToken = tok
+	}
+	if s.tokenPath != "" {
+		if err := WriteAuthToken(s.tokenPath, s.authToken); err != nil {
+			return fmt.Errorf("failed to write IPC auth token: %w", err)
+		}
 	}
 
 	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(s.port))
@@ -119,6 +201,9 @@ func (s *Server) Start() error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", s.handleHealth)
 	mux.HandleFunc("/status", s.handleHealth)
+	mux.HandleFunc("/handshake/hello", s.handleHandshakeHello)
+	mux.HandleFunc("/handshake/disconnect", s.handleHandshakeDisconnect)
+	mux.HandleFunc("/handshake/status", s.handleHandshakeStatus)
 	mux.HandleFunc("/downloads", s.handleDownloads)
 	mux.HandleFunc("/downloads/add", s.handleAddDownload)
 	mux.HandleFunc("/downloads/batch", s.handleAddBatchDownload)
@@ -128,7 +213,7 @@ func (s *Server) Start() error {
 	mux.HandleFunc("/config", s.handleConfig)
 
 	s.httpServer = &http.Server{
-		Handler:      mux,
+		Handler:      s.securityMiddleware(mux),
 		ReadTimeout:  10 * time.Second,
 		WriteTimeout: 10 * time.Second,
 	}
@@ -138,6 +223,26 @@ func (s *Server) Start() error {
 	}()
 
 	return nil
+}
+
+func (s *Server) securityMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Reject any cross-origin browser requests (no Access-Control-Allow-Origin: *).
+		if strings.TrimSpace(r.Header.Get("Origin")) != "" {
+			http.Error(w, "forbidden origin", http.StatusForbidden)
+			return
+		}
+		s.mu.Lock()
+		expectedToken := s.authToken
+		s.mu.Unlock()
+		provided := strings.TrimSpace(r.Header.Get(TokenHeader))
+		if !constantTimeTokenEqual(expectedToken, provided) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, MaxBodyBytes)
+		next.ServeHTTP(w, r)
+	})
 }
 
 // Port returns the bound port.
@@ -159,6 +264,9 @@ func (s *Server) Stop() error {
 		return nil
 	}
 	s.running = false
+	if s.tokenPath != "" && ReadAuthToken(s.tokenPath) == s.authToken {
+		_ = os.Remove(s.tokenPath)
+	}
 	if s.httpServer != nil {
 		return s.httpServer.Close()
 	}
@@ -170,12 +278,87 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	resp := StatusResponse{
 		Status:          "ok",
 		App:             "MagicDown",
-		Version:         "1.0.0",
+		Version:         version.Version,
 		ActiveDownloads: s.engine.ActiveCount(),
 		TotalTasks:      len(tasks),
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resp)
+}
+
+func (s *Server) handleHandshakeHello(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req HelloRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, fmt.Sprintf("invalid json: %v", err), http.StatusBadRequest)
+		return
+	}
+	if req.ProtocolVersion <= 0 {
+		req.ProtocolVersion = 1
+	}
+	browser := strings.ToLower(strings.TrimSpace(req.Browser))
+	if browser == "" {
+		browser = "chrome"
+	}
+	hostVer := strings.TrimSpace(req.HostVersion)
+	if hostVer == "" {
+		hostVer = version.Version
+	}
+
+	s.mu.Lock()
+	s.handshakes[browser] = HandshakeRecord{
+		Browser:          browser,
+		ExtensionVersion: strings.TrimSpace(req.ExtensionVersion),
+		ProtocolVersion:  req.ProtocolVersion,
+		HostVersion:      hostVer,
+		Connected:        true,
+		LastSeenAt:       time.Now(),
+	}
+	s.mu.Unlock()
+
+	resp := WelcomeResponse{
+		Type:            "WELCOME",
+		ProtocolVersion: 1,
+		HostVersion:     hostVer,
+		AppVersion:      version.Version,
+		Status:          "connected",
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
+func (s *Server) handleHandshakeDisconnect(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		Browser string `json:"browser"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&req)
+	browser := strings.ToLower(strings.TrimSpace(req.Browser))
+	if browser != "" {
+		s.mu.Lock()
+		if rec, ok := s.handshakes[browser]; ok {
+			rec.Connected = false
+			s.handshakes[browser] = rec
+		}
+		s.mu.Unlock()
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"success": true})
+}
+
+func (s *Server) handleHandshakeStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(s.GetHandshakeSnapshots())
 }
 
 func (s *Server) handleDownloads(w http.ResponseWriter, r *http.Request) {
@@ -203,8 +386,22 @@ func (s *Server) handleAddDownload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.URL == "" {
-		http.Error(w, "missing url", http.StatusBadRequest)
+	if err := ValidateHTTPURL(req.URL); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(req.AudioURL) != "" {
+		if err := ValidateHTTPURL(req.AudioURL); err != nil {
+			http.Error(w, "invalid audio_url: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+	if err := ValidateFilename(req.Filename); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := ValidateSaveDir(s.engine.Config().DownloadDir, req.SaveDir); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
@@ -396,6 +593,10 @@ func (s *Server) handleAddBatchDownload(w http.ResponseWriter, r *http.Request) 
 }
 
 func (s *Server) handlePause(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
 	id := r.URL.Query().Get("id")
 	if id == "" {
 		s.engine.PauseAll()
@@ -410,6 +611,10 @@ func (s *Server) handlePause(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleResume(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
 	id := r.URL.Query().Get("id")
 	if id == "" {
 		s.engine.ResumeAll()
@@ -449,6 +654,10 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost && r.Method != http.MethodDelete {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
 	id := r.URL.Query().Get("id")
 	deleteFiles := r.URL.Query().Get("delete_files") == "true"
 	if id == "" {
