@@ -17,15 +17,19 @@
   const MSG = "magicdown:media-sniff:v1";
   const YT_MSG = "magicdown:yt-player:v1";
   const YT_PROBE_MSG = "magicdown:yt-probe:v1";
+  const BILI_MSG = "magicdown:bili-playinfo:v1";
+  const BILI_PROBE_MSG = "magicdown:bili-probe:v1";
   const MAX_ITEMS = 200;
   const MAX_URL = 4096;
   const MEDIA_PATH = /\.(?:mp4|m4s|m4v|m4a|m4p|webm|ts|m3u8|mpd|mov|mkv|mp3|aac)(?:$|[?#])/i;
   const RANGE_HINT = /(?:^|[?&])(?:bytestart|byteend|bytes|range)=/i;
   const IS_YOUTUBE = /(?:^|\.)(?:youtube\.com|youtube-nocookie\.com)$/i.test(location.hostname || "");
+  const IS_BILIBILI = /(?:^|\.)bilibili\.com$/i.test(location.hostname || "");
 
   const items = [];
   const pending = [];
   const ytPayloads = new Map(); // videoId -> compact payload
+  const biliPayloads = new Map(); // pageUrl -> compact payload
   let flushTimer = 0;
   let lastFlush = 0;
   let seq = 0;
@@ -106,6 +110,116 @@
     }
   }
 
+  function isBilibiliPlayUrl(url) {
+    try {
+      const u = new URL(url, location.href);
+      const p = u.pathname.toLowerCase();
+      return (
+        p === "/x/player/wbi/playurl" ||
+        p === "/x/player/playurl" ||
+        p === "/x/player/v2/playurl" ||
+        p === "/pgc/player/web/playurl" ||
+        p === "/pgc/player/web/v2/playurl"
+      );
+    } catch {
+      return false;
+    }
+  }
+
+  function compactBiliTrack(track) {
+    if (!track || typeof track !== "object") return null;
+    const baseUrl =
+      (typeof track.baseUrl === "string" && track.baseUrl) ||
+      (typeof track.base_url === "string" && track.base_url) ||
+      (typeof track.url === "string" && track.url) ||
+      "";
+    const backup = Array.isArray(track.backupUrl)
+      ? track.backupUrl
+      : Array.isArray(track.backup_url)
+        ? track.backup_url
+        : [];
+    return {
+      id: Number(track.id) || 0,
+      baseUrl: baseUrl.slice(0, MAX_URL),
+      backupUrl: backup.slice(0, 2).map((u) => (typeof u === "string" ? u.slice(0, MAX_URL) : "")).filter(Boolean),
+      bandwidth: Number(track.bandwidth) || 0,
+      mimeType: typeof track.mimeType === "string" ? track.mimeType.slice(0, 64) : (typeof track.mime_type === "string" ? track.mime_type.slice(0, 64) : ""),
+      codecs: typeof track.codecs === "string" ? track.codecs.slice(0, 64) : "",
+      width: Number(track.width) || 0,
+      height: Number(track.height) || 0,
+      frameRate: typeof track.frameRate === "string" ? track.frameRate.slice(0, 16) : (typeof track.frame_rate === "string" ? track.frame_rate.slice(0, 16) : ""),
+      codecid: Number(track.codecid) || 0,
+      size: Number(track.size) || 0
+    };
+  }
+
+  function emitBilibiliPlayInfo(raw) {
+    try {
+      if (!raw || typeof raw !== "object") return;
+      const data =
+        (raw.data && typeof raw.data === "object" && raw.data) ||
+        (raw.result && typeof raw.result === "object" && raw.result) ||
+        raw;
+      const dash = data.dash && typeof data.dash === "object" ? data.dash : null;
+      const durl = Array.isArray(data.durl) ? data.durl : [];
+      if (!dash && durl.length === 0) return;
+
+      const compactDash = dash
+        ? {
+            duration: Number(dash.duration) || 0,
+            video: Array.isArray(dash.video) ? dash.video.slice(0, 40).map(compactBiliTrack).filter(Boolean) : [],
+            audio: Array.isArray(dash.audio) ? dash.audio.slice(0, 16).map(compactBiliTrack).filter(Boolean) : [],
+            flac: dash.flac && dash.flac.audio ? { audio: compactBiliTrack(dash.flac.audio) } : null,
+            dolby: dash.dolby && Array.isArray(dash.dolby.audio)
+              ? { audio: dash.dolby.audio.slice(0, 4).map(compactBiliTrack).filter(Boolean) }
+              : null
+          }
+        : null;
+
+      const compactDurl = durl.slice(0, 10).map((seg) => ({
+        url: typeof seg.url === "string" ? seg.url.slice(0, MAX_URL) : "",
+        backup_url: Array.isArray(seg.backup_url)
+          ? seg.backup_url.slice(0, 2).map((u) => (typeof u === "string" ? u.slice(0, MAX_URL) : "")).filter(Boolean)
+          : [],
+        size: Number(seg.size) || 0,
+        length: Number(seg.length) || 0,
+        order: Number(seg.order) || 0
+      }));
+
+      const pageUrl = location.href;
+      const payload = {
+        pageUrl,
+        title: (document.title || "").slice(0, 200),
+        data: {
+          quality: Number(data.quality) || 0,
+          format: typeof data.format === "string" ? data.format.slice(0, 32) : "",
+          timelength: Number(data.timelength) || 0,
+          dash: compactDash,
+          durl: compactDurl
+        }
+      };
+
+      biliPayloads.set(pageUrl, payload);
+      if (biliPayloads.size > 10) {
+        biliPayloads.delete(biliPayloads.keys().next().value);
+      }
+      window.postMessage({ __mdSniff: BILI_MSG, payload }, "*");
+    } catch {
+      // never break page code
+    }
+  }
+
+  function probeBilibiliPlayInfo() {
+    if (!IS_BILIBILI) return;
+    try {
+      if (window.__playinfo__) {
+        emitBilibiliPlayInfo(window.__playinfo__);
+      }
+    } catch {
+      // ignore
+    }
+  }
+
   function isMediaURL(value) {
     if (typeof value !== "string" || value.length === 0 || value.length > MAX_URL) return false;
     if (value.startsWith("blob:")) return true;
@@ -154,6 +268,16 @@
       }
       probeYouTubePlayers();
     }
+    if (IS_BILIBILI) {
+      for (const payload of biliPayloads.values()) {
+        try {
+          window.postMessage({ __mdSniff: BILI_MSG, replay: true, payload }, "*");
+        } catch {
+          // ignore
+        }
+      }
+      probeBilibiliPlayInfo();
+    }
   }
 
   try {
@@ -167,6 +291,8 @@
           replay();
         } else if (data.__mdSniff === YT_PROBE_MSG) {
           probeYouTubePlayers();
+        } else if (data.__mdSniff === BILI_PROBE_MSG) {
+          probeBilibiliPlayInfo();
         }
       },
       false
@@ -180,6 +306,13 @@
       document.addEventListener("DOMContentLoaded", probeYouTubePlayers, { passive: true });
       window.addEventListener("yt-navigate-finish", probeYouTubePlayers, { passive: true });
       window.addEventListener("yt-page-data-updated", probeYouTubePlayers, { passive: true });
+    } catch {
+      // ignore
+    }
+  }
+  if (IS_BILIBILI) {
+    try {
+      document.addEventListener("DOMContentLoaded", probeBilibiliPlayInfo, { passive: true });
     } catch {
       // ignore
     }
@@ -586,6 +719,17 @@
                 }
               }).catch(() => {});
             }
+            if (IS_BILIBILI && url && isBilibiliPlayUrl(url) && promise && typeof promise.then === "function") {
+              promise.then((resp) => {
+                try {
+                  if (resp && resp.ok && typeof resp.clone === "function") {
+                    resp.clone().json().then(emitBilibiliPlayInfo).catch(() => {});
+                  }
+                } catch {
+                  // ignore
+                }
+              }).catch(() => {});
+            }
           } catch {
             // ignore
           }
@@ -649,6 +793,26 @@
               }
             } else {
               this.__mdYtPlayerXhr = false;
+            }
+            if (IS_BILIBILI && isBilibiliPlayUrl(safeUrl)) {
+              this.__mdBiliPlayerXhr = true;
+              if (!this.__mdBiliPlayerHooked) {
+                this.__mdBiliPlayerHooked = true;
+                this.addEventListener("load", () => {
+                  try {
+                    if (!this.__mdBiliPlayerXhr) return;
+                    if (this.responseType === "json" && this.response) {
+                      emitBilibiliPlayInfo(this.response);
+                    } else if ((!this.responseType || this.responseType === "text") && this.responseText) {
+                      emitBilibiliPlayInfo(JSON.parse(this.responseText));
+                    }
+                  } catch {
+                    // ignore
+                  }
+                });
+              }
+            } else {
+              this.__mdBiliPlayerXhr = false;
             }
           } catch {
             // ignore

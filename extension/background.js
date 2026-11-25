@@ -745,11 +745,34 @@ function isYouTubeRangeChunk(rawUrl) {
   }
 }
 
+function isBilibiliMediaChunk(rawUrl) {
+  try {
+    const u = new URL(rawUrl);
+    const host = u.hostname.toLowerCase();
+    if (
+      host === "bilivideo.com" ||
+      host.endsWith(".bilivideo.com") ||
+      host === "bilivideo.cn" ||
+      host.endsWith(".bilivideo.cn")
+    ) {
+      return true;
+    }
+  } catch {
+    // ignore
+  }
+  return false;
+}
+
 function classifyMediaResponse(url, headers) {
   // YouTube MSE players fetch byte-range/UMP chunks from googlevideo.com;
   // those are partial fragments (not full files) and are superseded by the
   // playerResponse streams extracted in the page.
   if (isYouTubeRangeChunk(url)) {
+    return null;
+  }
+  // Bilibili MSE players fetch .m4s/DASH chunks from bilivideo.com/bilivideo.cn;
+  // those are superseded by the __playinfo__ / playurl streams extracted in-page.
+  if (isBilibiliMediaChunk(url)) {
     return null;
   }
   const { url: mediaUrl, strippedRange } = normalizeMediaUrl(url);
@@ -1125,6 +1148,7 @@ if (typeof module !== "undefined" && module.exports) {
     getMediaDedupKey,
     parseFacebookEfg,
     isDashSegmentUrl,
+    isBilibiliMediaChunk,
     inferQualityFromUrl,
     classifyMediaResponse,
     classifyFacebookAudioTrack,

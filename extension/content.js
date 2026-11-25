@@ -24,10 +24,16 @@
   const SNIFF_MSG = "magicdown:media-sniff:v1";
   const YT_MSG = "magicdown:yt-player:v1";
   const YT_PROBE_MSG = "magicdown:yt-probe:v1";
+  const BILI_MSG = "magicdown:bili-playinfo:v1";
+  const BILI_PROBE_MSG = "magicdown:bili-probe:v1";
   const YT = typeof window !== "undefined" && window.MagicDownYouTube ? window.MagicDownYouTube : null;
+  const BILI = typeof window !== "undefined" && window.MagicDownBilibili ? window.MagicDownBilibili : null;
   const isYouTubePage = Boolean(YT && YT.isYouTubeHost(location.hostname));
+  const isBilibiliPage = Boolean(BILI && BILI.isBilibiliHost(location.hostname));
   const ytPlayers = new Map(); // videoId -> parsed YouTube player entry
+  const biliPlayers = new Map(); // videoId -> parsed Bilibili player entry
   let latestYtEntry = null;
+  let latestBiliEntry = null;
   let lastHref = location.href;
   const sniffed = new Map(); // url -> { kind, mime, at }
   const weiboGroups = new Map(); // groupId -> { id, mediaId, at, variants }
@@ -249,6 +255,22 @@
         }
         return;
       }
+      if (data.__mdSniff === BILI_MSG && data.payload && BILI) {
+        const parsed = BILI.parseBilibiliPlayInfo(data.payload, {
+          pageUrl: data.payload.pageUrl || location.href,
+          title: data.payload.title || document.title,
+          userAgent: navigator.userAgent
+        });
+        if (parsed) {
+          if (parsed.videoId) {
+            biliPlayers.set(parsed.videoId, parsed);
+            if (biliPlayers.size > 16) biliPlayers.delete(biliPlayers.keys().next().value);
+          }
+          latestBiliEntry = parsed;
+          scheduleRefresh();
+        }
+        return;
+      }
       if (data.__mdSniff !== SNIFF_MSG || !Array.isArray(data.items)) return;
       for (const item of data.items) ingestSniff(item);
       if (data.replay) scheduleRefresh();
@@ -280,6 +302,7 @@
   function sanitizeTitleFilename(ext, preferredTitle) {
     const raw = (preferredTitle || document.title || "video")
       .replace(/\s*-\s*YouTube\s*$/i, "")
+      .replace(/_哔哩哔哩_bilibili\s*$/i, "")
       .replace(/[<>:"/\\|?*\x00-\x1f]/g, " ")
       .replace(/\s+/g, " ")
       .trim()
@@ -294,6 +317,14 @@
     if (videoId && ytPlayers.has(videoId)) return ytPlayers.get(videoId);
     if (!videoId) return latestYtEntry;
     return latestYtEntry && latestYtEntry.videoId === videoId ? latestYtEntry : null;
+  }
+
+  function currentBilibiliEntry() {
+    if (!isBilibiliPage || !BILI) return null;
+    const videoId = BILI.extractBilibiliVideoId(location.href);
+    if (videoId && biliPlayers.has(videoId)) return biliPlayers.get(videoId);
+    if (!videoId) return latestBiliEntry;
+    return latestBiliEntry && latestBiliEntry.videoId === videoId ? latestBiliEntry : null;
   }
 
   function handleNavigationChange() {
@@ -315,6 +346,17 @@
     if (isYouTubePage) {
       try {
         window.postMessage({ __mdSniff: YT_PROBE_MSG }, "*");
+      } catch {
+        // ignore
+      }
+    }
+    if (isBilibiliPage) {
+      const nextId = BILI ? BILI.extractBilibiliVideoId(location.href) : "";
+      if (latestBiliEntry && nextId && latestBiliEntry.videoId !== nextId) {
+        latestBiliEntry = null;
+      }
+      try {
+        window.postMessage({ __mdSniff: BILI_PROBE_MSG }, "*");
       } catch {
         // ignore
       }
@@ -931,8 +973,18 @@
       }
     }
 
+    const biliEntry = currentBilibiliEntry();
+    if (biliEntry && biliEntry.variants.length > 0) {
+      for (const variant of biliEntry.variants) {
+        const key = `${variant.url}|${variant.quality}|${variant.streamType || ""}`;
+        push(key, variant);
+      }
+    }
+
     const planURLs = new Set();
-    let manifestCount = ytEntry && ytEntry.variants.length > 0 ? ytEntry.variants.length : 0;
+    let manifestCount =
+      (ytEntry && ytEntry.variants.length > 0 ? ytEntry.variants.length : 0) +
+      (biliEntry && biliEntry.variants.length > 0 ? biliEntry.variants.length : 0);
     const manifestList = manifestsForVideo(activeVideo);
     const variantURLs = new Set();
     for (const manifest of manifestList) {
@@ -1335,6 +1387,13 @@
           // ignore
         }
       }
+      if (dropdownOpen && isBilibiliPage && !currentBilibiliEntry()) {
+        try {
+          window.postMessage({ __mdSniff: BILI_PROBE_MSG }, "*");
+        } catch {
+          // ignore
+        }
+      }
       renderDropdown();
     });
 
@@ -1388,8 +1447,10 @@
 
     if (ddSubEl) {
       const ytCount = videos.filter((v) => v.source === "youtube").length;
+      const biliCount = videos.filter((v) => v.source === "bilibili").length;
       const dashCount = videos.filter((v) => v.source === "dash").length;
       if (ytCount > 0) ddSubEl.textContent = `YouTube · ${ytCount} ${ytCount === 1 ? "stream" : "streams"}`;
+      else if (biliCount > 0) ddSubEl.textContent = `Bilibili · ${biliCount} ${biliCount === 1 ? "stream" : "streams"}`;
       else if (dashCount > 0) ddSubEl.textContent = `DASH · ${dashCount} ${dashCount === 1 ? "quality" : "qualities"}`;
       else if (videos.some((v) => v.isHLS)) ddSubEl.textContent = "HLS · quality list";
       else if (videos.length > 0) ddSubEl.textContent = "1-click to MagicDown";
@@ -1453,15 +1514,20 @@
         if (v.plan && v.plan.format) ext = v.plan.format;
         const filename = sanitizeTitleFilename(ext, v.title);
         if (isExtensionEnv) {
+          const mergedHeaders = {
+            Origin: window.location.origin,
+            "User-Agent": navigator.userAgent,
+            ...(v.headers && typeof v.headers === "object" ? v.headers : {})
+          };
+          if (v.source === "bilibili" && !mergedHeaders.Referer) {
+            mergedHeaders.Referer = v.referrer || window.location.href || "https://www.bilibili.com/";
+          }
           const payload = {
             type: "download",
             url: v.url,
             filename,
-            referrer: window.location.href,
-            headers: {
-              Origin: window.location.origin,
-              "User-Agent": navigator.userAgent
-            }
+            referrer: v.referrer || window.location.href,
+            headers: mergedHeaders
           };
           if (v.plan) payload.plan = v.plan;
           if (v.audioUrl) payload.audioUrl = v.audioUrl;

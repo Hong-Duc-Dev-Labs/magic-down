@@ -183,3 +183,87 @@ func TestRunMuxedDownload_MissingFFmpegFailsCleanly(t *testing.T) {
 	}
 	t.Fatal("timed out waiting for missing ffmpeg failure")
 }
+
+func TestRunMuxedDownload_ForwardsCustomHeadersToBothTracks(t *testing.T) {
+	videoData := bytes.Repeat([]byte("V"), 32*1024)
+	audioData := bytes.Repeat([]byte("A"), 8*1024)
+
+	const wantReferer = "https://www.bilibili.com/video/BV1xx411c7mD/"
+	const wantUA = "MagicDown-BiliTest/1.0"
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Referer") != wantReferer || r.Header.Get("User-Agent") != wantUA {
+			http.Error(w, "forbidden: missing bilibili headers", http.StatusForbidden)
+			return
+		}
+		switch r.URL.Path {
+		case "/video":
+			w.Header().Set("Content-Type", "video/mp4")
+			_, _ = w.Write(videoData)
+		case "/audio":
+			w.Header().Set("Content-Type", "audio/mp4")
+			_, _ = w.Write(audioData)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	origLocator := ffmpegLocator
+	origRunner := ffmpegRunner
+	defer func() {
+		ffmpegLocator = origLocator
+		ffmpegRunner = origRunner
+	}()
+
+	ffmpegLocator = func() (string, error) { return "/mock/ffmpeg", nil }
+	ffmpegRunner = func(ctx context.Context, ffmpegPath string, args []string) ([]byte, error) {
+		vBytes, err := os.ReadFile(args[2])
+		if err != nil {
+			return nil, err
+		}
+		aBytes, err := os.ReadFile(args[4])
+		if err != nil {
+			return nil, err
+		}
+		out := args[len(args)-1]
+		return nil, os.WriteFile(out, append(vBytes, aBytes...), 0644)
+	}
+
+	tmp := t.TempDir()
+	cfg := DefaultConfig(tmp, filepath.Join(tmp, "state.json"))
+	eng, err := NewEngine(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer eng.Close()
+
+	task, err := eng.AddTask(AddTaskRequest{
+		URL:      srv.URL + "/video",
+		AudioURL: srv.URL + "/audio",
+		Filename: "bilibili_1080p.mp4",
+		Referrer: wantReferer,
+		Headers: map[string]string{
+			"Referer":    wantReferer,
+			"Origin":     "https://www.bilibili.com",
+			"User-Agent": wantUA,
+		},
+		AutoStart: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		snap, _ := eng.GetTask(task.ID)
+		if snap.Status == StatusCompleted {
+			return
+		}
+		if snap.Status == StatusFailed {
+			t.Fatalf("muxed download with custom headers failed: %s", snap.ErrorMessage)
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatal("timed out waiting for muxed download with custom headers to complete")
+}
