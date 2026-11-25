@@ -33,11 +33,14 @@ func TestFormatHelpers(t *testing.T) {
 	if got := ClassifyFile("ubuntu-24.04.iso", ""); got != CatPrograms {
 		t.Errorf("ClassifyFile(.iso) = %q, want Programs", got)
 	}
-	if got := ClassifyFile("movie.mkv", ""); got != CatMedia {
-		t.Errorf("ClassifyFile(.mkv) = %q, want Media", got)
+	if got := ClassifyFile("movie.mkv", ""); got != CatVideo {
+		t.Errorf("ClassifyFile(.mkv) = %q, want Video", got)
 	}
-	if got := ClassifyFile("archive.tar.gz", ""); got != CatArchives {
-		t.Errorf("ClassifyFile(.tar.gz) = %q, want Archives", got)
+	if got := ClassifyFile("song.mp3", ""); got != CatMusic {
+		t.Errorf("ClassifyFile(.mp3) = %q, want Music", got)
+	}
+	if got := ClassifyFile("archive.tar.gz", ""); got != CatCompressed {
+		t.Errorf("ClassifyFile(.tar.gz) = %q, want Compressed", got)
 	}
 }
 
@@ -167,6 +170,20 @@ func TestMyGoNativeUIRendersCleanly(t *testing.T) {
 		// Still exercise modals & light mode in regular unit tests
 		app.openAddModal()
 		tester.Frame()
+		app.showAddModal = false
+
+		// Exercise Download Info Dialog from incoming extension download
+		app.EnqueueIncomingDownload(ipc.AddDownloadRequest{
+			URL:        "https://example.com/video_1080p.mp4",
+			AudioURL:   "https://example.com/audio_128k.m4a",
+			Filename:   "clip_1080p.mp4",
+			TotalBytes: 25 * 1024 * 1024,
+			AutoStart:  true,
+		})
+		tester.Frame()
+		if !app.showAddModal || !app.inputFromExtension || app.inputCategory != engine.CategoryVideo {
+			t.Fatalf("expected Download Info Dialog to open for incoming video, got show=%v ext=%v cat=%q", app.showAddModal, app.inputFromExtension, app.inputCategory)
+		}
 		app.showAddModal = false
 
 		app.openSettingsModal()

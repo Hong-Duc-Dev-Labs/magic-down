@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/egoist/mygo/ui"
@@ -37,22 +38,37 @@ type App struct {
 	searchQuery    string
 	selectedTaskID string
 
-	// Add Download modal state
-	showAddModal  bool
-	inputURL      string
-	inputFilename string
-	inputSaveDir  string
-	inputSegments int
-	addError      string
+	// Add / Download Info Dialog state
+	showAddModal       bool
+	inputFromExtension bool
+	inputURL           string
+	inputAudioURL      string
+	inputFilename      string
+	inputCategory      string
+	inputSaveDir       string
+	inputSegments      int
+	inputEstimatedSize int64
+	inputReferrer      string
+	inputCookies       string
+	inputHeaders       map[string]string
+	inputConvertFormat string
+	inputPlan          *engine.DownloadPlan
+	lastAutoTarget     string
+	addError           string
+
+	// Incoming extension downloads waiting for the Download Info Dialog
+	pendingMu       sync.Mutex
+	pendingIncoming []ipc.AddDownloadRequest
 
 	// Settings modal state
-	showSettingsModal    bool
-	settingDownloadDir   string
-	settingMaxConcurrent int
-	settingSegments      int
-	settingMaxRetries    string
-	settingSpeedLimit    string
-	settingsError        string
+	showSettingsModal     bool
+	settingDownloadDir    string
+	settingMaxConcurrent  int
+	settingSegments       int
+	settingMaxRetries     string
+	settingSpeedLimit     string
+	settingAutoCategorize bool
+	settingsError         string
 
 	statusMessage string
 }
@@ -61,19 +77,101 @@ type App struct {
 func NewApp(eng *engine.Engine, srv *ipc.Server) *App {
 	cfg := eng.Config()
 	return &App{
-		engine:               eng,
-		ipcServer:            srv,
-		darkMode:             true,
-		filterStatus:         "All",
-		filterCategory:       CatAll,
-		inputSaveDir:         cfg.DownloadDir,
-		inputSegments:        cfg.DefaultSegments,
-		settingDownloadDir:   cfg.DownloadDir,
-		settingMaxConcurrent: cfg.MaxConcurrentDownloads,
-		settingSegments:      cfg.DefaultSegments,
-		settingMaxRetries:    strconv.Itoa(cfg.MaxRetries),
-		settingSpeedLimit:    strconv.FormatInt(cfg.SpeedLimitKBps, 10),
+		engine:                eng,
+		ipcServer:             srv,
+		darkMode:              true,
+		filterStatus:          "All",
+		filterCategory:        CatAll,
+		inputCategory:         engine.CategoryOther,
+		inputSaveDir:          cfg.DownloadDir,
+		inputSegments:         cfg.DefaultSegments,
+		settingDownloadDir:    cfg.DownloadDir,
+		settingMaxConcurrent:  cfg.MaxConcurrentDownloads,
+		settingSegments:       cfg.DefaultSegments,
+		settingMaxRetries:     strconv.Itoa(cfg.MaxRetries),
+		settingSpeedLimit:     strconv.FormatInt(cfg.SpeedLimitKBps, 10),
+		settingAutoCategorize: cfg.AutoCategorize,
 	}
+}
+
+// EnqueueIncomingDownload queues a download received over IPC so the UI opens
+// the Download Info Dialog on the next frame.
+func (a *App) EnqueueIncomingDownload(req ipc.AddDownloadRequest) {
+	a.pendingMu.Lock()
+	a.pendingIncoming = append(a.pendingIncoming, req)
+	a.pendingMu.Unlock()
+}
+
+func (a *App) popPendingIncoming() {
+	if a.showAddModal {
+		return
+	}
+	a.pendingMu.Lock()
+	if len(a.pendingIncoming) == 0 {
+		a.pendingMu.Unlock()
+		return
+	}
+	req := a.pendingIncoming[0]
+	a.pendingIncoming = a.pendingIncoming[1:]
+	a.pendingMu.Unlock()
+
+	a.openIncomingDownloadDialog(req)
+}
+
+func (a *App) openIncomingDownloadDialog(req ipc.AddDownloadRequest) {
+	cfg := a.engine.Config()
+	a.inputFromExtension = true
+	a.inputURL = strings.TrimSpace(req.URL)
+	a.inputAudioURL = strings.TrimSpace(req.AudioURL)
+	a.inputReferrer = req.Referrer
+	a.inputCookies = req.Cookies
+	a.inputHeaders = req.Headers
+	a.inputConvertFormat = req.ConvertFormat
+	a.inputEstimatedSize = req.TotalBytes
+	a.inputPlan = nil
+	if len(req.Plan) > 0 {
+		if parsed, err := engine.ParseDownloadPlan(req.Plan, req.URL); err == nil {
+			a.inputPlan = parsed
+			if a.inputEstimatedSize <= 0 {
+				a.inputEstimatedSize = parsed.KnownSize()
+			}
+		}
+	}
+
+	filename := strings.TrimSpace(req.Filename)
+	if filename == "" {
+		filename = engine.ExtractFilename(a.inputURL, nil)
+		if a.inputAudioURL != "" {
+			filename = engine.ReplaceExtension(filename, "mp4")
+		}
+	}
+	a.inputFilename = filename
+
+	cat := req.Category
+	if cat == "" {
+		if a.inputAudioURL != "" {
+			cat = engine.CategoryVideo
+		} else {
+			cat = engine.CategoryForFilename(a.inputFilename, a.inputURL)
+		}
+	}
+	a.inputCategory = cat
+	if strings.TrimSpace(req.SaveDir) != "" {
+		a.inputSaveDir = strings.TrimSpace(req.SaveDir)
+	} else {
+		a.inputSaveDir = engine.ResolveSaveDir(cfg.DownloadDir, cat, cfg.AutoCategorize)
+	}
+	a.inputSegments = req.NumSegments
+	if a.inputSegments != 4 && a.inputSegments != 8 && a.inputSegments != 16 {
+		a.inputSegments = cfg.DefaultSegments
+		if a.inputSegments != 4 && a.inputSegments != 8 && a.inputSegments != 16 {
+			a.inputSegments = 8
+		}
+	}
+	a.lastAutoTarget = a.inputFilename + "|" + a.inputURL
+	a.addError = ""
+	a.showSettingsModal = false
+	a.showAddModal = true
 }
 
 // SetWindowController attaches the native MyGo window controller for custom title bar buttons.
@@ -107,6 +205,9 @@ func (a *App) View(c *ui.Context) {
 		a.showSettingsModal = false
 	}
 
+	// Open Download Info Dialog for any incoming extension download.
+	a.popPendingIncoming()
+
 	tasks := a.engine.GetTasks()
 
 	// Animate smoothly while downloads are active; poll lightly otherwise for IPC arrivals.
@@ -125,11 +226,12 @@ func (a *App) View(c *ui.Context) {
 		"Failed":      0,
 	}
 	catCounts := map[FileCategory]int{
-		CatDocuments: 0,
-		CatMedia:     0,
-		CatArchives:  0,
-		CatPrograms:  0,
-		CatOther:     0,
+		CatVideo:      0,
+		CatMusic:      0,
+		CatCompressed: 0,
+		CatDocuments:  0,
+		CatPrograms:   0,
+		CatOther:      0,
 	}
 
 	var selectedTask *engine.Task
@@ -140,7 +242,7 @@ func (a *App) View(c *ui.Context) {
 		}
 		totalSpeed += t.Speed
 		switch t.Status {
-		case engine.StatusDownloading, engine.StatusProbing:
+		case engine.StatusDownloading, engine.StatusProbing, engine.StatusMuxing:
 			statusCounts["Downloading"]++
 		case engine.StatusCompleted:
 			statusCounts["Completed"]++
@@ -263,13 +365,23 @@ func (a *App) renderTitleBar(c *ui.Context, pal Palette) {
 
 func (a *App) openAddModal() {
 	cfg := a.engine.Config()
+	a.inputFromExtension = false
 	a.inputURL = ""
+	a.inputAudioURL = ""
 	a.inputFilename = ""
-	a.inputSaveDir = cfg.DownloadDir
+	a.inputCategory = engine.CategoryOther
+	a.inputSaveDir = engine.ResolveSaveDir(cfg.DownloadDir, a.inputCategory, cfg.AutoCategorize)
 	a.inputSegments = cfg.DefaultSegments
 	if a.inputSegments != 4 && a.inputSegments != 8 && a.inputSegments != 16 {
 		a.inputSegments = 8
 	}
+	a.inputEstimatedSize = 0
+	a.inputReferrer = ""
+	a.inputCookies = ""
+	a.inputHeaders = nil
+	a.inputConvertFormat = ""
+	a.inputPlan = nil
+	a.lastAutoTarget = ""
 	a.addError = ""
 	a.showSettingsModal = false
 	a.showAddModal = true
@@ -282,6 +394,7 @@ func (a *App) openSettingsModal() {
 	a.settingSegments = cfg.DefaultSegments
 	a.settingMaxRetries = strconv.Itoa(cfg.MaxRetries)
 	a.settingSpeedLimit = strconv.FormatInt(cfg.SpeedLimitKBps, 10)
+	a.settingAutoCategorize = cfg.AutoCategorize
 	a.settingsError = ""
 	a.showAddModal = false
 	a.showSettingsModal = true
@@ -328,9 +441,10 @@ func (a *App) renderSidebar(c *ui.Context, pal Palette, statusCounts map[string]
 					label string
 					icon  *ui.SVG
 				}{
+					{CatVideo, "Video", iconMedia},
+					{CatMusic, "Music", iconMedia},
+					{CatCompressed, "Compressed", iconArchive},
 					{CatDocuments, "Documents", iconDoc},
-					{CatMedia, "Media", iconMedia},
-					{CatArchives, "Archives", iconArchive},
 					{CatPrograms, "Programs", iconProgram},
 					{CatOther, "Other", iconFile},
 				}
@@ -747,15 +861,34 @@ func (a *App) renderAddModal(c *ui.Context, pal Palette) {
 
 	ui.Modal(c, &a.showAddModal, func() {
 		ui.Column(c).Width(520).Gap(16).Children(func() {
+			// Auto-update category and save dir when URL or filename changes
+			autoTarget := strings.TrimSpace(a.inputFilename) + "|" + strings.TrimSpace(a.inputURL)
+			if autoTarget != a.lastAutoTarget {
+				a.lastAutoTarget = autoTarget
+				cfg := a.engine.Config()
+				detectedCat := engine.CategoryForFilename(strings.TrimSpace(a.inputFilename), strings.TrimSpace(a.inputURL))
+				if a.inputAudioURL != "" {
+					detectedCat = engine.CategoryVideo
+				}
+				a.inputCategory = detectedCat
+				a.inputSaveDir = engine.ResolveSaveDir(cfg.DownloadDir, detectedCat, cfg.AutoCategorize)
+			}
+
 			// Modal Header
+			modalTitle := "New Download"
+			modalSub := "Enter a direct HTTP/HTTPS link to accelerate"
+			if a.inputFromExtension {
+				modalTitle = "Download File Info"
+				modalSub = "Review destination, category, and filename before starting"
+			}
 			ui.Row(c).AlignItems(ui.Center).Justify(ui.SpaceBetween).Children(func() {
 				ui.Row(c).Gap(10).AlignItems(ui.Center).Children(func() {
 					ui.Row(c).Width(32).Height(32).Radius(8).Background(pal.AccentSoft).Center().Children(func() {
 						ui.Icon(c, iconPlus).Width(16).Height(16).TextColor(pal.Accent)
 					})
 					ui.Column(c).Gap(1).Children(func() {
-						ui.Text(c, "New Download").FontSize(16).FontWeight(700).TextColor(pal.TextPrimary)
-						ui.Text(c, "Enter a direct HTTP/HTTPS link to accelerate").FontSize(12).TextColor(pal.TextMuted)
+						ui.Text(c, modalTitle).FontSize(16).FontWeight(700).TextColor(pal.TextPrimary)
+						ui.Text(c, modalSub).FontSize(12).TextColor(pal.TextMuted)
 					})
 				})
 				if rowIconButton(c, pal, iconClose, false) {
@@ -764,6 +897,22 @@ func (a *App) renderAddModal(c *ui.Context, pal Palette) {
 			})
 
 			ui.Divider(c)
+
+			// Estimated size & Auto-Mux badge bar
+			if a.inputEstimatedSize > 0 || a.inputAudioURL != "" {
+				ui.Row(c).Padding(8, 10).Radius(7).Background(pal.InputBg).Border(1, pal.Border).Gap(10).AlignItems(ui.Center).Justify(ui.SpaceBetween).Children(func() {
+					sizeLabel := "Estimated Size: Unknown"
+					if a.inputEstimatedSize > 0 {
+						sizeLabel = "Estimated Size: " + FormatBytes(a.inputEstimatedSize)
+					}
+					ui.Text(c, sizeLabel).FontSize(12).FontWeight(600).TextColor(pal.TextSecondary)
+					if a.inputAudioURL != "" {
+						ui.Box(c).Padding(2, 7).Radius(999).Background(pal.PurpleSoft).Children(func() {
+							ui.Text(c, "Video + Audio (Auto-Mux MP4)").FontSize(11).FontWeight(600).TextColor(pal.Purple)
+						})
+					}
+				})
+			}
 
 			// URL Field + Clipboard Paste button
 			ui.Column(c).Gap(6).Children(func() {
@@ -789,9 +938,9 @@ func (a *App) renderAddModal(c *ui.Context, pal Palette) {
 				}
 			})
 
-			// Filename & Save Dir
+			// Filename
 			ui.Column(c).Gap(6).Children(func() {
-				ui.Text(c, "Filename (optional)").FontSize(12).FontWeight(600).TextColor(pal.TextSecondary)
+				ui.Text(c, "Filename").FontSize(12).FontWeight(600).TextColor(pal.TextSecondary)
 				ui.TextInput(c, &a.inputFilename).
 					Placeholder("Leave blank to auto-detect from server or URL").
 					Background(pal.InputBg).
@@ -799,6 +948,21 @@ func (a *App) renderAddModal(c *ui.Context, pal Palette) {
 					Radius(7)
 			})
 
+			// Category Selector
+			ui.Column(c).Gap(6).Children(func() {
+				ui.Text(c, "Category").FontSize(12).FontWeight(600).TextColor(pal.TextSecondary)
+				ui.Row(c).Gap(6).Children(func() {
+					cfg := a.engine.Config()
+					for _, cat := range engine.AllCategories {
+						if segmentOption(c, pal, cat, a.inputCategory == cat) {
+							a.inputCategory = cat
+							a.inputSaveDir = engine.ResolveSaveDir(cfg.DownloadDir, cat, cfg.AutoCategorize)
+						}
+					}
+				})
+			})
+
+			// Save Dir
 			ui.Column(c).Gap(6).Children(func() {
 				ui.Text(c, "Save Directory").FontSize(12).FontWeight(600).TextColor(pal.TextSecondary)
 				ui.TextInput(c, &a.inputSaveDir).
@@ -834,7 +998,7 @@ func (a *App) renderAddModal(c *ui.Context, pal Palette) {
 				if toolbarButton(c, pal, nil, "Cancel", false, false) {
 					a.showAddModal = false
 				}
-				if toolbarButton(c, pal, iconClock, "Add to Queue", false, false) {
+				if toolbarButton(c, pal, iconClock, "Download Later", false, false) {
 					a.submitAddDownload(false)
 				}
 				if primaryCTA(c, pal, iconDownload, "Start Download") {
@@ -858,11 +1022,20 @@ func (a *App) submitAddDownload(autoStart bool) {
 	}
 
 	task, err := a.engine.AddTask(engine.AddTaskRequest{
-		URL:         rawURL,
-		Filename:    strings.TrimSpace(a.inputFilename),
-		SaveDir:     strings.TrimSpace(a.inputSaveDir),
-		NumSegments: segs,
-		AutoStart:   autoStart,
+		URL:           rawURL,
+		AudioURL:      strings.TrimSpace(a.inputAudioURL),
+		Category:      a.inputCategory,
+		Filename:      strings.TrimSpace(a.inputFilename),
+		SaveDir:       strings.TrimSpace(a.inputSaveDir),
+		NumSegments:   segs,
+		TotalBytes:    a.inputEstimatedSize,
+		Referrer:      a.inputReferrer,
+		Cookies:       a.inputCookies,
+		Headers:       a.inputHeaders,
+		ConvertFormat: a.inputConvertFormat,
+		Plan:          a.inputPlan,
+		AutoStart:     autoStart,
+		StartPaused:   !autoStart,
 	})
 	if err != nil {
 		a.addError = err.Error()
@@ -949,6 +1122,19 @@ func (a *App) renderSettingsModal(c *ui.Context, pal Palette) {
 						Border(1, pal.Border).
 						Radius(7)
 					ui.Text(c, "0 = unlimited").FontSize(10).TextColor(pal.TextMuted)
+				})
+			})
+
+			// Auto-Categorize toggle
+			ui.Column(c).Gap(6).Children(func() {
+				ui.Text(c, "Auto-Categorize Subfolders").FontSize(12).FontWeight(600).TextColor(pal.TextSecondary)
+				ui.Row(c).Gap(8).Children(func() {
+					if segmentOption(c, pal, "Enabled (Video, Music, ...)", a.settingAutoCategorize) {
+						a.settingAutoCategorize = true
+					}
+					if segmentOption(c, pal, "Disabled", !a.settingAutoCategorize) {
+						a.settingAutoCategorize = false
+					}
 				})
 			})
 
@@ -1040,6 +1226,7 @@ func (a *App) saveSettings() {
 	cfg.DefaultSegments = segs
 	cfg.MaxRetries = retries
 	cfg.SpeedLimitKBps = speedKBps
+	cfg.AutoCategorize = a.settingAutoCategorize
 	a.engine.UpdateConfig(cfg)
 
 	a.settingMaxRetries = strconv.Itoa(retries)

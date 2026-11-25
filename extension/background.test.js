@@ -211,3 +211,77 @@ test("Facebook DASH preload chunk without bytestart suppresses bogus partial con
   assert.equal(media.bandwidth, 2874817);
   assert.equal(media.fbVideoId, "1810888224374101");
 });
+
+test("Facebook DASH video pairs with matching fbVideoId audio track and builds audio_url payload", () => {
+  const {
+    classifyFacebookAudioTrack,
+    addDetectedFacebookAudio,
+    buildDownloadPayload,
+    tabFbAudios
+  } = require("./background.js");
+
+  const tabId = 777;
+  tabVideos.delete(tabId);
+  tabFbAudios.delete(tabId);
+
+  const videoEfg = encodeEfg({
+    vencode_tag: "dash_r2av1-r1gen2vp9-adv_q90",
+    video_id: 999888777,
+    duration_s: 20,
+    bitrate: 3000000
+  });
+  const audioEfg = encodeEfg({
+    vencode_tag: "dash_ln_heaac_vbr3_audio",
+    video_id: 999888777,
+    bitrate: 128000
+  });
+
+  const videoUrl = `https://video.fhan15-1.fna.fbcdn.net/v/t42/fb_v1080.mp4?efg=${encodeURIComponent(videoEfg)}&bytestart=0&byteend=65535`;
+  const audioUrl = `https://video.fhan15-1.fna.fbcdn.net/v/t42/fb_a128.mp4?efg=${encodeURIComponent(audioEfg)}&bytestart=0&byteend=16383`;
+
+  const videoMedia = classifyMediaResponse(videoUrl, [
+    { name: "content-type", value: "video/mp4" },
+    { name: "content-range", value: "bytes 0-65535/5000000" }
+  ]);
+  assert.ok(videoMedia);
+  assert.equal(videoMedia.isFbDash, true);
+
+  addDetectedVideo(tabId, {
+    url: videoMedia.url,
+    quality: videoMedia.quality,
+    height: videoMedia.height,
+    bandwidth: videoMedia.bandwidth,
+    fbVideoId: videoMedia.fbVideoId,
+    isFbDash: videoMedia.isFbDash,
+    format: videoMedia.format,
+    size: videoMedia.size,
+    isHLS: false
+  });
+
+  const audioTrack = classifyFacebookAudioTrack(audioUrl, [
+    { name: "content-range", value: "bytes 0-16383/500000" }
+  ]);
+  assert.ok(audioTrack);
+  assert.equal(audioTrack.fbVideoId, "999888777");
+  addDetectedFacebookAudio(tabId, audioTrack);
+
+  const list = getTabVideoList(tabId);
+  assert.equal(list.length, 1);
+  assert.equal(list[0].streamType, "muxed");
+  assert.equal(list[0].hasAudio, true);
+  assert.equal(list[0].audioUrl, audioTrack.url);
+  assert.equal(list[0].size, 5500000);
+
+  const payload = buildDownloadPayload({
+    url: list[0].url,
+    audioUrl: list[0].audioUrl,
+    filename: "facebook_1080p.mp4",
+    size: list[0].size
+  });
+  assert.equal(payload.action, "download");
+  assert.equal(payload.audio_url, audioTrack.url);
+  assert.equal(payload.total_bytes, 5500000);
+
+  tabVideos.delete(tabId);
+  tabFbAudios.delete(tabId);
+});

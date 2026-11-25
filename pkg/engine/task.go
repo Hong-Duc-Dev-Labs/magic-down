@@ -182,7 +182,14 @@ func (t *Task) processProbeResponse(resp *http.Response, downloadDir string) {
 	if fmtExt, ok := NormalizeImageFormat(t.ConvertFormat); ok {
 		t.Filename = ReplaceExtension(t.Filename, fmtExt)
 	}
-	t.SavePath = filepath.Join(downloadDir, t.Filename)
+	if t.Category == "" {
+		t.Category = CategoryForFilename(t.Filename, t.URL)
+	}
+	if t.SavePath == "" {
+		_ = os.MkdirAll(downloadDir, 0755)
+		t.SavePath = UniqueFilePath(downloadDir, t.Filename)
+		t.Filename = filepath.Base(t.SavePath)
+	}
 	t.PartPath = t.SavePath + ".magicpart"
 
 	// Detect HLS playlist (.m3u8)
@@ -275,7 +282,8 @@ func (t *Task) Start(parentCtx context.Context, client *http.Client, onUpdate fu
 	t.speedCalc = newSpeedCalculator(atomic.LoadInt64(&t.DownloadedBytes))
 	supportsRanges := t.SupportsRanges
 	plan := t.Plan
-	isHLS := t.IsHLS || (plan == nil && IsHLSURL(t.URL, ""))
+	audioURL := t.AudioURL
+	isHLS := t.IsHLS || (plan == nil && audioURL == "" && IsHLSURL(t.URL, ""))
 	totalBytes := t.TotalBytes
 	numSegments := len(t.Segments)
 	savePath := t.SavePath
@@ -290,6 +298,10 @@ func (t *Task) Start(parentCtx context.Context, client *http.Client, onUpdate fu
 
 	if plan != nil {
 		return t.runPlanDownload(ctx, client, onUpdate)
+	}
+
+	if audioURL != "" {
+		return t.runMuxedDownload(ctx, client, onUpdate)
 	}
 
 	if isHLS {
@@ -680,6 +692,8 @@ func (t *Task) Clone() *Task {
 	cp := &Task{
 		ID:              t.ID,
 		URL:             t.URL,
+		AudioURL:        t.AudioURL,
+		Category:        t.Category,
 		Filename:        t.Filename,
 		SavePath:        t.SavePath,
 		PartPath:        t.PartPath,

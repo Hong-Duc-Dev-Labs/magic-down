@@ -72,6 +72,7 @@ func main() {
 	defer ipcServer.Stop()
 
 	appUI := gui.NewApp(eng, ipcServer)
+	ipcServer.SetOnIncomingDownload(appUI.EnqueueIncomingDownload)
 
 	mygo.App.WhenReady(func() {
 		w := mygo.NewWindow(mygo.WindowOptions{

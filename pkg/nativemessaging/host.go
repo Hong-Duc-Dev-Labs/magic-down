@@ -13,11 +13,13 @@ import (
 type InboundMessage struct {
 	Action        string            `json:"action"`
 	URL           string            `json:"url,omitempty"`
+	AudioURL      string            `json:"audio_url,omitempty"`
 	Filename      string            `json:"filename,omitempty"`
 	Referrer      string            `json:"referrer,omitempty"`
 	Cookies       string            `json:"cookies,omitempty"`
 	Headers       map[string]string `json:"headers,omitempty"`
 	NumSegments   int               `json:"num_segments,omitempty"`
+	TotalBytes    int64             `json:"total_bytes,omitempty"`
 	ConvertFormat string            `json:"convert_format,omitempty"`
 	Plan          json.RawMessage   `json:"plan,omitempty"`
 	AutoStart     bool              `json:"auto_start,omitempty"`
@@ -108,11 +110,13 @@ func (h *Handler) HandleMessage(msgBytes []byte) ([]byte, error) {
 		// Forward download job to desktop app
 		taskResp, err := h.ipcClient.AddDownload(ipc.AddDownloadRequest{
 			URL:           in.URL,
+			AudioURL:      in.AudioURL,
 			Filename:      in.Filename,
 			Referrer:      in.Referrer,
 			Cookies:       in.Cookies,
 			Headers:       in.Headers,
 			NumSegments:   in.NumSegments,
+			TotalBytes:    in.TotalBytes,
 			ConvertFormat: in.ConvertFormat,
 			Plan:          in.Plan,
 			AutoStart:     true, // default to starting automatically from browser

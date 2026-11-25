@@ -13,6 +13,7 @@ const (
 	StatusQueued      TaskStatus = "Queued"
 	StatusProbing     TaskStatus = "Probing"
 	StatusDownloading TaskStatus = "Downloading"
+	StatusMuxing      TaskStatus = "Muxing"
 	StatusPaused      TaskStatus = "Paused"
 	StatusCompleted   TaskStatus = "Completed"
 	StatusFailed      TaskStatus = "Failed"
@@ -46,6 +47,8 @@ func (s *Segment) getStatus() string {
 type Task struct {
 	ID              string            `json:"id"`
 	URL             string            `json:"url"`
+	AudioURL        string            `json:"audio_url,omitempty"`
+	Category        string            `json:"category,omitempty"`
 	Filename        string            `json:"filename"`
 	SavePath        string            `json:"save_path"`
 	PartPath        string            `json:"part_path"`
@@ -89,6 +92,7 @@ type Config struct {
 	SpeedLimitKBps         int64  `json:"speed_limit_kbps"` // 0 = unlimited
 	DownloadDir            string `json:"download_dir"`
 	StateFilePath          string `json:"state_file_path"`
+	AutoCategorize         bool   `json:"auto_categorize"`
 }
 
 // DefaultConfig returns reasonable default configuration values.
@@ -99,5 +103,6 @@ func DefaultConfig(downloadDir, statePath string) Config {
 		MaxRetries:             DefaultMaxRetries,
 		DownloadDir:            downloadDir,
 		StateFilePath:          statePath,
+		AutoCategorize:         true,
 	}
 }

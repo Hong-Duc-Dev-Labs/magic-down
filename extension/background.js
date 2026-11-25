@@ -17,6 +17,8 @@ const DEFAULT_SETTINGS = {
 
 // Per-tab detected videos: Map<tabId, Map<url, VideoItem>>
 const tabVideos = new Map();
+// Per-tab detected Facebook audio-only DASH tracks: Map<tabId, Map<fbVideoId, AudioItem>>
+const tabFbAudios = new Map();
 
 async function getSettings() {
   const stored = await chrome.storage.local.get([
@@ -181,8 +183,7 @@ function sanitizeHeaders(rawHeaders) {
   return out;
 }
 
-async function forwardDownload({ url, filename = "", referrer = "", headers = null, convertFormat = "", plan = null }) {
-  const cookies = await getCookiesHeader(url);
+function buildDownloadPayload({ url, audioUrl = "", filename = "", referrer = "", cookies = "", headers = null, convertFormat = "", plan = null, size = 0 }) {
   const safeHeaders = sanitizeHeaders(headers);
   const payload = {
     action: "download",
@@ -193,6 +194,12 @@ async function forwardDownload({ url, filename = "", referrer = "", headers = nu
     headers: safeHeaders,
     auto_start: true
   };
+  if (typeof audioUrl === "string" && /^https?:\/\//i.test(audioUrl.trim())) {
+    payload.audio_url = audioUrl.trim();
+  }
+  if (typeof size === "number" && Number.isFinite(size) && size > 0) {
+    payload.total_bytes = Math.floor(size);
+  }
   if (convertFormat) {
     payload.convert_format = convertFormat;
   }
@@ -200,6 +207,12 @@ async function forwardDownload({ url, filename = "", referrer = "", headers = nu
   if (safePlan) {
     payload.plan = safePlan;
   }
+  return payload;
+}
+
+async function forwardDownload({ url, audioUrl = "", filename = "", referrer = "", headers = null, convertFormat = "", plan = null, size = 0 }) {
+  const cookies = await getCookiesHeader(url);
+  const payload = buildDownloadPayload({ url, audioUrl, filename, referrer, cookies, headers, convertFormat, plan, size });
 
   const resp = await sendNativeMessage(payload);
 
@@ -277,12 +290,79 @@ async function fetchManifestText(url) {
 function getTabVideoList(tabId) {
   const map = tabVideos.get(tabId);
   if (!map) return [];
-  return Array.from(map.values()).sort((a, b) => {
-    if ((b.height || 0) !== (a.height || 0)) return (b.height || 0) - (a.height || 0);
-    if ((b.bandwidth || 0) !== (a.bandwidth || 0)) return (b.bandwidth || 0) - (a.bandwidth || 0);
-    if ((b.size || 0) !== (a.size || 0)) return (b.size || 0) - (a.size || 0);
-    return (b.detectedAt || 0) - (a.detectedAt || 0);
-  });
+  const audioMap = tabFbAudios.get(tabId);
+  return Array.from(map.values())
+    .map((v) => {
+      if (v && v.fbVideoId && v.isFbDash && !v.audioUrl && audioMap) {
+        const audio = audioMap.get(v.fbVideoId);
+        if (audio && audio.url) {
+          const combinedSize = v.size > 0 && audio.size > 0 ? v.size + audio.size : (v.size || 0);
+          return {
+            ...v,
+            audioUrl: audio.url,
+            audioSize: audio.size || 0,
+            size: combinedSize,
+            format: "MP4",
+            ext: "mp4",
+            streamType: "muxed",
+            hasAudio: true,
+            needsMux: true
+          };
+        }
+      }
+      return v;
+    })
+    .sort((a, b) => {
+      if ((b.height || 0) !== (a.height || 0)) return (b.height || 0) - (a.height || 0);
+      if ((b.bandwidth || 0) !== (a.bandwidth || 0)) return (b.bandwidth || 0) - (a.bandwidth || 0);
+      if ((b.size || 0) !== (a.size || 0)) return (b.size || 0) - (a.size || 0);
+      return (b.detectedAt || 0) - (a.detectedAt || 0);
+    });
+}
+
+function addDetectedFacebookAudio(tabId, audio) {
+  if (tabId < 0 || !audio || !audio.url || !audio.fbVideoId) return;
+  let map = tabFbAudios.get(tabId);
+  if (!map) {
+    map = new Map();
+    tabFbAudios.set(tabId, map);
+  }
+  const existing = map.get(audio.fbVideoId);
+  if (!existing || (audio.bandwidth || 0) >= (existing.bandwidth || 0)) {
+    map.set(audio.fbVideoId, {
+      ...audio,
+      size: Math.max(audio.size || 0, (existing && existing.size) || 0),
+      detectedAt: Date.now()
+    });
+    notifyTabVideos(tabId);
+  }
+}
+
+function classifyFacebookAudioTrack(url, headers) {
+  const { url: mediaUrl, strippedRange } = normalizeMediaUrl(url);
+  const efg = parseFacebookEfg(mediaUrl);
+  if (!efg || typeof efg.vencode_tag !== "string") return null;
+  if (!(/audio/i.test(efg.vencode_tag) && !/video/i.test(efg.vencode_tag))) return null;
+  const fbVideoId = String(efg.video_id || efg.xpv_asset_id || "");
+  if (!fbVideoId) return null;
+  let contentLength = 0;
+  let contentRange = null;
+  if (Array.isArray(headers)) {
+    for (const h of headers) {
+      const name = (h.name || "").toLowerCase();
+      if (name === "content-length") contentLength = Number.parseInt(h.value || "0", 10) || 0;
+      if (name === "content-range") contentRange = parseContentRange(h.value);
+    }
+  }
+  const bandwidth = Number.isFinite(Number(efg.bitrate)) && Number(efg.bitrate) > 0 ? Number(efg.bitrate) : 0;
+  const size = (contentRange && contentRange.total) || (strippedRange ? 0 : contentLength);
+  return {
+    kind: "fb-audio",
+    url: mediaUrl,
+    fbVideoId,
+    bandwidth,
+    size
+  };
 }
 
 function updateTabBadge(tabId) {
@@ -726,6 +806,7 @@ function classifyMediaResponse(url, headers) {
   const extraMeta = {};
   if (fbBandwidth > 0) extraMeta.bandwidth = fbBandwidth;
   if (fbVideoId) extraMeta.fbVideoId = fbVideoId;
+  if (isFbDash) extraMeta.isFbDash = true;
   const tiny = !strippedRange && effectiveSize > 0 && effectiveSize < 256 * 1024;
 
   if (lowerPath.endsWith(".m3u8") || contentType.includes("mpegurl") || contentType.includes("x-mpegurl")) {
@@ -789,7 +870,13 @@ if (typeof chrome !== "undefined" && chrome.webRequest && chrome.webRequest.onHe
         return;
       }
       const media = classifyMediaResponse(details.url, details.responseHeaders);
-      if (!media) return;
+      if (!media) {
+        const fbAudio = classifyFacebookAudioTrack(details.url, details.responseHeaders);
+        if (fbAudio) {
+          addDetectedFacebookAudio(details.tabId, fbAudio);
+        }
+        return;
+      }
 
       if (media.kind === "hls") {
         inspectHLSPlaylist(details.tabId, media.url);
@@ -800,6 +887,7 @@ if (typeof chrome !== "undefined" && chrome.webRequest && chrome.webRequest.onHe
           height: media.height || 0,
           bandwidth: media.bandwidth || 0,
           fbVideoId: media.fbVideoId || "",
+          isFbDash: Boolean(media.isFbDash),
           format: media.format,
           size: media.size,
           isHLS: false
@@ -814,11 +902,13 @@ if (typeof chrome !== "undefined" && chrome.webRequest && chrome.webRequest.onHe
 if (typeof chrome !== "undefined" && chrome.tabs) {
   chrome.tabs.onRemoved.addListener((tabId) => {
     tabVideos.delete(tabId);
+    tabFbAudios.delete(tabId);
   });
 
   chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
     if (changeInfo.status === "loading" && changeInfo.url) {
       tabVideos.delete(tabId);
+      tabFbAudios.delete(tabId);
       updateTabBadge(tabId);
     }
   });
@@ -996,11 +1086,13 @@ if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.onMessage)
     if (message.type === "download") {
       forwardDownload({
         url: message.url,
+        audioUrl: message.audioUrl || "",
         filename: message.filename || "",
         referrer: message.referrer || "",
         headers: message.headers || null,
         convertFormat: message.convertFormat || "",
-        plan: message.plan || null
+        plan: message.plan || null,
+        size: typeof message.size === "number" ? message.size : 0
       }).then(sendResponse);
       return true;
     }
@@ -1008,6 +1100,7 @@ if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.onMessage)
       const tabId = typeof message.tabId === "number" ? message.tabId : (sender.tab ? sender.tab.id : -1);
       if (tabId >= 0) {
         tabVideos.delete(tabId);
+        tabFbAudios.delete(tabId);
         updateTabBadge(tabId);
       }
       sendResponse({ ok: true });
@@ -1034,8 +1127,12 @@ if (typeof module !== "undefined" && module.exports) {
     isDashSegmentUrl,
     inferQualityFromUrl,
     classifyMediaResponse,
+    classifyFacebookAudioTrack,
     addDetectedVideo,
+    addDetectedFacebookAudio,
     getTabVideoList,
-    tabVideos
+    buildDownloadPayload,
+    tabVideos,
+    tabFbAudios
   };
 }

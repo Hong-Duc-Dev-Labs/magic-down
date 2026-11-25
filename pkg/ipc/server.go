@@ -17,15 +17,19 @@ const DefaultPort = 28888
 // AddDownloadRequest is the JSON payload for adding a download over IPC.
 type AddDownloadRequest struct {
 	URL           string            `json:"url"`
+	AudioURL      string            `json:"audio_url,omitempty"`
+	Category      string            `json:"category,omitempty"`
 	Filename      string            `json:"filename,omitempty"`
 	SaveDir       string            `json:"save_dir,omitempty"`
 	NumSegments   int               `json:"num_segments,omitempty"`
+	TotalBytes    int64             `json:"total_bytes,omitempty"`
 	Referrer      string            `json:"referrer,omitempty"`
 	Cookies       string            `json:"cookies,omitempty"`
 	Headers       map[string]string `json:"headers,omitempty"`
 	ConvertFormat string            `json:"convert_format,omitempty"`
 	Plan          json.RawMessage   `json:"plan,omitempty"`
 	AutoStart     bool              `json:"auto_start"`
+	StartPaused   bool              `json:"start_paused,omitempty"`
 }
 
 // StatusResponse is returned by /status.
@@ -39,12 +43,21 @@ type StatusResponse struct {
 
 // Server provides the local HTTP IPC server for MagicDown desktop app.
 type Server struct {
-	engine     *engine.Engine
-	port       int
-	httpServer *http.Server
-	listener   net.Listener
-	mu         sync.Mutex
-	running    bool
+	engine             *engine.Engine
+	port               int
+	httpServer         *http.Server
+	listener           net.Listener
+	mu                 sync.Mutex
+	running            bool
+	onIncomingDownload func(AddDownloadRequest)
+}
+
+// SetOnIncomingDownload registers an optional callback that intercepts incoming
+// IPC download requests (e.g. to display the Download Info Dialog in the GUI).
+func (s *Server) SetOnIncomingDownload(fn func(AddDownloadRequest)) {
+	s.mu.Lock()
+	s.onIncomingDownload = fn
+	s.mu.Unlock()
 }
 
 // NewServer creates a new IPC server. If port < 0, it uses DefaultPort (28888).
@@ -177,17 +190,39 @@ func (s *Server) handleAddDownload(w http.ResponseWriter, r *http.Request) {
 		plan = parsed
 	}
 
+	s.mu.Lock()
+	onIncoming := s.onIncomingDownload
+	s.mu.Unlock()
+	if onIncoming != nil {
+		onIncoming(req)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"success": true,
+			"task": &engine.Task{
+				URL:      req.URL,
+				Filename: req.Filename,
+			},
+			"message": "download queued for confirmation",
+		})
+		return
+	}
+
 	task, err := s.engine.AddTask(engine.AddTaskRequest{
 		URL:           req.URL,
+		AudioURL:      req.AudioURL,
+		Category:      req.Category,
 		Filename:      req.Filename,
 		SaveDir:       req.SaveDir,
 		NumSegments:   req.NumSegments,
+		TotalBytes:    req.TotalBytes,
 		Referrer:      req.Referrer,
 		Cookies:       req.Cookies,
 		Headers:       req.Headers,
 		ConvertFormat: req.ConvertFormat,
 		Plan:          plan,
 		AutoStart:     req.AutoStart,
+		StartPaused:   req.StartPaused,
 	})
 	if err != nil {
 		http.Error(w, fmt.Sprintf("failed to add task: %v", err), http.StatusInternalServerError)

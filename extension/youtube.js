@@ -228,7 +228,27 @@
       (a, b) => (b.bandwidth || 0) - (a.bandwidth || 0)
     );
 
-    const variants = [...progressive, ...adaptiveVideos, ...adaptiveAudios];
+    const bestM4A = bestAudioByFormat.get("M4A") || null;
+    const bestAnyAudio = adaptiveAudios[0] || null;
+    const pairedAdaptiveVideos = adaptiveVideos.map((v) => {
+      const audio = bestM4A || bestAnyAudio;
+      if (!audio) return v;
+      const combinedSize = v.size > 0 && audio.size > 0 ? v.size + audio.size : (v.size || 0);
+      return {
+        ...v,
+        audioUrl: audio.url,
+        audioSize: audio.size || 0,
+        audioFormat: audio.format || "M4A",
+        size: combinedSize,
+        format: "MP4",
+        ext: "mp4",
+        streamType: "muxed",
+        hasAudio: true,
+        needsMux: true
+      };
+    });
+
+    const variants = [...progressive, ...pairedAdaptiveVideos, ...adaptiveAudios];
 
     return {
       videoId,

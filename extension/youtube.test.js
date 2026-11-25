@@ -119,14 +119,19 @@ test("parseYouTubePlayerPayload extracts, deduplicates, and sorts progressive, a
   assert.equal(parsed.cipherOnlyCount, 0);
   assert.equal(parsed.drmDetected, false);
 
-  // 1 progressive + 2 deduplicated 1080p (MP4 highest bitrate + WebM) + 2 audio (WebM + M4A)
+  // 1 progressive + 2 deduplicated 1080p (paired with best M4A audio for auto-mux) + 2 audio (WebM + M4A)
   assert.equal(parsed.variants.length, 5);
   assert.equal(parsed.variants[0].streamType, "progressive");
   assert.equal(parsed.variants[0].itag, 18);
-  assert.equal(parsed.variants[1].streamType, "video-only");
+  assert.equal(parsed.variants[1].streamType, "muxed");
   assert.equal(parsed.variants[1].itag, 137); // MP4 before WebM, highest bitrate kept
-  assert.equal(parsed.variants[2].streamType, "video-only");
-  assert.equal(parsed.variants[2].itag, 248); // WebM
+  assert.equal(parsed.variants[1].audioUrl, "https://rr1.googlevideo.com/videoplayback?itag=140");
+  assert.equal(parsed.variants[1].hasAudio, true);
+  assert.equal(parsed.variants[1].format, "MP4");
+  assert.equal(parsed.variants[1].size, 83000000); // 80MB video + 3MB M4A audio
+  assert.equal(parsed.variants[2].streamType, "muxed");
+  assert.equal(parsed.variants[2].itag, 248); // WebM paired with M4A for MP4 mux
+  assert.equal(parsed.variants[2].audioUrl, "https://rr1.googlevideo.com/videoplayback?itag=140");
   assert.equal(parsed.variants[3].streamType, "audio-only");
   assert.equal(parsed.variants[3].itag, 251); // 160kbps WebM
   assert.equal(parsed.variants[4].streamType, "audio-only");

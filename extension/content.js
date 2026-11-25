@@ -1421,7 +1421,7 @@
       if (v.source === "dash") metaParts.push("DASH");
       else if (v.source === "hls" || v.isHLS) metaParts.push("HLS");
       metaParts.push(v.format || "MP4");
-      if (v.streamType === "progressive") metaParts.push("Video+Audio");
+      if (v.streamType === "progressive" || v.streamType === "muxed" || v.audioUrl) metaParts.push("Video+Audio");
       else if (v.streamType === "video-only") metaParts.push("Video only");
       else if (v.streamType === "audio-only") metaParts.push("Audio only");
       if (v.size > 0) metaParts.push(formatSize(v.size));
@@ -1464,6 +1464,8 @@
             }
           };
           if (v.plan) payload.plan = v.plan;
+          if (v.audioUrl) payload.audioUrl = v.audioUrl;
+          if (v.size > 0) payload.size = v.size;
           let resp = null;
           try {
             resp = await chrome.runtime.sendMessage(payload);

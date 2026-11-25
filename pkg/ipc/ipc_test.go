@@ -150,3 +150,46 @@ func TestConfigEndpointAppliesSettings(t *testing.T) {
 		t.Fatalf("GET /config mismatch: %+v", fetched)
 	}
 }
+
+func TestServer_IncomingDownloadDialogHookAndAudioURL(t *testing.T) {
+	tempDir := t.TempDir()
+	eng, err := engine.NewEngine(engine.DefaultConfig(tempDir, filepath.Join(tempDir, "state.json")))
+	if err != nil {
+		t.Fatalf("failed to create engine: %v", err)
+	}
+	defer eng.Close()
+
+	srv := NewServer(eng, 0)
+	var intercepted AddDownloadRequest
+	srv.SetOnIncomingDownload(func(req AddDownloadRequest) {
+		intercepted = req
+	})
+	if err := srv.Start(); err != nil {
+		t.Fatalf("failed to start server: %v", err)
+	}
+	defer srv.Stop()
+
+	client := NewClient(srv.Port())
+	resp, err := client.AddDownload(AddDownloadRequest{
+		URL:        "https://example.com/video_1080p.mp4",
+		AudioURL:   "https://example.com/audio_128k.m4a",
+		Filename:   "clip.mp4",
+		TotalBytes: 1234567,
+		AutoStart:  true,
+	})
+	if err != nil {
+		t.Fatalf("AddDownload failed: %v", err)
+	}
+	if !resp.Success {
+		t.Fatalf("expected success=true")
+	}
+	if intercepted.URL != "https://example.com/video_1080p.mp4" || intercepted.AudioURL != "https://example.com/audio_128k.m4a" {
+		t.Fatalf("expected intercepted request with AudioURL, got %+v", intercepted)
+	}
+	if intercepted.TotalBytes != 1234567 {
+		t.Fatalf("expected TotalBytes=1234567, got %d", intercepted.TotalBytes)
+	}
+	if len(eng.GetTasks()) != 0 {
+		t.Fatalf("expected 0 tasks added directly when dialog hook is active")
+	}
+}

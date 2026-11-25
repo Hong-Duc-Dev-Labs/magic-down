@@ -17,15 +17,19 @@ import (
 // AddTaskRequest specifies parameters for adding a new download task.
 type AddTaskRequest struct {
 	URL           string            `json:"url"`
+	AudioURL      string            `json:"audio_url,omitempty"`
+	Category      string            `json:"category,omitempty"`
 	Filename      string            `json:"filename,omitempty"`
 	SaveDir       string            `json:"save_dir,omitempty"`
 	NumSegments   int               `json:"num_segments,omitempty"`
+	TotalBytes    int64             `json:"total_bytes,omitempty"`
 	Referrer      string            `json:"referrer,omitempty"`
 	Cookies       string            `json:"cookies,omitempty"`
 	Headers       map[string]string `json:"headers,omitempty"`
 	ConvertFormat string            `json:"convert_format,omitempty"`
 	Plan          *DownloadPlan     `json:"plan,omitempty"`
 	AutoStart     bool              `json:"auto_start"`
+	StartPaused   bool              `json:"start_paused,omitempty"`
 }
 
 // Engine coordinates download tasks, queues, concurrency, and persistence.
@@ -55,6 +59,7 @@ type persistedConfig struct {
 	MaxRetries             *int    `json:"max_retries,omitempty"`
 	SpeedLimitKBps         *int64  `json:"speed_limit_kbps,omitempty"`
 	DownloadDir            *string `json:"download_dir,omitempty"`
+	AutoCategorize         *bool   `json:"auto_categorize,omitempty"`
 }
 
 // NewEngine initializes a new download engine.
@@ -141,10 +146,6 @@ func (e *Engine) AddTask(req AddTaskRequest) (*Task, error) {
 	e.mu.RLock()
 	cfg := e.config
 	e.mu.RUnlock()
-	if saveDir == "" {
-		saveDir = cfg.DownloadDir
-	}
-	_ = os.MkdirAll(saveDir, 0755)
 
 	numSegs := req.NumSegments
 	if numSegs <= 0 {
@@ -162,31 +163,56 @@ func (e *Engine) AddTask(req AddTaskRequest) (*Task, error) {
 			name = ReplaceExtension(name, ext)
 		}
 		filename = SanitizeFilename(name)
+	} else if req.AudioURL != "" {
+		name := ExtractFilename(req.URL, nil)
+		filename = SanitizeFilename(ReplaceExtension(name, "mp4"))
 	}
 	convertFmt, _ := NormalizeImageFormat(req.ConvertFormat)
 	if filename != "" && convertFmt != "" {
 		filename = ReplaceExtension(filename, convertFmt)
 	}
 
+	category := req.Category
+	if category == "" {
+		if req.AudioURL != "" {
+			category = CategoryVideo
+		} else {
+			category = CategoryForFilename(filename, req.URL)
+		}
+	}
+	if saveDir == "" {
+		saveDir = ResolveSaveDir(cfg.DownloadDir, category, cfg.AutoCategorize)
+	}
+	_ = os.MkdirAll(saveDir, 0755)
+
+	initialStatus := StatusQueued
+	if req.StartPaused {
+		initialStatus = StatusPaused
+	}
+
 	task := &Task{
 		ID:            generateID(),
 		URL:           req.URL,
+		AudioURL:      req.AudioURL,
+		Category:      category,
 		Filename:      filename,
-		Status:        StatusQueued,
+		TotalBytes:    req.TotalBytes,
+		Status:        initialStatus,
 		NumSegments:   numSegs,
 		Referrer:      req.Referrer,
 		Cookies:       req.Cookies,
 		Headers:       req.Headers,
 		ConvertFormat: convertFmt,
 		Plan:          plan,
-		IsHLS:         plan == nil && IsHLSURL(req.URL, ""),
+		IsHLS:         plan == nil && req.AudioURL == "" && IsHLSURL(req.URL, ""),
 		CreatedAt:     time.Now(),
 		limiter:       e.limiter,
 		retryLimit:    cfg.MaxRetries,
 	}
 
 	if task.Filename != "" {
-		task.SavePath = filepath.Join(saveDir, task.Filename)
+		task.SavePath = UniqueFilePath(saveDir, task.Filename)
+		task.Filename = filepath.Base(task.SavePath)
 		task.PartPath = task.SavePath + ".magicpart"
 	}
 
@@ -199,7 +225,7 @@ func (e *Engine) AddTask(req AddTaskRequest) (*Task, error) {
 	e.notify(snap)
 	e.scheduleSave()
 
-	if req.AutoStart {
+	if req.AutoStart && !req.StartPaused {
 		go e.processQueue()
 	}
 
@@ -290,6 +316,8 @@ func (e *Engine) DeleteTask(id string, deleteFiles bool) error {
 
 	if deleteFiles {
 		_ = os.Remove(task.PartPath)
+		_ = os.Remove(task.PartPath + ".video")
+		_ = os.Remove(task.PartPath + ".audio")
 		_ = os.Remove(task.SavePath)
 	}
 
@@ -368,7 +396,7 @@ func (e *Engine) ActiveCount() int {
 	count := 0
 	for _, t := range tasks {
 		st := t.GetStatus()
-		if st == StatusDownloading || st == StatusProbing {
+		if st == StatusDownloading || st == StatusProbing || st == StatusMuxing {
 			count++
 		}
 	}
@@ -383,7 +411,7 @@ func (e *Engine) processQueue() {
 
 	for _, t := range e.tasks {
 		st := t.GetStatus()
-		if st == StatusDownloading || st == StatusProbing {
+		if st == StatusDownloading || st == StatusProbing || st == StatusMuxing {
 			activeCount++
 		} else if st == StatusQueued && candidate == nil {
 			candidate = t
@@ -416,11 +444,17 @@ func (e *Engine) processQueue() {
 			go e.processQueue()
 		}()
 
-		// Probe if needed. A browser-supplied plan already describes every byte
-		// to fetch, so probing the (often signed, range-only) base URL is noise.
+		// Probe if needed. A browser-supplied plan or muxed video+audio job
+		// already describes what to fetch, so probing the base URL is noise.
 		snap := t.Clone()
-		if snap.Plan == nil && (snap.TotalBytes <= 0 || snap.SavePath == "") {
-			if err := t.Probe(runCtx, e.httpClient, downloadDir); err != nil {
+		if snap.Plan == nil && snap.AudioURL == "" && (snap.TotalBytes <= 0 || snap.SavePath == "") {
+			probeDir := downloadDir
+			if snap.SavePath != "" {
+				probeDir = filepath.Dir(snap.SavePath)
+			} else {
+				probeDir = ResolveSaveDir(downloadDir, snap.Category, e.Config().AutoCategorize)
+			}
+			if err := t.Probe(runCtx, e.httpClient, probeDir); err != nil {
 				if runCtx.Err() != nil {
 					// Paused or cancelled while probing; the status is already set.
 					e.notify(t.Clone())
@@ -526,8 +560,8 @@ func (e *Engine) loadState() error {
 	}
 
 	for _, t := range loadedTasks {
-		// If app exited while downloading/probing, reset to Paused so user can resume
-		if t.Status == StatusDownloading || t.Status == StatusProbing {
+		// If app exited while downloading/probing/muxing, reset to Paused so user can resume
+		if t.Status == StatusDownloading || t.Status == StatusProbing || t.Status == StatusMuxing {
 			t.Status = StatusPaused
 		}
 		t.Speed = 0
@@ -610,6 +644,7 @@ func (e *Engine) saveConfig() error {
 		MaxRetries:             &cfg.MaxRetries,
 		SpeedLimitKBps:         &cfg.SpeedLimitKBps,
 		DownloadDir:            &cfg.DownloadDir,
+		AutoCategorize:         &cfg.AutoCategorize,
 	}
 	data, err := json.MarshalIndent(pc, "", "  ")
 	if err != nil {
@@ -647,6 +682,9 @@ func (e *Engine) loadConfig() {
 	}
 	if pc.DownloadDir != nil && *pc.DownloadDir != "" {
 		e.config.DownloadDir = *pc.DownloadDir
+	}
+	if pc.AutoCategorize != nil {
+		e.config.AutoCategorize = *pc.AutoCategorize
 	}
 	e.limiter.setRate(e.config.SpeedLimitKBps * 1024)
 }

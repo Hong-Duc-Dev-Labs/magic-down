@@ -3,8 +3,6 @@ package gui
 import (
 	"fmt"
 	"net/url"
-	"path/filepath"
-	"strings"
 
 	"github.com/egoist/mygo/ui"
 
@@ -15,45 +13,30 @@ import (
 type FileCategory string
 
 const (
-	CatAll       FileCategory = "All"
-	CatDocuments FileCategory = "Documents"
-	CatMedia     FileCategory = "Media"
-	CatArchives  FileCategory = "Archives"
-	CatPrograms  FileCategory = "Programs"
-	CatOther     FileCategory = "Other"
+	CatAll        FileCategory = "All"
+	CatVideo      FileCategory = "Video"
+	CatMusic      FileCategory = "Music"
+	CatCompressed FileCategory = "Compressed"
+	CatDocuments  FileCategory = "Documents"
+	CatPrograms   FileCategory = "Programs"
+	CatOther      FileCategory = "Other"
 )
 
 // ClassifyFile determines a download's category from its filename or URL.
 func ClassifyFile(filename, rawURL string) FileCategory {
-	target := filename
-	if target == "" {
-		if u, err := url.Parse(rawURL); err == nil {
-			target = u.Path
-		}
-	}
-	ext := strings.ToLower(strings.TrimPrefix(filepath.Ext(target), "."))
-	switch ext {
-	case "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "txt", "md", "csv", "epub":
-		return CatDocuments
-	case "mp4", "mkv", "avi", "mov", "webm", "mp3", "flac", "wav", "ogg", "m4a", "png", "jpg", "jpeg", "webp":
-		return CatMedia
-	case "zip", "rar", "7z", "tar", "gz", "bz2", "xz", "zst":
-		return CatArchives
-	case "exe", "msi", "dmg", "pkg", "deb", "rpm", "appimage", "apk", "iso", "img", "bin":
-		return CatPrograms
-	default:
-		return CatOther
-	}
+	return FileCategory(engine.CategoryForFilename(filename, rawURL))
 }
 
 func categoryVisual(cat FileCategory, pal Palette) (*ui.SVG, ui.Color, ui.Color) {
 	switch cat {
+	case CatVideo:
+		return iconMedia, pal.Purple, pal.PurpleSoft
+	case CatMusic:
+		return iconMedia, pal.Accent, pal.AccentSoft
+	case CatCompressed:
+		return iconArchive, pal.Warning, pal.WarningSoft
 	case CatDocuments:
 		return iconDoc, pal.Accent, pal.AccentSoft
-	case CatMedia:
-		return iconMedia, pal.Purple, pal.PurpleSoft
-	case CatArchives:
-		return iconArchive, pal.Warning, pal.WarningSoft
 	case CatPrograms:
 		return iconProgram, pal.Success, pal.SuccessSoft
 	default:
