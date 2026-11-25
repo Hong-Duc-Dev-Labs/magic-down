@@ -15,16 +15,96 @@
   Object.defineProperty(window, FLAG, { value: true, enumerable: false });
 
   const MSG = "magicdown:media-sniff:v1";
+  const YT_MSG = "magicdown:yt-player:v1";
+  const YT_PROBE_MSG = "magicdown:yt-probe:v1";
   const MAX_ITEMS = 200;
   const MAX_URL = 4096;
   const MEDIA_PATH = /\.(?:mp4|m4s|m4v|m4a|m4p|webm|ts|m3u8|mpd|mov|mkv|mp3|aac)(?:$|[?#])/i;
   const RANGE_HINT = /(?:^|[?&])(?:bytestart|byteend|bytes|range)=/i;
+  const IS_YOUTUBE = /(?:^|\.)(?:youtube\.com|youtube-nocookie\.com)$/i.test(location.hostname || "");
 
   const items = [];
   const pending = [];
+  const ytPayloads = new Map(); // videoId -> compact payload
   let flushTimer = 0;
   let lastFlush = 0;
   let seq = 0;
+
+  function compactYTFormat(fmt) {
+    if (!fmt || typeof fmt !== "object") return null;
+    return {
+      itag: Number(fmt.itag) || 0,
+      url: typeof fmt.url === "string" ? fmt.url.slice(0, MAX_URL) : "",
+      hasCipher: Boolean(fmt.signatureCipher || fmt.cipher),
+      mimeType: typeof fmt.mimeType === "string" ? fmt.mimeType.slice(0, 120) : "",
+      qualityLabel: typeof fmt.qualityLabel === "string" ? fmt.qualityLabel.slice(0, 32) : "",
+      width: Number(fmt.width) || 0,
+      height: Number(fmt.height) || 0,
+      fps: Number(fmt.fps) || 0,
+      bitrate: Number(fmt.bitrate) || 0,
+      contentLength: Number(fmt.contentLength) || 0,
+      isDrm: Boolean(fmt.drmFamilies && fmt.drmFamilies.length > 0)
+    };
+  }
+
+  function emitYTPlayerResponse(pr) {
+    try {
+      if (!pr || typeof pr !== "object") return;
+      const streamingData = pr.streamingData;
+      const videoDetails = pr.videoDetails;
+      if (!streamingData || typeof streamingData !== "object") return;
+      const videoId = videoDetails && typeof videoDetails.videoId === "string" ? videoDetails.videoId.slice(0, 32) : "";
+      const title = videoDetails && typeof videoDetails.title === "string" ? videoDetails.title.slice(0, 200) : "";
+      const formats = Array.isArray(streamingData.formats)
+        ? streamingData.formats.slice(0, 20).map(compactYTFormat).filter(Boolean)
+        : [];
+      const adaptiveFormats = Array.isArray(streamingData.adaptiveFormats)
+        ? streamingData.adaptiveFormats.slice(0, 60).map(compactYTFormat).filter(Boolean)
+        : [];
+      const hlsManifestUrl =
+        typeof streamingData.hlsManifestUrl === "string" ? streamingData.hlsManifestUrl.slice(0, MAX_URL) : "";
+      const dashManifestUrl =
+        typeof streamingData.dashManifestUrl === "string" ? streamingData.dashManifestUrl.slice(0, MAX_URL) : "";
+      if (formats.length === 0 && adaptiveFormats.length === 0 && !hlsManifestUrl && !dashManifestUrl) return;
+
+      const payload = {
+        videoId,
+        title,
+        isLive: Boolean(videoDetails && videoDetails.isLiveContent),
+        hlsManifestUrl,
+        dashManifestUrl,
+        formats,
+        adaptiveFormats
+      };
+      const key = videoId || "_latest";
+      ytPayloads.set(key, payload);
+      if (ytPayloads.size > 10) {
+        ytPayloads.delete(ytPayloads.keys().next().value);
+      }
+      window.postMessage({ __mdSniff: YT_MSG, payload }, "*");
+    } catch {
+      // never break page code
+    }
+  }
+
+  function probeYouTubePlayers() {
+    if (!IS_YOUTUBE) return;
+    try {
+      const playerIds = ["movie_player", "shorts-player", "c4-player"];
+      for (const id of playerIds) {
+        const el = document.getElementById(id);
+        if (el && typeof el.getPlayerResponse === "function") {
+          const pr = el.getPlayerResponse();
+          if (pr) emitYTPlayerResponse(pr);
+        }
+      }
+      if (window.ytInitialPlayerResponse) {
+        emitYTPlayerResponse(window.ytInitialPlayerResponse);
+      }
+    } catch {
+      // ignore
+    }
+  }
 
   function isMediaURL(value) {
     if (typeof value !== "string" || value.length === 0 || value.length > MAX_URL) return false;
@@ -56,12 +136,23 @@
   // its manifest. It announces itself and receives the buffered ring replay so
   // nothing discovered before injection is lost.
   function replay() {
-    if (items.length === 0) return;
-    const batch = items.slice(-MAX_ITEMS);
-    try {
-      window.postMessage({ __mdSniff: MSG, seq: ++seq, replay: true, items: batch }, "*");
-    } catch {
-      // ignore
+    if (items.length > 0) {
+      const batch = items.slice(-MAX_ITEMS);
+      try {
+        window.postMessage({ __mdSniff: MSG, seq: ++seq, replay: true, items: batch }, "*");
+      } catch {
+        // ignore
+      }
+    }
+    if (IS_YOUTUBE) {
+      for (const payload of ytPayloads.values()) {
+        try {
+          window.postMessage({ __mdSniff: YT_MSG, replay: true, payload }, "*");
+        } catch {
+          // ignore
+        }
+      }
+      probeYouTubePlayers();
     }
   }
 
@@ -71,13 +162,27 @@
       (event) => {
         if (event.source !== window) return;
         const data = event.data;
-        if (!data || data.__mdSniff !== "magicdown:media-sniff-ready:v1") return;
-        replay();
+        if (!data) return;
+        if (data.__mdSniff === "magicdown:media-sniff-ready:v1") {
+          replay();
+        } else if (data.__mdSniff === YT_PROBE_MSG) {
+          probeYouTubePlayers();
+        }
       },
       false
     );
   } catch {
     // ignore
+  }
+
+  if (IS_YOUTUBE) {
+    try {
+      document.addEventListener("DOMContentLoaded", probeYouTubePlayers, { passive: true });
+      window.addEventListener("yt-navigate-finish", probeYouTubePlayers, { passive: true });
+      window.addEventListener("yt-page-data-updated", probeYouTubePlayers, { passive: true });
+    } catch {
+      // ignore
+    }
   }
 
   function note(url, kind, mime) {
@@ -334,8 +439,8 @@
         function (input) {
           let url = "";
           try {
-            url = typeof input === "string" ? input : (input && input.url) || "";
-            if (url) note(String(url), "fetch", "");
+            url = typeof input === "string" ? input : input && input.url ? String(input.url) : "";
+            if (url) note(url, "fetch", "");
           } catch {
             // ignore
           }
@@ -346,6 +451,17 @@
                 try {
                   if (resp && resp.ok && typeof resp.clone === "function") {
                     resp.clone().text().then(inspectWeiboJsonText).catch(() => {});
+                  }
+                } catch {
+                  // ignore
+                }
+              }).catch(() => {});
+            }
+            if (IS_YOUTUBE && url && /\/youtubei\/v1\/player(?:$|\?)/i.test(url) && promise && typeof promise.then === "function") {
+              promise.then((resp) => {
+                try {
+                  if (resp && resp.ok && typeof resp.clone === "function") {
+                    resp.clone().json().then(emitYTPlayerResponse).catch(() => {});
                   }
                 } catch {
                   // ignore
@@ -368,21 +484,39 @@
       wrapMethod(XMLHttpRequest.prototype, "open", (original) =>
         function (method, url) {
           try {
-            if (url) {
-              const strUrl = String(url);
-              note(strUrl, "xhr", "");
-              if (isWeiboApiURL(strUrl) && !this.__mdWeiboHooked) {
-                this.__mdWeiboHooked = true;
+            const safeUrl = url ? String(url) : "";
+            if (safeUrl) note(safeUrl, "xhr", "");
+            if (safeUrl && isWeiboApiURL(safeUrl) && !this.__mdWeiboHooked) {
+              this.__mdWeiboHooked = true;
+              this.addEventListener("load", () => {
+                try {
+                  if (typeof this.responseText === "string") {
+                    inspectWeiboJsonText(this.responseText);
+                  }
+                } catch {
+                  // ignore
+                }
+              });
+            }
+            if (IS_YOUTUBE && /\/youtubei\/v1\/player(?:$|\?)/i.test(safeUrl)) {
+              this.__mdYtPlayerXhr = true;
+              if (!this.__mdYtPlayerHooked) {
+                this.__mdYtPlayerHooked = true;
                 this.addEventListener("load", () => {
                   try {
-                    if (typeof this.responseText === "string") {
-                      inspectWeiboJsonText(this.responseText);
+                    if (!this.__mdYtPlayerXhr) return;
+                    if (this.responseType === "json" && this.response) {
+                      emitYTPlayerResponse(this.response);
+                    } else if ((!this.responseType || this.responseType === "text") && this.responseText) {
+                      emitYTPlayerResponse(JSON.parse(this.responseText));
                     }
                   } catch {
                     // ignore
                   }
                 });
               }
+            } else {
+              this.__mdYtPlayerXhr = false;
             }
           } catch {
             // ignore

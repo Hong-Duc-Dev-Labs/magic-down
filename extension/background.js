@@ -164,14 +164,33 @@ function sendNativeMessage(payload) {
   });
 }
 
-async function forwardDownload({ url, filename = "", referrer = "", convertFormat = "", plan = null }) {
+function sanitizeHeaders(rawHeaders) {
+  const out = {};
+  if (rawHeaders && typeof rawHeaders === "object") {
+    for (const [key, val] of Object.entries(rawHeaders)) {
+      if (typeof key !== "string" || typeof val !== "string") continue;
+      const k = key.trim();
+      const v = val.trim();
+      if (!k || !v || k.length > 64 || v.length > 1024) continue;
+      out[k] = v;
+    }
+  }
+  if (!out["User-Agent"] && typeof navigator !== "undefined" && navigator.userAgent) {
+    out["User-Agent"] = navigator.userAgent;
+  }
+  return out;
+}
+
+async function forwardDownload({ url, filename = "", referrer = "", headers = null, convertFormat = "", plan = null }) {
   const cookies = await getCookiesHeader(url);
+  const safeHeaders = sanitizeHeaders(headers);
   const payload = {
     action: "download",
     url,
     filename,
     referrer,
     cookies,
+    headers: safeHeaders,
     auto_start: true
   };
   if (convertFormat) {
@@ -607,7 +626,30 @@ function isKnownSocialVideoURL(rawUrl) {
   return false;
 }
 
+function isYouTubeRangeChunk(rawUrl) {
+  try {
+    const u = new URL(rawUrl);
+    const host = u.hostname.toLowerCase();
+    if (host !== "googlevideo.com" && !host.endsWith(".googlevideo.com")) return false;
+    if (u.pathname !== "/videoplayback") return false;
+    return (
+      u.searchParams.has("range") ||
+      u.searchParams.has("ump") ||
+      u.searchParams.has("rbuf") ||
+      u.searchParams.has("rn")
+    );
+  } catch {
+    return false;
+  }
+}
+
 function classifyMediaResponse(url, headers) {
+  // YouTube MSE players fetch byte-range/UMP chunks from googlevideo.com;
+  // those are partial fragments (not full files) and are superseded by the
+  // playerResponse streams extracted in the page.
+  if (isYouTubeRangeChunk(url)) {
+    return null;
+  }
   const { url: mediaUrl, strippedRange } = normalizeMediaUrl(url);
   const lowerPath = mediaUrl.toLowerCase().split("?")[0].split("#")[0];
   let contentType = "";
@@ -916,10 +958,20 @@ if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.onMessage)
         url: message.url,
         filename: message.filename || "",
         referrer: message.referrer || "",
+        headers: message.headers || null,
         convertFormat: message.convertFormat || "",
         plan: message.plan || null
       }).then(sendResponse);
       return true;
+    }
+    if (message.type === "clearTabVideos") {
+      const tabId = typeof message.tabId === "number" ? message.tabId : (sender.tab ? sender.tab.id : -1);
+      if (tabId >= 0) {
+        tabVideos.delete(tabId);
+        updateTabBadge(tabId);
+      }
+      sendResponse({ ok: true });
+      return false;
     }
     if (message.type === "fetchManifestText") {
       fetchManifestText(message.url).then(sendResponse);

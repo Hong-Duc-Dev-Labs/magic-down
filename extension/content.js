@@ -22,6 +22,13 @@
   // Everything here is per-frame: a manifest seen in an iframe must not be
   // offered for a video in the top document.
   const SNIFF_MSG = "magicdown:media-sniff:v1";
+  const YT_MSG = "magicdown:yt-player:v1";
+  const YT_PROBE_MSG = "magicdown:yt-probe:v1";
+  const YT = typeof window !== "undefined" && window.MagicDownYouTube ? window.MagicDownYouTube : null;
+  const isYouTubePage = Boolean(YT && YT.isYouTubeHost(location.hostname));
+  const ytPlayers = new Map(); // videoId -> parsed YouTube player entry
+  let latestYtEntry = null;
+  let lastHref = location.href;
   const sniffed = new Map(); // url -> { kind, mime, at }
   const weiboGroups = new Map(); // groupId -> { id, at, variants }
   const weiboUrlToGroup = new Map(); // dedupKey -> groupId
@@ -133,7 +140,23 @@
     (event) => {
       if (event.source !== window) return;
       const data = event.data;
-      if (!data || data.__mdSniff !== SNIFF_MSG || !Array.isArray(data.items)) return;
+      if (!data) return;
+      if (data.__mdSniff === YT_MSG && data.payload && YT) {
+        const parsed = YT.parseYouTubePlayerPayload(data.payload);
+        if (parsed) {
+          if (parsed.videoId) {
+            ytPlayers.set(parsed.videoId, parsed);
+            if (ytPlayers.size > 16) ytPlayers.delete(ytPlayers.keys().next().value);
+          }
+          latestYtEntry = parsed;
+          if (parsed.hlsManifestUrl) {
+            resolveManifest(parsed.hlsManifestUrl, "hls");
+          }
+          scheduleRefresh();
+        }
+        return;
+      }
+      if (data.__mdSniff !== SNIFF_MSG || !Array.isArray(data.items)) return;
       for (const item of data.items) ingestSniff(item);
       if (data.replay) scheduleRefresh();
     },
@@ -161,14 +184,49 @@
     return `${(bw / 1000000).toFixed(1)} Mbps`;
   }
 
-  function sanitizeTitleFilename(ext) {
-    const raw = (document.title || "video")
+  function sanitizeTitleFilename(ext, preferredTitle) {
+    const raw = (preferredTitle || document.title || "video")
+      .replace(/\s*-\s*YouTube\s*$/i, "")
       .replace(/[<>:"/\\|?*\x00-\x1f]/g, " ")
       .replace(/\s+/g, " ")
       .trim()
       .slice(0, 80);
     const base = raw || "video";
     return `${base}.${ext}`;
+  }
+
+  function currentYouTubeEntry() {
+    if (!isYouTubePage || !YT) return null;
+    const videoId = YT.extractYouTubeVideoId(location.href);
+    if (videoId && ytPlayers.has(videoId)) return ytPlayers.get(videoId);
+    if (!videoId) return latestYtEntry;
+    return latestYtEntry && latestYtEntry.videoId === videoId ? latestYtEntry : null;
+  }
+
+  function handleNavigationChange() {
+    if (location.href === lastHref) return;
+    lastHref = location.href;
+    sniffDrm = false;
+    dropdownOpen = false;
+    lastRenderSignature = "";
+    if (isExtensionEnv && isTopFrame) {
+      networkVideos = [];
+      try {
+        chrome.runtime.sendMessage({ type: "clearTabVideos" }, () => {
+          void chrome.runtime.lastError;
+        });
+      } catch {
+        // ignore
+      }
+    }
+    if (isYouTubePage) {
+      try {
+        window.postMessage({ __mdSniff: YT_PROBE_MSG }, "*");
+      } catch {
+        // ignore
+      }
+    }
+    scheduleRefresh();
   }
 
   // Walk the document plus open shadow roots: players are often mounted inside
@@ -772,8 +830,16 @@
       map.set(key, item);
     };
 
+    const ytEntry = currentYouTubeEntry();
+    if (ytEntry && ytEntry.variants.length > 0) {
+      for (const variant of ytEntry.variants) {
+        const key = `${variant.url}|${variant.quality}|${variant.streamType || ""}`;
+        push(key, variant);
+      }
+    }
+
     const planURLs = new Set();
-    let manifestCount = 0;
+    let manifestCount = ytEntry && ytEntry.variants.length > 0 ? ytEntry.variants.length : 0;
     const manifestList = manifestsForVideo(activeVideo);
     const variantURLs = new Set();
     for (const manifest of manifestList) {
@@ -881,6 +947,17 @@
 
   function unavailableReason(video) {
     if (!video) return "No <video> element found in this frame. If the player is an iframe, scroll it into view to wake the frame.";
+    if (isYouTubePage) {
+      const ytEntry = currentYouTubeEntry();
+      if (ytEntry) {
+        if (ytEntry.drmDetected) {
+          return "DRM-protected YouTube stream. MagicDown cannot download encrypted media.";
+        }
+        if (ytEntry.variants.length === 0 && ytEntry.cipherOnlyCount > 0) {
+          return "YouTube streams use signatureCipher (encrypted URLs) which MagicDown cannot decipher yet.";
+        }
+      }
+    }
     const src = video.currentSrc || video.src || "";
     const isMse = src.startsWith("blob:") || Boolean(video.srcObject);
     if (sniffDrm || video.mediaKeys) {
@@ -1123,6 +1200,13 @@
     pillBtn.addEventListener("click", (e) => {
       e.stopPropagation();
       dropdownOpen = !dropdownOpen;
+      if (dropdownOpen && isYouTubePage && !currentYouTubeEntry()) {
+        try {
+          window.postMessage({ __mdSniff: YT_PROBE_MSG }, "*");
+        } catch {
+          // ignore
+        }
+      }
       renderDropdown();
     });
 
@@ -1175,8 +1259,10 @@
     lastRenderSignature = signature;
 
     if (ddSubEl) {
+      const ytCount = videos.filter((v) => v.source === "youtube").length;
       const dashCount = videos.filter((v) => v.source === "dash").length;
-      if (dashCount > 0) ddSubEl.textContent = `DASH · ${dashCount} ${dashCount === 1 ? "quality" : "qualities"}`;
+      if (ytCount > 0) ddSubEl.textContent = `YouTube · ${ytCount} ${ytCount === 1 ? "stream" : "streams"}`;
+      else if (dashCount > 0) ddSubEl.textContent = `DASH · ${dashCount} ${dashCount === 1 ? "quality" : "qualities"}`;
       else if (videos.some((v) => v.isHLS)) ddSubEl.textContent = "HLS · quality list";
       else if (videos.length > 0) ddSubEl.textContent = "1-click to MagicDown";
       else ddSubEl.textContent = sniffDrm || (activeVideo && activeVideo.mediaKeys) ? "DRM protected" : "Unresolved";
@@ -1207,6 +1293,9 @@
       if (v.source === "dash") metaParts.push("DASH");
       else if (v.source === "hls" || v.isHLS) metaParts.push("HLS");
       metaParts.push(v.format || "MP4");
+      if (v.streamType === "progressive") metaParts.push("Video+Audio");
+      else if (v.streamType === "video-only") metaParts.push("Video only");
+      else if (v.streamType === "audio-only") metaParts.push("Audio only");
       if (v.size > 0) metaParts.push(formatSize(v.size));
       else if (v.bandwidth > 0) metaParts.push(formatBandwidth(v.bandwidth));
       if (v.plan && v.plan.kind === "range") {
@@ -1232,15 +1321,19 @@
 
       btn.addEventListener("click", async (e) => {
         e.stopPropagation();
-        let ext = v.isHLS ? "ts" : String(v.format || "mp4").toLowerCase();
+        let ext = v.ext || (v.isHLS ? "ts" : String(v.format || "mp4").toLowerCase());
         if (v.plan && v.plan.format) ext = v.plan.format;
-        const filename = sanitizeTitleFilename(ext);
+        const filename = sanitizeTitleFilename(ext, v.title);
         if (isExtensionEnv) {
           const payload = {
             type: "download",
             url: v.url,
             filename,
-            referrer: window.location.href
+            referrer: window.location.href,
+            headers: {
+              Origin: window.location.origin,
+              "User-Agent": navigator.userAgent
+            }
           };
           if (v.plan) payload.plan = v.plan;
           let resp = null;
@@ -1425,6 +1518,9 @@
   }
 
   function refresh() {
+    if (location.href !== lastHref) {
+      handleNavigationChange();
+    }
     ensureShadowUI();
     ensureHostParent();
     for (const video of collectVideoElements(document)) hookVideo(video);
@@ -1543,6 +1639,12 @@
     },
     true
   );
+
+  window.addEventListener("popstate", handleNavigationChange, { passive: true });
+  if (isYouTubePage) {
+    window.addEventListener("yt-navigate-finish", handleNavigationChange, { passive: true });
+    window.addEventListener("yt-page-data-updated", handleNavigationChange, { passive: true });
+  }
 
   // Coalesce bursts of DOM mutations: refresh() performs layout reads and a
   // deep <video> walk, which is too costly once per mutated node on busy pages.
