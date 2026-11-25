@@ -60,6 +60,10 @@ type persistedConfig struct {
 	SpeedLimitKBps         *int64  `json:"speed_limit_kbps,omitempty"`
 	DownloadDir            *string `json:"download_dir,omitempty"`
 	AutoCategorize         *bool   `json:"auto_categorize,omitempty"`
+	LaunchAtStartup        *bool   `json:"launch_at_startup,omitempty"`
+	MinimizeToTray         *bool   `json:"minimize_to_tray,omitempty"`
+	CloseToTray            *bool   `json:"close_to_tray,omitempty"`
+	OnboardingCompleted    *bool   `json:"onboarding_completed,omitempty"`
 }
 
 // NewEngine initializes a new download engine.
@@ -645,6 +649,10 @@ func (e *Engine) saveConfig() error {
 		SpeedLimitKBps:         &cfg.SpeedLimitKBps,
 		DownloadDir:            &cfg.DownloadDir,
 		AutoCategorize:         &cfg.AutoCategorize,
+		LaunchAtStartup:        &cfg.LaunchAtStartup,
+		MinimizeToTray:         &cfg.MinimizeToTray,
+		CloseToTray:            &cfg.CloseToTray,
+		OnboardingCompleted:    &cfg.OnboardingCompleted,
 	}
 	data, err := json.MarshalIndent(pc, "", "  ")
 	if err != nil {
@@ -685,6 +693,18 @@ func (e *Engine) loadConfig() {
 	}
 	if pc.AutoCategorize != nil {
 		e.config.AutoCategorize = *pc.AutoCategorize
+	}
+	if pc.LaunchAtStartup != nil {
+		e.config.LaunchAtStartup = *pc.LaunchAtStartup
+	}
+	if pc.MinimizeToTray != nil {
+		e.config.MinimizeToTray = *pc.MinimizeToTray
+	}
+	if pc.CloseToTray != nil {
+		e.config.CloseToTray = *pc.CloseToTray
+	}
+	if pc.OnboardingCompleted != nil {
+		e.config.OnboardingCompleted = *pc.OnboardingCompleted
 	}
 	e.limiter.setRate(e.config.SpeedLimitKBps * 1024)
 }

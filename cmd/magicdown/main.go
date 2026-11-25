@@ -36,7 +36,15 @@ func main() {
 
 	ipcPort := flag.Int("port", ipc.DefaultPort, "Local IPC HTTP port")
 	downloadDir := flag.String("dir", "", "Default download directory")
+	startMinimized := flag.Bool("minimized", false, "Start hidden in the system tray")
+	startTray := flag.Bool("tray", false, "Start hidden in the system tray (alias for --minimized)")
 	flag.Parse()
+
+	// Single-instance enforcement: if another MagicDown desktop instance is already
+	// running (e.g. hidden in the system tray), wake it up and exit immediately.
+	if !mygo.App.RequestSingleInstanceLock() {
+		return
+	}
 
 	// Resolve download directory and state file path
 	dlDir := *downloadDir
@@ -74,6 +82,17 @@ func main() {
 	appUI := gui.NewApp(eng, ipcServer)
 	ipcServer.SetOnIncomingDownload(appUI.EnqueueIncomingDownload)
 
+	// Keep the process alive in the system tray when windows are hidden/closed.
+	mygo.App.OnWindowAllClosed(func() {})
+
+	// Wake the existing window when the user launches magicdown.exe a second time.
+	mygo.App.OnSecondInstance(func(args []string, workingDir string) {
+		appUI.WakeFromTray()
+	})
+
+	hideOnLaunch := *startMinimized || *startTray
+
+	var tray *mygo.Tray
 	mygo.App.WhenReady(func() {
 		w := mygo.NewWindow(mygo.WindowOptions{
 			Title:             "MagicDown",
@@ -90,6 +109,59 @@ func main() {
 		appUI.SetWindowController(w)
 		w.OnMaximize(func() { appUI.SetMaximized(true) })
 		w.OnUnmaximize(func() { appUI.SetMaximized(false) })
+		w.OnClose(func(e *mygo.CloseEvent) {
+			if appUI.HandleCloseRequest() {
+				e.PreventDefault()
+			}
+		})
+
+		quitApp := func(*mygo.MenuItem, *mygo.Window) {
+			appUI.SetQuitting(true)
+			if tray != nil {
+				tray.Destroy()
+			}
+			mygo.App.Quit()
+		}
+
+		trayMenu := mygo.NewMenu([]*mygo.MenuItem{
+			{
+				Label: "Open MagicDown",
+				Click: func(*mygo.MenuItem, *mygo.Window) { appUI.WakeFromTray() },
+			},
+			mygo.Separator(),
+			{
+				Label: "Pause All",
+				Click: func(*mygo.MenuItem, *mygo.Window) { eng.PauseAll() },
+			},
+			{
+				Label: "Resume All",
+				Click: func(*mygo.MenuItem, *mygo.Window) { eng.ResumeAll() },
+			},
+			mygo.Separator(),
+			{
+				Label: "Quit",
+				Click: quitApp,
+			},
+		})
+
+		var trayErr error
+		tray, trayErr = mygo.NewTray(mygo.TrayOptions{
+			ID:      "magicdown-tray",
+			Icon:    appIconPNG,
+			ToolTip: "MagicDown — Multi-Segment Download Manager",
+			Menu:    trayMenu,
+		})
+		if trayErr != nil {
+			log.Printf("warning: failed to create system tray icon: %v", trayErr)
+		} else {
+			tray.OnClick(func() {
+				appUI.WakeFromTray()
+			})
+		}
+
+		if hideOnLaunch {
+			appUI.HideToTray()
+		}
 	})
 
 	if err := mygo.App.Run(); err != nil {

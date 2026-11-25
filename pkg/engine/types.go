@@ -93,6 +93,10 @@ type Config struct {
 	DownloadDir            string `json:"download_dir"`
 	StateFilePath          string `json:"state_file_path"`
 	AutoCategorize         bool   `json:"auto_categorize"`
+	LaunchAtStartup        bool   `json:"launch_at_startup"`
+	MinimizeToTray         bool   `json:"minimize_to_tray"`
+	CloseToTray            bool   `json:"close_to_tray"`
+	OnboardingCompleted    bool   `json:"onboarding_completed"`
 }
 
 // DefaultConfig returns reasonable default configuration values.
@@ -104,5 +108,9 @@ func DefaultConfig(downloadDir, statePath string) Config {
 		DownloadDir:            downloadDir,
 		StateFilePath:          statePath,
 		AutoCategorize:         true,
+		LaunchAtStartup:        false,
+		MinimizeToTray:         true,
+		CloseToTray:            true,
+		OnboardingCompleted:    false,
 	}
 }

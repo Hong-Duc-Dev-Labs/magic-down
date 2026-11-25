@@ -19,6 +19,7 @@ import (
 // ffmpegRunner is a package-level hook so unit tests can mock ffmpeg execution.
 var ffmpegRunner = func(ctx context.Context, ffmpegPath string, args []string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, ffmpegPath, args...)
+	hideCommandWindow(cmd)
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &out

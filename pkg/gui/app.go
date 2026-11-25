@@ -13,17 +13,38 @@ import (
 
 	"github.com/egoist/mygo/ui"
 
+	"magicdown/pkg/autostart"
 	"magicdown/pkg/engine"
 	"magicdown/pkg/ipc"
+	"magicdown/pkg/nativemessaging"
 )
 
-// WindowController abstracts native window caption actions so the UI remains decoupled and testable.
+// WindowController abstracts native window caption and tray visibility actions
+// so the UI remains decoupled and testable.
 type WindowController interface {
 	Minimize()
 	ToggleMaximize()
 	IsMaximized() bool
 	Close()
+	Hide()
+	Show()
+	Restore()
+	Focus()
+	IsVisible() bool
+	Invalidate()
 }
+
+// FrameScheduleMode describes how the MyGo render loop should schedule the next frame.
+type FrameScheduleMode int
+
+const (
+	// FrameSchedulePaused suspends all automatic GPU/UI frame scheduling while hidden in tray.
+	FrameSchedulePaused FrameScheduleMode = iota
+	// FrameScheduleActive requests continuous animation frames while downloads are active.
+	FrameScheduleActive
+	// FrameScheduleIdle polls lightly when visible and idle.
+	FrameScheduleIdle
+)
 
 // App holds the UI state for MagicDown's MyGo Native UI desktop application.
 type App struct {
@@ -31,6 +52,18 @@ type App struct {
 	ipcServer *ipc.Server
 	winCtrl   WindowController
 	maximized bool
+
+	// Tray & power-save state
+	trayMu   sync.RWMutex
+	inTray   bool
+	quitting bool
+
+	// Injectable OS hooks (default to real Windows implementations, overridable in tests)
+	autostartSetter func(bool) error
+	nativeRegFn     func() (string, error)
+	nativeStatusFn  func() nativemessaging.RegistrationStatus
+	nativeStatus    nativemessaging.RegistrationStatus
+	nativeRegMsg    string
 
 	darkMode       bool
 	filterStatus   string       // "All", "Downloading", "Completed", "Queued", "Failed"
@@ -61,14 +94,25 @@ type App struct {
 	pendingIncoming []ipc.AddDownloadRequest
 
 	// Settings modal state
-	showSettingsModal     bool
-	settingDownloadDir    string
-	settingMaxConcurrent  int
-	settingSegments       int
-	settingMaxRetries     string
-	settingSpeedLimit     string
-	settingAutoCategorize bool
-	settingsError         string
+	showSettingsModal       bool
+	settingDownloadDir      string
+	settingMaxConcurrent    int
+	settingSegments         int
+	settingMaxRetries       string
+	settingSpeedLimit       string
+	settingAutoCategorize   bool
+	settingLaunchAtStartup  bool
+	settingMinimizeToTray   bool
+	settingCloseToTray      bool
+	settingsError           string
+
+	// First-run Welcome / Onboarding modal state
+	showOnboardingModal       bool
+	onboardingDownloadDir     string
+	onboardingAutoCategorize  bool
+	onboardingLaunchAtStartup bool
+	onboardingRunInTray       bool
+	onboardingError           string
 
 	statusMessage string
 }
@@ -76,30 +120,131 @@ type App struct {
 // NewApp creates a new MagicDown UI state instance with sleek dark mode enabled by default.
 func NewApp(eng *engine.Engine, srv *ipc.Server) *App {
 	cfg := eng.Config()
-	return &App{
-		engine:                eng,
-		ipcServer:             srv,
-		darkMode:              true,
-		filterStatus:          "All",
-		filterCategory:        CatAll,
-		inputCategory:         engine.CategoryOther,
-		inputSaveDir:          cfg.DownloadDir,
-		inputSegments:         cfg.DefaultSegments,
-		settingDownloadDir:    cfg.DownloadDir,
-		settingMaxConcurrent:  cfg.MaxConcurrentDownloads,
-		settingSegments:       cfg.DefaultSegments,
-		settingMaxRetries:     strconv.Itoa(cfg.MaxRetries),
-		settingSpeedLimit:     strconv.FormatInt(cfg.SpeedLimitKBps, 10),
-		settingAutoCategorize: cfg.AutoCategorize,
+	app := &App{
+		engine:                    eng,
+		ipcServer:                 srv,
+		autostartSetter:           autostart.SetEnabled,
+		nativeRegFn:               func() (string, error) { return nativemessaging.RegisterHost("", nativemessaging.DefaultExtensionID) },
+		nativeStatusFn:            nativemessaging.CheckRegistration,
+		darkMode:                  true,
+		filterStatus:              "All",
+		filterCategory:            CatAll,
+		inputCategory:             engine.CategoryOther,
+		inputSaveDir:              cfg.DownloadDir,
+		inputSegments:             cfg.DefaultSegments,
+		settingDownloadDir:        cfg.DownloadDir,
+		settingMaxConcurrent:      cfg.MaxConcurrentDownloads,
+		settingSegments:           cfg.DefaultSegments,
+		settingMaxRetries:         strconv.Itoa(cfg.MaxRetries),
+		settingSpeedLimit:         strconv.FormatInt(cfg.SpeedLimitKBps, 10),
+		settingAutoCategorize:     cfg.AutoCategorize,
+		settingLaunchAtStartup:    cfg.LaunchAtStartup,
+		settingMinimizeToTray:     cfg.MinimizeToTray,
+		settingCloseToTray:        cfg.CloseToTray,
+		showOnboardingModal:       !cfg.OnboardingCompleted,
+		onboardingDownloadDir:     cfg.DownloadDir,
+		onboardingAutoCategorize:  cfg.AutoCategorize,
+		onboardingLaunchAtStartup: cfg.LaunchAtStartup,
+		onboardingRunInTray:       cfg.CloseToTray || cfg.MinimizeToTray,
+	}
+	app.refreshNativeStatus()
+	return app
+}
+
+func (a *App) refreshNativeStatus() {
+	if a.nativeStatusFn != nil {
+		a.nativeStatus = a.nativeStatusFn()
 	}
 }
 
+// IsInTray reports whether the main window is currently hidden in the system tray.
+func (a *App) IsInTray() bool {
+	a.trayMu.RLock()
+	defer a.trayMu.RUnlock()
+	return a.inTray
+}
+
+// SetQuitting marks the app as shutting down so close events are not intercepted by tray hiding.
+func (a *App) SetQuitting(q bool) {
+	a.trayMu.Lock()
+	a.quitting = q
+	a.trayMu.Unlock()
+}
+
+// IsQuitting reports whether the app is in the process of quitting.
+func (a *App) IsQuitting() bool {
+	a.trayMu.RLock()
+	defer a.trayMu.RUnlock()
+	return a.quitting
+}
+
+// HideToTray hides the main window and suspends GPU/UI frame scheduling.
+func (a *App) HideToTray() {
+	a.trayMu.Lock()
+	a.inTray = true
+	a.trayMu.Unlock()
+	if a.winCtrl != nil {
+		a.winCtrl.Hide()
+	}
+}
+
+// WakeFromTray restores and focuses the main window and resumes UI rendering.
+func (a *App) WakeFromTray() {
+	a.trayMu.Lock()
+	a.inTray = false
+	a.trayMu.Unlock()
+	if a.winCtrl != nil {
+		a.winCtrl.Show()
+		a.winCtrl.Restore()
+		a.winCtrl.Focus()
+		a.winCtrl.Invalidate()
+	}
+}
+
+// HandleCloseRequest handles a window close action (title bar X or OS close event).
+// Returns true if the window was hidden to tray (caller should prevent close).
+func (a *App) HandleCloseRequest() bool {
+	if !a.IsQuitting() && a.engine.Config().CloseToTray {
+		a.HideToTray()
+		return true
+	}
+	return false
+}
+
+// HandleMinimizeRequest handles the custom title bar minimize button.
+func (a *App) HandleMinimizeRequest() {
+	if a.engine.Config().MinimizeToTray {
+		a.HideToTray()
+		return
+	}
+	if a.winCtrl != nil {
+		a.winCtrl.Minimize()
+	}
+}
+
+// FrameScheduleMode returns the current render-loop scheduling policy.
+// While hidden in the system tray, rendering is completely paused to minimize CPU/GPU usage.
+func (a *App) FrameScheduleMode() FrameScheduleMode {
+	if a.IsInTray() {
+		return FrameSchedulePaused
+	}
+	if a.engine != nil && a.engine.ActiveCount() > 0 {
+		return FrameScheduleActive
+	}
+	return FrameScheduleIdle
+}
+
 // EnqueueIncomingDownload queues a download received over IPC so the UI opens
-// the Download Info Dialog on the next frame.
+// the Download Info Dialog on the next frame, waking the window if hidden in tray.
 func (a *App) EnqueueIncomingDownload(req ipc.AddDownloadRequest) {
 	a.pendingMu.Lock()
 	a.pendingIncoming = append(a.pendingIncoming, req)
 	a.pendingMu.Unlock()
+	if a.IsInTray() {
+		a.WakeFromTray()
+	} else if a.winCtrl != nil {
+		a.winCtrl.Invalidate()
+	}
 }
 
 func (a *App) popPendingIncoming() {
@@ -193,11 +338,17 @@ func (a *App) palette() Palette {
 
 // View renders the entire desktop interface for each frame.
 func (a *App) View(c *ui.Context) {
+	// Power-save mode: when hidden in the Windows System Tray, skip layout/draw
+	// and do not schedule AnimationFrame or timer wakeups.
+	if a.IsInTray() {
+		return
+	}
+
 	pal := a.palette()
 	c.SetTheme(pal.UITheme)
 
 	// Global keyboard shortcuts
-	if c.Shortcut(ui.Cmd, ui.KeyN) && !a.showAddModal {
+	if c.Shortcut(ui.Cmd, ui.KeyN) && !a.showAddModal && !a.showOnboardingModal {
 		a.openAddModal()
 	}
 	if c.Shortcut(0, ui.KeyEscape) {
@@ -211,9 +362,10 @@ func (a *App) View(c *ui.Context) {
 	tasks := a.engine.GetTasks()
 
 	// Animate smoothly while downloads are active; poll lightly otherwise for IPC arrivals.
-	if a.engine.ActiveCount() > 0 {
+	switch a.FrameScheduleMode() {
+	case FrameScheduleActive:
 		c.AnimationFrame()
-	} else {
+	case FrameScheduleIdle:
 		c.After(250 * time.Millisecond)
 	}
 
@@ -274,6 +426,7 @@ func (a *App) View(c *ui.Context) {
 	// Modals
 	a.renderAddModal(c, pal)
 	a.renderSettingsModal(c, pal)
+	a.renderOnboardingModal(c, pal)
 }
 
 func (a *App) renderTitleBar(c *ui.Context, pal Palette) {
@@ -318,8 +471,8 @@ func (a *App) renderTitleBar(c *ui.Context, pal Palette) {
 				minBtn.Background(minBg).Children(func() {
 					ui.Icon(c, iconWinMin).Width(11).Height(11).TextColor(minFg)
 				})
-				if minBtn.Clicked() && a.winCtrl != nil {
-					a.winCtrl.Minimize()
+				if minBtn.Clicked() {
+					a.HandleMinimizeRequest()
 				}
 
 				// Maximize / Restore
@@ -356,8 +509,10 @@ func (a *App) renderTitleBar(c *ui.Context, pal Palette) {
 				closeBtn.Background(closeBg).Children(func() {
 					ui.Icon(c, iconWinClose).Width(11).Height(11).TextColor(closeFg)
 				})
-				if closeBtn.Clicked() && a.winCtrl != nil {
-					a.winCtrl.Close()
+				if closeBtn.Clicked() {
+					if !a.HandleCloseRequest() && a.winCtrl != nil {
+						a.winCtrl.Close()
+					}
 				}
 			})
 		})
@@ -384,6 +539,7 @@ func (a *App) openAddModal() {
 	a.lastAutoTarget = ""
 	a.addError = ""
 	a.showSettingsModal = false
+	a.showOnboardingModal = false
 	a.showAddModal = true
 }
 
@@ -395,9 +551,30 @@ func (a *App) openSettingsModal() {
 	a.settingMaxRetries = strconv.Itoa(cfg.MaxRetries)
 	a.settingSpeedLimit = strconv.FormatInt(cfg.SpeedLimitKBps, 10)
 	a.settingAutoCategorize = cfg.AutoCategorize
+	a.settingLaunchAtStartup = cfg.LaunchAtStartup
+	a.settingMinimizeToTray = cfg.MinimizeToTray
+	a.settingCloseToTray = cfg.CloseToTray
 	a.settingsError = ""
+	a.nativeRegMsg = ""
+	a.refreshNativeStatus()
 	a.showAddModal = false
+	a.showOnboardingModal = false
 	a.showSettingsModal = true
+}
+
+// OpenOnboardingModal opens the Welcome Setup dialog populated from current config.
+func (a *App) OpenOnboardingModal() {
+	cfg := a.engine.Config()
+	a.onboardingDownloadDir = cfg.DownloadDir
+	a.onboardingAutoCategorize = cfg.AutoCategorize
+	a.onboardingLaunchAtStartup = cfg.LaunchAtStartup
+	a.onboardingRunInTray = cfg.CloseToTray || cfg.MinimizeToTray
+	a.onboardingError = ""
+	a.nativeRegMsg = ""
+	a.refreshNativeStatus()
+	a.showAddModal = false
+	a.showSettingsModal = false
+	a.showOnboardingModal = true
 }
 
 func (a *App) renderSidebar(c *ui.Context, pal Palette, statusCounts map[string]int, catCounts map[FileCategory]int) {
@@ -1138,16 +1315,54 @@ func (a *App) renderSettingsModal(c *ui.Context, pal Palette) {
 				})
 			})
 
-			// Appearance toggle
-			ui.Column(c).Gap(6).Children(func() {
-				ui.Text(c, "Appearance").FontSize(12).FontWeight(600).TextColor(pal.TextSecondary)
-				ui.Row(c).Gap(8).Children(func() {
-					if segmentOption(c, pal, "Dark Theme", a.darkMode) {
-						a.darkMode = true
-					}
-					if segmentOption(c, pal, "Light Theme", !a.darkMode) {
-						a.darkMode = false
-					}
+			// Windows Startup & System Tray
+			ui.Row(c).Gap(16).Children(func() {
+				ui.Column(c).Gap(6).Grow(1).Children(func() {
+					ui.Text(c, "Launch at Windows Startup").FontSize(12).FontWeight(600).TextColor(pal.TextSecondary)
+					ui.Row(c).Gap(6).Children(func() {
+						if segmentOption(c, pal, "Enabled", a.settingLaunchAtStartup) {
+							a.settingLaunchAtStartup = true
+						}
+						if segmentOption(c, pal, "Disabled", !a.settingLaunchAtStartup) {
+							a.settingLaunchAtStartup = false
+						}
+					})
+				})
+				ui.Column(c).Gap(6).Grow(1).Children(func() {
+					ui.Text(c, "Appearance").FontSize(12).FontWeight(600).TextColor(pal.TextSecondary)
+					ui.Row(c).Gap(6).Children(func() {
+						if segmentOption(c, pal, "Dark", a.darkMode) {
+							a.darkMode = true
+						}
+						if segmentOption(c, pal, "Light", !a.darkMode) {
+							a.darkMode = false
+						}
+					})
+				})
+			})
+
+			ui.Row(c).Gap(16).Children(func() {
+				ui.Column(c).Gap(6).Grow(1).Children(func() {
+					ui.Text(c, "Close Button (X) Behavior").FontSize(12).FontWeight(600).TextColor(pal.TextSecondary)
+					ui.Row(c).Gap(6).Children(func() {
+						if segmentOption(c, pal, "Hide to Tray", a.settingCloseToTray) {
+							a.settingCloseToTray = true
+						}
+						if segmentOption(c, pal, "Exit App", !a.settingCloseToTray) {
+							a.settingCloseToTray = false
+						}
+					})
+				})
+				ui.Column(c).Gap(6).Grow(1).Children(func() {
+					ui.Text(c, "Minimize Button Behavior").FontSize(12).FontWeight(600).TextColor(pal.TextSecondary)
+					ui.Row(c).Gap(6).Children(func() {
+						if segmentOption(c, pal, "Hide to Tray", a.settingMinimizeToTray) {
+							a.settingMinimizeToTray = true
+						}
+						if segmentOption(c, pal, "Taskbar", !a.settingMinimizeToTray) {
+							a.settingMinimizeToTray = false
+						}
+					})
 				})
 			})
 
@@ -1159,13 +1374,25 @@ func (a *App) renderSettingsModal(c *ui.Context, pal Palette) {
 			ui.Row(c).Padding(10, 12).Radius(8).Background(pal.InputBg).Border(1, pal.Border).AlignItems(ui.Center).Justify(ui.SpaceBetween).Children(func() {
 				ui.Column(c).Gap(2).Children(func() {
 					ui.Text(c, "Chrome / Edge Native Messaging").FontSize(12).FontWeight(600).TextColor(pal.TextPrimary)
-					ui.Text(c, fmt.Sprintf("Host: com.magicdown.downloader  •  IPC 127.0.0.1:%d", ipcPort)).FontSize(11).FontFeatures("tnum").TextColor(pal.TextMuted)
+					regState := "Not registered"
+					if a.nativeStatus.IsReady() {
+						regState = "Registered"
+					}
+					ui.Text(c, fmt.Sprintf("%s  •  IPC 127.0.0.1:%d", regState, ipcPort)).FontSize(11).FontFeatures("tnum").TextColor(pal.TextMuted)
 				})
-				ui.Row(c).Padding(3, 8).Radius(999).Background(pal.SuccessSoft).Gap(5).AlignItems(ui.Center).Children(func() {
-					ui.Box(c).Width(6).Height(6).Radius(999).Background(pal.Success)
-					ui.Text(c, "Listening").FontSize(11).FontWeight(600).TextColor(pal.Success)
+				ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
+					regLabel := "Register"
+					if a.nativeStatus.IsReady() {
+						regLabel = "Re-register"
+					}
+					if toolbarButton(c, pal, nil, regLabel, false, false) {
+						a.registerNativeMessaging()
+					}
 				})
 			})
+			if a.nativeRegMsg != "" {
+				ui.Text(c, a.nativeRegMsg).FontSize(11).TextColor(pal.Accent)
+			}
 
 			if a.settingsError != "" {
 				ui.Row(c).Padding(8, 10).Radius(6).Background(pal.DangerSoft).Gap(6).AlignItems(ui.Center).Children(func() {
@@ -1177,6 +1404,9 @@ func (a *App) renderSettingsModal(c *ui.Context, pal Palette) {
 			ui.Divider(c)
 
 			ui.Row(c).Gap(8).Children(func() {
+				if toolbarButton(c, pal, nil, "Welcome Setup", false, false) {
+					a.OpenOnboardingModal()
+				}
 				ui.Spacer(c)
 				if toolbarButton(c, pal, nil, "Cancel", false, false) {
 					a.showSettingsModal = false
@@ -1187,6 +1417,20 @@ func (a *App) renderSettingsModal(c *ui.Context, pal Palette) {
 			})
 		})
 	})
+}
+
+func (a *App) registerNativeMessaging() {
+	if a.nativeRegFn == nil {
+		return
+	}
+	path, err := a.nativeRegFn()
+	if err != nil {
+		a.nativeRegMsg = "Native Messaging error: " + err.Error()
+		return
+	}
+	a.refreshNativeStatus()
+	a.nativeRegMsg = "Registered Native Messaging: " + filepath.Base(path)
+	a.statusMessage = "Chrome/Edge Native Messaging registered"
 }
 
 func (a *App) saveSettings() {
@@ -1220,6 +1464,13 @@ func (a *App) saveSettings() {
 		speedKBps = 1048576
 	}
 
+	if a.autostartSetter != nil {
+		if err := a.autostartSetter(a.settingLaunchAtStartup); err != nil {
+			a.settingsError = "Failed to update Windows startup: " + err.Error()
+			return
+		}
+	}
+
 	cfg := a.engine.Config()
 	cfg.DownloadDir = dir
 	cfg.MaxConcurrentDownloads = maxC
@@ -1227,12 +1478,166 @@ func (a *App) saveSettings() {
 	cfg.MaxRetries = retries
 	cfg.SpeedLimitKBps = speedKBps
 	cfg.AutoCategorize = a.settingAutoCategorize
+	cfg.LaunchAtStartup = a.settingLaunchAtStartup
+	cfg.MinimizeToTray = a.settingMinimizeToTray
+	cfg.CloseToTray = a.settingCloseToTray
 	a.engine.UpdateConfig(cfg)
 
 	a.settingMaxRetries = strconv.Itoa(retries)
 	a.settingSpeedLimit = strconv.FormatInt(speedKBps, 10)
+	a.settingsError = ""
 	a.statusMessage = "Settings saved"
 	a.showSettingsModal = false
+}
+
+func (a *App) renderOnboardingModal(c *ui.Context, pal Palette) {
+	if !a.showOnboardingModal {
+		return
+	}
+
+	ui.Modal(c, &a.showOnboardingModal, func() {
+		ui.Column(c).Width(540).Gap(16).Children(func() {
+			// Header
+			ui.Row(c).AlignItems(ui.Center).Justify(ui.SpaceBetween).Children(func() {
+				ui.Row(c).Gap(10).AlignItems(ui.Center).Children(func() {
+					ui.Row(c).Width(36).Height(36).Radius(9).Background(pal.Accent).Center().Children(func() {
+						ui.Icon(c, iconBolt).Width(18).Height(18).TextColor(pal.AccentText)
+					})
+					ui.Column(c).Gap(2).Children(func() {
+						ui.Text(c, "Welcome to MagicDown").FontSize(17).FontWeight(700).TextColor(pal.TextPrimary)
+						ui.Text(c, "Quick setup for downloads, startup, system tray, and browser integration").FontSize(12).TextColor(pal.TextMuted)
+					})
+				})
+				if rowIconButton(c, pal, iconClose, false) {
+					a.skipOnboarding()
+				}
+			})
+
+			ui.Divider(c)
+
+			// Default Download Directory
+			ui.Column(c).Gap(6).Children(func() {
+				ui.Text(c, "Default Download Folder").FontSize(12).FontWeight(600).TextColor(pal.TextSecondary)
+				ui.TextInput(c, &a.onboardingDownloadDir).
+					Background(pal.InputBg).
+					Border(1, pal.Border).
+					Radius(7)
+			})
+
+			// Auto-Categorize
+			ui.Column(c).Gap(6).Children(func() {
+				ui.Text(c, "Auto-Categorize Subfolders (Video, Music, Compressed, ...)").FontSize(12).FontWeight(600).TextColor(pal.TextSecondary)
+				ui.Row(c).Gap(8).Children(func() {
+					if segmentOption(c, pal, "Enabled (Recommended)", a.onboardingAutoCategorize) {
+						a.onboardingAutoCategorize = true
+					}
+					if segmentOption(c, pal, "Disabled", !a.onboardingAutoCategorize) {
+						a.onboardingAutoCategorize = false
+					}
+				})
+			})
+
+			// Startup & System Tray
+			ui.Row(c).Gap(16).Children(func() {
+				ui.Column(c).Gap(6).Grow(1).Children(func() {
+					ui.Text(c, "Launch with Windows").FontSize(12).FontWeight(600).TextColor(pal.TextSecondary)
+					ui.Row(c).Gap(6).Children(func() {
+						if segmentOption(c, pal, "Enabled", a.onboardingLaunchAtStartup) {
+							a.onboardingLaunchAtStartup = true
+						}
+						if segmentOption(c, pal, "Disabled", !a.onboardingLaunchAtStartup) {
+							a.onboardingLaunchAtStartup = false
+						}
+					})
+				})
+				ui.Column(c).Gap(6).Grow(1).Children(func() {
+					ui.Text(c, "Run in System Tray").FontSize(12).FontWeight(600).TextColor(pal.TextSecondary)
+					ui.Row(c).Gap(6).Children(func() {
+						if segmentOption(c, pal, "Enabled", a.onboardingRunInTray) {
+							a.onboardingRunInTray = true
+						}
+						if segmentOption(c, pal, "Disabled", !a.onboardingRunInTray) {
+							a.onboardingRunInTray = false
+						}
+					})
+				})
+			})
+
+			// Native Messaging Registration Card
+			ui.Row(c).Padding(10, 12).Radius(8).Background(pal.InputBg).Border(1, pal.Border).AlignItems(ui.Center).Justify(ui.SpaceBetween).Children(func() {
+				ui.Column(c).Gap(2).Children(func() {
+					ui.Text(c, "Chrome / Edge Browser Extension").FontSize(12).FontWeight(600).TextColor(pal.TextPrimary)
+					if a.nativeStatus.IsReady() {
+						ui.Text(c, "Native Messaging host is registered and ready").FontSize(11).TextColor(pal.Success)
+					} else {
+						ui.Text(c, "Register Native Messaging host so Chrome/Edge can send downloads").FontSize(11).TextColor(pal.TextMuted)
+					}
+				})
+				regLabel := "Register Now"
+				if a.nativeStatus.IsReady() {
+					regLabel = "Re-register"
+				}
+				if toolbarButton(c, pal, nil, regLabel, false, false) {
+					a.registerNativeMessaging()
+				}
+			})
+			if a.nativeRegMsg != "" {
+				ui.Text(c, a.nativeRegMsg).FontSize(11).TextColor(pal.Accent)
+			}
+
+			if a.onboardingError != "" {
+				ui.Row(c).Padding(8, 10).Radius(6).Background(pal.DangerSoft).Gap(6).AlignItems(ui.Center).Children(func() {
+					ui.Icon(c, iconAlert).Width(14).Height(14).TextColor(pal.Danger)
+					ui.Text(c, a.onboardingError).FontSize(12).TextColor(pal.Danger)
+				})
+			}
+
+			ui.Divider(c)
+
+			ui.Row(c).Gap(8).Children(func() {
+				if toolbarButton(c, pal, nil, "Skip for now", false, false) {
+					a.skipOnboarding()
+				}
+				ui.Spacer(c)
+				if primaryCTA(c, pal, iconCheck, "Finish Setup") {
+					a.completeOnboarding()
+				}
+			})
+		})
+	})
+}
+
+func (a *App) skipOnboarding() {
+	cfg := a.engine.Config()
+	cfg.OnboardingCompleted = true
+	a.engine.UpdateConfig(cfg)
+	a.showOnboardingModal = false
+}
+
+func (a *App) completeOnboarding() {
+	dir := strings.TrimSpace(a.onboardingDownloadDir)
+	if dir == "" {
+		a.onboardingError = "Default download folder cannot be empty."
+		return
+	}
+	if a.autostartSetter != nil {
+		if err := a.autostartSetter(a.onboardingLaunchAtStartup); err != nil {
+			a.onboardingError = "Failed to update Windows startup: " + err.Error()
+			return
+		}
+	}
+	cfg := a.engine.Config()
+	cfg.DownloadDir = dir
+	cfg.AutoCategorize = a.onboardingAutoCategorize
+	cfg.LaunchAtStartup = a.onboardingLaunchAtStartup
+	cfg.MinimizeToTray = a.onboardingRunInTray
+	cfg.CloseToTray = a.onboardingRunInTray
+	cfg.OnboardingCompleted = true
+	a.engine.UpdateConfig(cfg)
+
+	a.onboardingError = ""
+	a.statusMessage = "Setup complete"
+	a.showOnboardingModal = false
 }
 
 func openInFileManager(targetPath string) {
