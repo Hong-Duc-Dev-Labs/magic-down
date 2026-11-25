@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MagicDown</title>
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <div class="container">
+    <header class="header">
+      <div class="brand">
+        <span class="title">MagicDown</span>
+        <span class="subtitle">Browser Integration</span>
+      </div>
+      <span id="statusBadge" class="badge badge-checking">Checking...</span>
+    </header>
+
+    <section class="card">
+      <div class="row">
+        <div>
+          <div class="label">Intercept Browser Downloads</div>
+          <div class="hint">Forward matching files to MagicDown</div>
+        </div>
+        <label class="switch">
+          <input type="checkbox" id="interceptToggle" />
+          <span class="slider"></span>
+        </label>
+      </div>
+    </section>
+
+    <section class="card">
+      <label class="label" for="extensionsInput">File Type Filter (extensions)</label>
+      <div class="hint">Comma-separated (use * for all files)</div>
+      <textarea id="extensionsInput" rows="3" placeholder="zip, rar, 7z, exe, mp4, pdf"></textarea>
+      <div class="actions">
+        <button id="saveExtsBtn" class="btn btn-primary">Save Filter</button>
+        <button id="refreshBtn" class="btn">Check Connection</button>
+      </div>
+    </section>
+
+    <section class="card">
+      <label class="label" for="quickUrlInput">Quick Add URL</label>
+      <div class="quick-row">
+        <input type="url" id="quickUrlInput" placeholder="https://example.com/file.zip" />
+        <button id="sendUrlBtn" class="btn btn-primary">Send</button>
+      </div>
+    </section>
+
+    <div id="feedback" class="feedback"></div>
+  </div>
+  <script src="popup.js"></script>
+</body>
+</html>

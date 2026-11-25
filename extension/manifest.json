@@ -1,0 +1,23 @@
+{
+  "manifest_version": 3,
+  "name": "MagicDown Integration",
+  "version": "1.0.0",
+  "description": "Intercept browser downloads and send them to the MagicDown multi-segment desktop download manager.",
+  "permissions": [
+    "downloads",
+    "nativeMessaging",
+    "storage",
+    "contextMenus",
+    "cookies"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "MagicDown"
+  }
+}
