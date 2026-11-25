@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "host_name": "com.magicdown.downloader",
+  "browsers": {
+    "chrome": {
+      "dev": "cndchhhjghchjigecgkjclembafgjaje",
+      "prod": "",
+      "store_url": "",
+      "store_url_template": "https://chromewebstore.google.com/detail/magicdown-integration/{id}"
+    },
+    "edge": {
+      "dev": "cndchhhjghchjigecgkjclembafgjaje",
+      "prod": "",
+      "store_url": "",
+      "store_url_template": "https://microsoftedge.microsoft.com/addons/detail/magicdown-integration/{id}"
+    }
+  },
+  "packaging": {
+    "strip_key_in_prod": true,
+    "notes": "Production Extension IDs are assigned by Chrome Web Store (Unlisted) and Microsoft Edge Add-ons upon submission. Never hardcode guessed prod IDs; populate prod fields or pass MAGICDOWN_CHROME_PROD_EXT_ID / MAGICDOWN_EDGE_PROD_EXT_ID at production build time."
+  }
+}
