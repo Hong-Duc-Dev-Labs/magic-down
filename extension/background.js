@@ -19,6 +19,9 @@ const DEFAULT_SETTINGS = {
 const tabVideos = new Map();
 // Per-tab detected Facebook audio-only DASH tracks: Map<tabId, Map<fbVideoId, AudioItem>>
 const tabFbAudios = new Map();
+// Recent batch scan snapshots: Map<scanId, { tabId, pageTitle, pageUrl, items, createdAt }>
+const batchScanResults = new Map();
+const MAX_BATCH_SCANS = 10;
 
 async function getSettings() {
   const stored = await chrome.storage.local.get([
@@ -958,6 +961,12 @@ function ensureContextMenus() {
     contexts: ["link", "video", "audio"]
   });
 
+  createContextMenu({
+    id: "magicdown-download-all",
+    title: "Download all with MagicDown",
+    contexts: ["page", "frame", "selection", "link", "image", "video", "audio"]
+  });
+
   // Nested MagicDown menu for right-clicked images with real format conversion
   createContextMenu({
     id: "magicdown-image-parent",
@@ -1036,7 +1045,14 @@ const IMAGE_MENU_FORMATS = {
 };
 
 if (typeof chrome !== "undefined" && chrome.contextMenus && chrome.contextMenus.onClicked) {
-  chrome.contextMenus.onClicked.addListener(async (info) => {
+  chrome.contextMenus.onClicked.addListener(async (info, tab) => {
+    if (info.menuItemId === "magicdown-download-all") {
+      if (tab && typeof tab.id === "number") {
+        await scanAndOpenBatchPicker(tab.id);
+      }
+      return;
+    }
+
     if (info.menuItemId in IMAGE_MENU_FORMATS) {
       const targetUrl = info.srcUrl || info.linkUrl;
       if (!targetUrl) return;
@@ -1138,8 +1154,130 @@ if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.onMessage)
       sendResponse({ videos: getTabVideoList(tabId) });
       return false;
     }
+    if (message.type === "openBatchPicker") {
+      const tabId = typeof message.tabId === "number" ? message.tabId : (sender.tab ? sender.tab.id : -1);
+      scanAndOpenBatchPicker(tabId).then(sendResponse);
+      return true;
+    }
+    if (message.type === "getBatchScanResult") {
+      const data = batchScanResults.get(message.scanId || "");
+      sendResponse(data ? { ok: true, data } : { ok: false, error: "scan not found" });
+      return false;
+    }
+    if (message.type === "rescanTabResources") {
+      const tabId = typeof message.tabId === "number" ? message.tabId : -1;
+      scanTabResources(tabId).then((res) => {
+        if (res && res.ok) {
+          sendResponse({ ok: true, data: res.data });
+        } else {
+          sendResponse({ ok: false, error: (res && res.error) || "failed to rescan tab" });
+        }
+      });
+      return true;
+    }
+    if (message.type === "batchDownload") {
+      forwardBatchDownload({
+        items: Array.isArray(message.items) ? message.items : [],
+        pageUrl: message.pageUrl || "",
+        subfolder: message.subfolder || ""
+      }).then(sendResponse);
+      return true;
+    }
     return false;
   });
+}
+
+async function scanTabResources(tabId) {
+  if (typeof tabId !== "number" || tabId < 0) {
+    return { ok: false, error: "invalid tab" };
+  }
+  return new Promise((resolve) => {
+    chrome.tabs.sendMessage(tabId, { type: "scanPageResources" }, { frameId: 0 }, (resp) => {
+      if (chrome.runtime.lastError || !resp || !resp.ok) {
+        resolve({
+          ok: false,
+          error: (chrome.runtime.lastError && chrome.runtime.lastError.message) || "Cannot scan this page"
+        });
+        return;
+      }
+      resolve({
+        ok: true,
+        data: {
+          tabId,
+          pageTitle: resp.pageTitle || "",
+          pageUrl: resp.pageUrl || "",
+          items: Array.isArray(resp.items) ? resp.items : [],
+          createdAt: Date.now()
+        }
+      });
+    });
+  });
+}
+
+async function scanAndOpenBatchPicker(tabId) {
+  const res = await scanTabResources(tabId);
+  if (!res.ok) {
+    return res;
+  }
+  const scanId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  batchScanResults.set(scanId, res.data);
+  while (batchScanResults.size > MAX_BATCH_SCANS) {
+    const oldestKey = batchScanResults.keys().next().value;
+    batchScanResults.delete(oldestKey);
+  }
+  const pickerUrl = chrome.runtime.getURL(`batch-picker.html?scanId=${encodeURIComponent(scanId)}`);
+  await chrome.tabs.create({ url: pickerUrl });
+  return { ok: true, scanId, count: res.data.items.length };
+}
+
+function buildBatchDownloadPayload({ items, pageUrl = "", subfolder = "", cookies = "", headers = null }) {
+  const safeHeaders = sanitizeHeaders(headers);
+  const normalizedItems = [];
+  const seen = new Set();
+  for (const item of Array.isArray(items) ? items : []) {
+    if (!item || typeof item.url !== "string") continue;
+    const url = item.url.trim();
+    if (!/^https?:\/\//i.test(url) || seen.has(url)) continue;
+    seen.add(url);
+    normalizedItems.push({
+      url,
+      filename: typeof item.filename === "string" ? item.filename.trim() : "",
+      referrer: item.referrer || pageUrl || "",
+      auto_start: true,
+      skip_dialog: true
+    });
+  }
+  return {
+    action: "batch_download",
+    items: normalizedItems,
+    referrer: pageUrl || "",
+    cookies: cookies || "",
+    headers: safeHeaders,
+    subfolder: typeof subfolder === "string" ? subfolder.trim() : "",
+    auto_start: true
+  };
+}
+
+async function forwardBatchDownload({ items, pageUrl = "", subfolder = "", headers = null }) {
+  if (!Array.isArray(items) || items.length === 0) {
+    return { success: false, error: "no items selected" };
+  }
+  const cookies = pageUrl ? await getCookiesHeader(pageUrl) : "";
+  const payload = buildBatchDownloadPayload({ items, pageUrl, subfolder, cookies, headers });
+  if (payload.items.length === 0) {
+    return { success: false, error: "no valid downloadable URLs" };
+  }
+
+  const resp = await sendNativeMessage(payload);
+  await recordActivity({
+    id: `batch-${Date.now()}`,
+    filename: `Batch (${payload.items.length} items)${subfolder ? ` → ${subfolder}` : ""}`,
+    host: extractHost(pageUrl || payload.items[0].url),
+    url: pageUrl || payload.items[0].url,
+    status: resp && resp.success ? "sent" : "failed",
+    error: resp && !resp.success ? (resp.error || "Failed to connect") : ""
+  });
+  return resp;
 }
 
 if (typeof module !== "undefined" && module.exports) {
@@ -1156,6 +1294,7 @@ if (typeof module !== "undefined" && module.exports) {
     addDetectedFacebookAudio,
     getTabVideoList,
     buildDownloadPayload,
+    buildBatchDownloadPayload,
     tabVideos,
     tabFbAudios
   };

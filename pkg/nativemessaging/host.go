@@ -20,9 +20,12 @@ type InboundMessage struct {
 	Headers       map[string]string `json:"headers,omitempty"`
 	NumSegments   int               `json:"num_segments,omitempty"`
 	TotalBytes    int64             `json:"total_bytes,omitempty"`
-	ConvertFormat string            `json:"convert_format,omitempty"`
-	Plan          json.RawMessage   `json:"plan,omitempty"`
-	AutoStart     bool              `json:"auto_start,omitempty"`
+	ConvertFormat string                   `json:"convert_format,omitempty"`
+	Plan          json.RawMessage          `json:"plan,omitempty"`
+	AutoStart     bool                     `json:"auto_start,omitempty"`
+	SkipDialog    bool                     `json:"skip_dialog,omitempty"`
+	Subfolder     string                   `json:"subfolder,omitempty"`
+	Items         []ipc.AddDownloadRequest `json:"items,omitempty"`
 }
 
 // OutboundMessage represents a response sent back to the browser extension.
@@ -32,6 +35,8 @@ type OutboundMessage struct {
 	Message    string `json:"message,omitempty"`
 	TaskID     string `json:"taskId,omitempty"`
 	Filename   string `json:"filename,omitempty"`
+	Added      int    `json:"added,omitempty"`
+	Failed     int    `json:"failed,omitempty"`
 	AppRunning bool   `json:"app_running,omitempty"`
 	Error      string `json:"error,omitempty"`
 }
@@ -120,6 +125,8 @@ func (h *Handler) HandleMessage(msgBytes []byte) ([]byte, error) {
 			ConvertFormat: in.ConvertFormat,
 			Plan:          in.Plan,
 			AutoStart:     true, // default to starting automatically from browser
+			SkipDialog:    in.SkipDialog,
+			Subfolder:     in.Subfolder,
 		})
 		if err != nil {
 			resp := OutboundMessage{
@@ -136,6 +143,51 @@ func (h *Handler) HandleMessage(msgBytes []byte) ([]byte, error) {
 			Message:  "Download added to MagicDown",
 			TaskID:   taskResp.Task.ID,
 			Filename: taskResp.Task.Filename,
+		}
+		return json.Marshal(resp)
+
+	case "batch_download":
+		if len(in.Items) == 0 {
+			resp := OutboundMessage{
+				Success: false,
+				Action:  "batch_download",
+				Error:   "missing batch download items",
+			}
+			return json.Marshal(resp)
+		}
+
+		if !h.ipcClient.IsAppRunning() {
+			resp := OutboundMessage{
+				Success: false,
+				Action:  "batch_download",
+				Error:   "MagicDown desktop app is not running. Please open MagicDown first.",
+			}
+			return json.Marshal(resp)
+		}
+
+		batchResp, err := h.ipcClient.AddBatchDownload(ipc.BatchDownloadRequest{
+			Items:     in.Items,
+			Subfolder: in.Subfolder,
+			Referrer:  in.Referrer,
+			Cookies:   in.Cookies,
+			Headers:   in.Headers,
+			AutoStart: true,
+		})
+		if err != nil {
+			resp := OutboundMessage{
+				Success: false,
+				Action:  "batch_download",
+				Error:   "failed to add batch downloads: " + err.Error(),
+			}
+			return json.Marshal(resp)
+		}
+
+		resp := OutboundMessage{
+			Success: batchResp.Success,
+			Action:  "batch_download",
+			Message: batchResp.Message,
+			Added:   batchResp.Added,
+			Failed:  batchResp.Failed,
 		}
 		return json.Marshal(resp)
 

@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -30,6 +32,28 @@ type AddDownloadRequest struct {
 	Plan          json.RawMessage   `json:"plan,omitempty"`
 	AutoStart     bool              `json:"auto_start"`
 	StartPaused   bool              `json:"start_paused,omitempty"`
+	SkipDialog    bool              `json:"skip_dialog,omitempty"`
+	Subfolder     string            `json:"subfolder,omitempty"`
+}
+
+// BatchDownloadRequest is the JSON payload for enqueuing multiple downloads at once.
+type BatchDownloadRequest struct {
+	Items     []AddDownloadRequest `json:"items"`
+	Subfolder string               `json:"subfolder,omitempty"`
+	Referrer  string               `json:"referrer,omitempty"`
+	Cookies   string               `json:"cookies,omitempty"`
+	Headers   map[string]string    `json:"headers,omitempty"`
+	AutoStart bool                 `json:"auto_start"`
+}
+
+// BatchDownloadResponse is returned by /downloads/batch.
+type BatchDownloadResponse struct {
+	Success bool     `json:"success"`
+	Added   int      `json:"added"`
+	Failed  int      `json:"failed"`
+	TaskIDs []string `json:"task_ids,omitempty"`
+	Errors  []string `json:"errors,omitempty"`
+	Message string   `json:"message"`
 }
 
 // StatusResponse is returned by /status.
@@ -94,6 +118,7 @@ func (s *Server) Start() error {
 	mux.HandleFunc("/status", s.handleHealth)
 	mux.HandleFunc("/downloads", s.handleDownloads)
 	mux.HandleFunc("/downloads/add", s.handleAddDownload)
+	mux.HandleFunc("/downloads/batch", s.handleAddBatchDownload)
 	mux.HandleFunc("/downloads/pause", s.handlePause)
 	mux.HandleFunc("/downloads/resume", s.handleResume)
 	mux.HandleFunc("/downloads/delete", s.handleDelete)
@@ -193,7 +218,7 @@ func (s *Server) handleAddDownload(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	onIncoming := s.onIncomingDownload
 	s.mu.Unlock()
-	if onIncoming != nil {
+	if onIncoming != nil && !req.SkipDialog {
 		onIncoming(req)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
@@ -208,12 +233,13 @@ func (s *Server) handleAddDownload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	saveDir := s.resolveSaveDir(req.SaveDir, req.Subfolder)
 	task, err := s.engine.AddTask(engine.AddTaskRequest{
 		URL:           req.URL,
 		AudioURL:      req.AudioURL,
 		Category:      req.Category,
 		Filename:      req.Filename,
-		SaveDir:       req.SaveDir,
+		SaveDir:       saveDir,
 		NumSegments:   req.NumSegments,
 		TotalBytes:    req.TotalBytes,
 		Referrer:      req.Referrer,
@@ -236,6 +262,128 @@ func (s *Server) handleAddDownload(w http.ResponseWriter, r *http.Request) {
 		"task":    task,
 		"message": "download added successfully",
 	})
+}
+
+func sanitizeSubfolder(raw string) string {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return ""
+	}
+	replacer := strings.NewReplacer(
+		"..", "_",
+		"/", "_",
+		"\\", "_",
+		":", "_",
+		"*", "_",
+		"?", "_",
+		"\"", "_",
+		"<", "_",
+		">", "_",
+		"|", "_",
+	)
+	s = strings.TrimSpace(replacer.Replace(s))
+	s = strings.Trim(s, ". ")
+	if len(s) > 80 {
+		s = strings.TrimSpace(s[:80])
+	}
+	return s
+}
+
+func (s *Server) resolveSaveDir(explicitDir, subfolder string) string {
+	if strings.TrimSpace(explicitDir) != "" {
+		return explicitDir
+	}
+	safeSub := sanitizeSubfolder(subfolder)
+	if safeSub == "" {
+		return ""
+	}
+	base := s.engine.Config().DownloadDir
+	if base == "" {
+		return ""
+	}
+	return filepath.Join(base, safeSub)
+}
+
+func (s *Server) handleAddBatchDownload(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req BatchDownloadRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, fmt.Sprintf("invalid json: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	if len(req.Items) == 0 {
+		http.Error(w, "missing items", http.StatusBadRequest)
+		return
+	}
+
+	resp := BatchDownloadResponse{
+		Success: true,
+	}
+
+	for _, item := range req.Items {
+		if strings.TrimSpace(item.URL) == "" {
+			resp.Failed++
+			resp.Errors = append(resp.Errors, "missing url")
+			continue
+		}
+
+		ref := item.Referrer
+		if ref == "" {
+			ref = req.Referrer
+		}
+		cookies := item.Cookies
+		if cookies == "" {
+			cookies = req.Cookies
+		}
+		headers := item.Headers
+		if len(headers) == 0 && len(req.Headers) > 0 {
+			headers = req.Headers
+		}
+		subfolder := item.Subfolder
+		if subfolder == "" {
+			subfolder = req.Subfolder
+		}
+		autoStart := item.AutoStart || req.AutoStart
+
+		task, err := s.engine.AddTask(engine.AddTaskRequest{
+			URL:           item.URL,
+			AudioURL:      item.AudioURL,
+			Category:      item.Category,
+			Filename:      item.Filename,
+			SaveDir:       s.resolveSaveDir(item.SaveDir, subfolder),
+			NumSegments:   item.NumSegments,
+			TotalBytes:    item.TotalBytes,
+			Referrer:      ref,
+			Cookies:       cookies,
+			Headers:       headers,
+			ConvertFormat: item.ConvertFormat,
+			AutoStart:     autoStart,
+			StartPaused:   item.StartPaused,
+		})
+		if err != nil {
+			resp.Failed++
+			resp.Errors = append(resp.Errors, err.Error())
+			continue
+		}
+		resp.Added++
+		resp.TaskIDs = append(resp.TaskIDs, task.ID)
+	}
+
+	if resp.Added == 0 && resp.Failed > 0 {
+		resp.Success = false
+		resp.Message = "all batch downloads failed"
+	} else {
+		resp.Message = fmt.Sprintf("added %d downloads (%d failed)", resp.Added, resp.Failed)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	_ = json.NewEncoder(w).Encode(resp)
 }
 
 func (s *Server) handlePause(w http.ResponseWriter, r *http.Request) {

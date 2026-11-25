@@ -1852,11 +1852,24 @@
     // frame consumes them; a subframe would otherwise list streams that are not
     // part of the video it is pinning the tag to.
     if (isTopFrame) {
-      chrome.runtime.onMessage.addListener((msg) => {
+      chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         if (msg && msg.type === "videosUpdated" && Array.isArray(msg.videos)) {
           networkVideos = msg.videos;
           refresh();
+          return false;
         }
+        if (msg && msg.type === "scanPageResources") {
+          const scanner = window.MagicDownBatchScanner;
+          const items = scanner ? scanner.scanDocument(document, location.href) : [];
+          sendResponse({
+            ok: true,
+            items,
+            pageTitle: document.title || "",
+            pageUrl: location.href
+          });
+          return false;
+        }
+        return false;
       });
       chrome.runtime.sendMessage({ type: "getDetectedVideos" }, (resp) => {
         if (chrome.runtime.lastError) return;

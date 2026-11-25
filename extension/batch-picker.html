@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="vi" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MagicDown — Tải toàn bộ trang</title>
+  <link rel="stylesheet" href="batch-picker.css" />
+</head>
+<body>
+  <div class="picker-app">
+    <header class="picker-header">
+      <div class="brand">
+        <div class="brand-logo" aria-hidden="true">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z"/>
+          </svg>
+        </div>
+        <div class="brand-meta">
+          <h1 class="brand-title">MagicDown — Tải toàn bộ trang</h1>
+          <div id="pageSourceLabel" class="page-source">Đang tải danh sách tài nguyên...</div>
+        </div>
+      </div>
+
+      <div class="header-controls">
+        <label class="subfolder-box" title="Thư mục con trong thư mục tải xuống của MagicDown">
+          <span>Thư mục con:</span>
+          <input type="text" id="subfolderInput" placeholder="Tên thư mục (tuỳ chọn)" autocomplete="off" />
+        </label>
+        <button id="rescanBtn" class="btn-secondary" type="button">Quét lại</button>
+      </div>
+    </header>
+
+    <section class="toolbar">
+      <div class="category-tabs" role="tablist">
+        <button class="cat-tab active" data-category="image" role="tab" aria-selected="true">
+          Ảnh <span id="countImage" class="badge">0</span>
+        </button>
+        <button class="cat-tab" data-category="media" role="tab" aria-selected="false">
+          Video/Audio <span id="countMedia" class="badge">0</span>
+        </button>
+        <button class="cat-tab" data-category="file" role="tab" aria-selected="false">
+          Tài liệu/File <span id="countFile" class="badge">0</span>
+        </button>
+        <button class="cat-tab" data-category="all" role="tab" aria-selected="false">
+          Tất cả <span id="countAll" class="badge">0</span>
+        </button>
+      </div>
+
+      <div class="filter-controls">
+        <select id="minSizeSelect" title="Lọc kích thước ảnh tối thiểu để bỏ icon nhỏ">
+          <option value="0">Mọi kích thước ảnh</option>
+          <option value="50">Ảnh &ge; 50px</option>
+          <option value="100" selected>Ảnh &ge; 100px (lọc icon)</option>
+          <option value="200">Ảnh &ge; 200px</option>
+          <option value="400">Ảnh &ge; 400px</option>
+        </select>
+
+        <input type="search" id="searchInput" placeholder="Tìm theo tên, đuôi file (vd: jpg, pdf, zip)..." autocomplete="off" />
+
+        <button id="selectAllBtn" class="btn-secondary" type="button">Chọn tất cả</button>
+        <button id="deselectAllBtn" class="btn-secondary" type="button">Bỏ chọn</button>
+      </div>
+    </section>
+
+    <div id="statusBanner" class="status-banner hidden" role="status"></div>
+
+    <main class="picker-main">
+      <div id="resourceContainer" class="resource-grid"></div>
+      <div id="emptyState" class="empty-state hidden">
+        <div class="empty-title">Không tìm thấy tài nguyên phù hợp</div>
+        <div class="empty-sub">Thử đổi tab bộ lọc, giảm kích thước ảnh tối thiểu hoặc xoá từ khoá tìm kiếm.</div>
+      </div>
+    </main>
+
+    <footer class="picker-footer">
+      <div class="selection-summary">
+        Đang hiển thị <strong id="visibleCount">0</strong> mục &middot; Đã chọn <strong id="selectedCount">0</strong> mục
+      </div>
+      <div class="footer-actions">
+        <button id="downloadAllBtn" class="btn-secondary" type="button">Tải toàn bộ (0)</button>
+        <button id="downloadSelectedBtn" class="btn-primary" type="button" disabled>Tải các mục đã chọn (0)</button>
+      </div>
+    </footer>
+  </div>
+
+  <script src="batch-scanner.js"></script>
+  <script src="batch-picker.js"></script>
+</body>
+</html>

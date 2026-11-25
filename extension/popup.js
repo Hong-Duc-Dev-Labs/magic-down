@@ -20,6 +20,7 @@ const els = {
   currentSiteLabel: document.getElementById("currentSiteLabel"),
   quickUrlInput: document.getElementById("quickUrlInput"),
   sendUrlBtn: document.getElementById("sendUrlBtn"),
+  scanPageBtn: document.getElementById("scanPageBtn"),
   toast: document.getElementById("toast"),
   tabActivityBtn: document.getElementById("tabActivityBtn"),
   tabFiltersBtn: document.getElementById("tabFiltersBtn"),
@@ -518,6 +519,30 @@ els.sendUrlBtn.addEventListener("click", handleSendUrl);
 els.quickUrlInput.addEventListener("keydown", (e) => {
   if (e.key === "Enter") handleSendUrl();
 });
+
+if (els.scanPageBtn) {
+  els.scanPageBtn.addEventListener("click", async () => {
+    if (!isExtensionEnv) {
+      showToast("Preview mode: opened batch picker.", "success");
+      return;
+    }
+    try {
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (!tab || typeof tab.id !== "number") {
+        showToast("No active web page to scan.", "error");
+        return;
+      }
+      const resp = await chrome.runtime.sendMessage({ type: "openBatchPicker", tabId: tab.id });
+      if (resp && resp.ok) {
+        window.close();
+      } else {
+        showToast(resp?.error || "Cannot scan this page (try reloading the tab).", "error");
+      }
+    } catch (err) {
+      showToast(err?.message || "Failed to scan page.", "error");
+    }
+  });
+}
 
 // Boot
 loadState().then(() => {

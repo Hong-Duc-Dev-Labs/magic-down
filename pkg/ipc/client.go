@@ -74,6 +74,32 @@ func (c *Client) AddDownload(req AddDownloadRequest) (*TaskResponse, error) {
 	return &taskResp, nil
 }
 
+// AddBatchDownload forwards a batch of download jobs to the desktop app without
+// triggering per-item confirmation dialogs.
+func (c *Client) AddBatchDownload(req BatchDownloadRequest) (*BatchDownloadResponse, error) {
+	data, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal batch request: %w", err)
+	}
+
+	resp, err := c.httpClient.Post(c.baseURL+"/downloads/batch", "application/json", bytes.NewReader(data))
+	if err != nil {
+		return nil, fmt.Errorf("failed to post batch download to MagicDown IPC: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		return nil, fmt.Errorf("server returned status: %d", resp.StatusCode)
+	}
+
+	var batchResp BatchDownloadResponse
+	if err := json.NewDecoder(resp.Body).Decode(&batchResp); err != nil {
+		return nil, fmt.Errorf("failed to decode batch response: %w", err)
+	}
+
+	return &batchResp, nil
+}
+
 // GetStatus queries the desktop app status.
 func (c *Client) GetStatus() (*StatusResponse, error) {
 	resp, err := c.httpClient.Get(c.baseURL + "/status")
