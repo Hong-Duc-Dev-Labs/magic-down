@@ -212,21 +212,27 @@ func RunStdioHost(in io.Reader, out io.Writer, port int) error {
 	client := ipc.NewClient(port)
 	handler := NewHandler(client)
 
+	LogEvent("INFO", "host_startup", map[string]any{"ipc_port": port})
+	defer LogEvent("INFO", "host_shutdown", map[string]any{"ipc_port": port})
+
 	for {
 		msgBytes, err := ReadMessage(in)
 		if err != nil {
 			if errors.Is(err, io.EOF) {
 				return nil
 			}
+			LogEvent("ERROR", "comm_error", map[string]any{"stage": "read", "error": err.Error()})
 			return err
 		}
 
 		respBytes, err := handler.HandleMessage(msgBytes)
 		if err != nil {
+			LogEvent("ERROR", "comm_error", map[string]any{"stage": "handle", "error": err.Error()})
 			continue
 		}
 
 		if err := WriteMessage(out, respBytes); err != nil {
+			LogEvent("ERROR", "comm_error", map[string]any{"stage": "write", "error": err.Error()})
 			return err
 		}
 	}

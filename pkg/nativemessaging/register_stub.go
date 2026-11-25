@@ -12,3 +12,7 @@ func CheckRegistration() RegistrationStatus {
 	manifestPath, _ := DefaultManifestPath()
 	return RegistrationStatus{ManifestPath: manifestPath}
 }
+
+func UninstallNativeHost() error {
+	return errors.New("native messaging registry uninstallation is only supported on Windows")
+}

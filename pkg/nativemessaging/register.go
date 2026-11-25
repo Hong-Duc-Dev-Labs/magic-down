@@ -47,14 +47,100 @@ func BuildManifest(hostBinaryPath, extensionID string) (Manifest, error) {
 
 // DefaultManifestPath returns the standard per-user manifest path on Windows/other OSes.
 func DefaultManifestPath() (string, error) {
+	return ManifestPathForChannel("")
+}
+
+// ManifestPathForChannel returns the per-user Native Messaging manifest path for a browser
+// store channel ("chrome" or "edge"). An empty channel returns the legacy shared path.
+func ManifestPathForChannel(channel string) (string, error) {
+	var baseDir string
 	if localAppData := os.Getenv("LOCALAPPDATA"); localAppData != "" {
-		return filepath.Join(localAppData, "MagicDown", HostName+".json"), nil
+		baseDir = filepath.Join(localAppData, "MagicDown")
+	} else {
+		cfgDir, err := os.UserConfigDir()
+		if err != nil {
+			return "", err
+		}
+		baseDir = filepath.Join(cfgDir, "MagicDown")
 	}
-	cfgDir, err := os.UserConfigDir()
+	ch := strings.ToLower(strings.TrimSpace(channel))
+	if ch == "chrome" || ch == "edge" {
+		return filepath.Join(baseDir, HostName+"."+ch+".json"), nil
+	}
+	return filepath.Join(baseDir, HostName+".json"), nil
+}
+
+// AllManagedManifestPaths returns all manifest file paths owned by MagicDown in baseDir.
+// If baseDir is empty, it uses the default per-user MagicDown directory.
+func AllManagedManifestPaths(baseDir string) ([]string, error) {
+	if strings.TrimSpace(baseDir) == "" {
+		legacy, err := DefaultManifestPath()
+		if err != nil {
+			return nil, err
+		}
+		baseDir = filepath.Dir(legacy)
+	}
+	return []string{
+		filepath.Join(baseDir, HostName+".json"),
+		filepath.Join(baseDir, HostName+".chrome.json"),
+		filepath.Join(baseDir, HostName+".edge.json"),
+	}, nil
+}
+
+// RemoveManagedManifests deletes ONLY MagicDown-owned Native Messaging manifest files
+// inside baseDir, leaving all other files untouched.
+func RemoveManagedManifests(baseDir string) ([]string, error) {
+	paths, err := AllManagedManifestPaths(baseDir)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	return filepath.Join(cfgDir, "MagicDown", HostName+".json"), nil
+	var removed []string
+	for _, p := range paths {
+		if err := os.Remove(p); err == nil {
+			removed = append(removed, p)
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return removed, fmt.Errorf("remove manifest %q: %w", p, err)
+		}
+	}
+	return removed, nil
+}
+
+// ValidateManifest validates a Native Messaging host manifest before writing Registry keys.
+// It checks name, absolute existing executable path, type=stdio, and valid chrome-extension origins.
+func ValidateManifest(m Manifest) error {
+	if strings.TrimSpace(m.Name) != HostName {
+		return fmt.Errorf("invalid manifest name %q (want %q)", m.Name, HostName)
+	}
+	if strings.TrimSpace(m.Type) != "stdio" {
+		return fmt.Errorf("invalid manifest type %q (want stdio)", m.Type)
+	}
+	p := strings.TrimSpace(m.Path)
+	if p == "" {
+		return errors.New("manifest path is required")
+	}
+	if !filepath.IsAbs(p) {
+		return fmt.Errorf("manifest path must be absolute: %q", p)
+	}
+	info, err := os.Stat(p)
+	if err != nil {
+		return fmt.Errorf("host executable not found at %q: %w", p, err)
+	}
+	if info.IsDir() {
+		return fmt.Errorf("host executable path is a directory: %q", p)
+	}
+	if len(m.AllowedOrigins) == 0 {
+		return errors.New("manifest allowed_origins must not be empty")
+	}
+	for _, origin := range m.AllowedOrigins {
+		if !strings.HasPrefix(origin, "chrome-extension://") || !strings.HasSuffix(origin, "/") {
+			return fmt.Errorf("invalid allowed_origin format: %q", origin)
+		}
+		extID := strings.TrimSuffix(strings.TrimPrefix(origin, "chrome-extension://"), "/")
+		if !IsValidExtensionID(extID) {
+			return fmt.Errorf("invalid extension ID in allowed_origin: %q", origin)
+		}
+	}
+	return nil
 }
 
 // ResolveHostBinary finds magicdown-host.exe next to the running magicdown executable,

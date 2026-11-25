@@ -117,27 +117,58 @@ if (-not $NoDesktopShortcut) {
     }
 }
 
-# Register Chrome & Edge Native Messaging host pointing to installed magicdown-host.exe
+# Register Chrome & Edge Native Messaging hosts independently using config/extension-ids.json
+$InstalledHostExeAbs = (Resolve-Path $InstalledHostExe).Path
+if (-not (Test-Path -LiteralPath $InstalledHostExeAbs -PathType Leaf)) {
+    throw "Installed magicdown-host.exe not found at $InstalledHostExeAbs"
+}
+
+$ChromeExtId = $ExtensionId
+$EdgeExtId = $ExtensionId
+$ExtIdsConfigPath = Join-Path $RepoRoot "config\extension-ids.json"
+if (Test-Path $ExtIdsConfigPath) {
+    $ExtIdsCfg = Get-Content -Path $ExtIdsConfigPath -Raw | ConvertFrom-Json
+    if ($env:MAGICDOWN_BUILD_MODE -eq "prod") {
+        if ($env:MAGICDOWN_CHROME_PROD_EXT_ID) { $ChromeExtId = $env:MAGICDOWN_CHROME_PROD_EXT_ID }
+        elseif ($ExtIdsCfg.browsers.chrome.prod) { $ChromeExtId = $ExtIdsCfg.browsers.chrome.prod }
+        if ($env:MAGICDOWN_EDGE_PROD_EXT_ID) { $EdgeExtId = $env:MAGICDOWN_EDGE_PROD_EXT_ID }
+        elseif ($ExtIdsCfg.browsers.edge.prod) { $EdgeExtId = $ExtIdsCfg.browsers.edge.prod }
+    } else {
+        if ($env:MAGICDOWN_CHROME_DEV_EXT_ID) { $ChromeExtId = $env:MAGICDOWN_CHROME_DEV_EXT_ID }
+        elseif ($ExtIdsCfg.browsers.chrome.dev) { $ChromeExtId = $ExtIdsCfg.browsers.chrome.dev }
+        if ($env:MAGICDOWN_EDGE_DEV_EXT_ID) { $EdgeExtId = $env:MAGICDOWN_EDGE_DEV_EXT_ID }
+        elseif ($ExtIdsCfg.browsers.edge.dev) { $EdgeExtId = $ExtIdsCfg.browsers.edge.dev }
+    }
+}
+
 $ManifestDir = Join-Path $env:LOCALAPPDATA "MagicDown"
 New-Item -ItemType Directory -Force -Path $ManifestDir | Out-Null
-$ManifestPath = Join-Path $ManifestDir "$HostName.json"
-$Manifest = [ordered]@{
-    name            = $HostName
-    description     = "MagicDown Native Messaging Host"
-    path            = $InstalledHostExe
-    type            = "stdio"
-    allowed_origins = @(
-        "chrome-extension://$ExtensionId/"
-    )
-}
-$Manifest | ConvertTo-Json -Depth 4 | Set-Content -Path $ManifestPath -Encoding UTF8
 
-foreach ($RegPath in @(
-    "HKCU:\Software\Google\Chrome\NativeMessagingHosts\$HostName",
-    "HKCU:\Software\Microsoft\Edge\NativeMessagingHosts\$HostName"
-)) {
-    New-Item -Path $RegPath -Force | Out-Null
-    Set-ItemProperty -Path $RegPath -Name "(Default)" -Value $ManifestPath
+$ChannelSpecs = @(
+    @{ Channel = "chrome"; ExtId = $ChromeExtId; RegPath = "HKCU:\Software\Google\Chrome\NativeMessagingHosts\$HostName" },
+    @{ Channel = "edge";   ExtId = $EdgeExtId;   RegPath = "HKCU:\Software\Microsoft\Edge\NativeMessagingHosts\$HostName" }
+)
+
+$ManifestPath = Join-Path $ManifestDir "$HostName.chrome.json"
+foreach ($spec in $ChannelSpecs) {
+    if ($spec.ExtId -notmatch "^[a-p]{32}$") {
+        throw "Invalid Extension ID for $($spec.Channel): '$($spec.ExtId)'"
+    }
+    $chManifestPath = Join-Path $ManifestDir "$HostName.$($spec.Channel).json"
+    $Manifest = [ordered]@{
+        name            = $HostName
+        description     = "MagicDown Native Messaging Host"
+        path            = $InstalledHostExeAbs
+        type            = "stdio"
+        allowed_origins = @(
+            "chrome-extension://$($spec.ExtId)/"
+        )
+    }
+    $Manifest | ConvertTo-Json -Depth 4 | Set-Content -Path $chManifestPath -Encoding UTF8
+    # Validate written manifest JSON before updating Registry
+    $null = Get-Content -Path $chManifestPath -Raw | ConvertFrom-Json
+    New-Item -Path $spec.RegPath -Force | Out-Null
+    Set-ItemProperty -Path $spec.RegPath -Name "(Default)" -Value $chManifestPath
 }
 
 # Optional Autostart registration

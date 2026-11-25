@@ -60,42 +60,44 @@ func DetectInstalledBrowsers() []BrowserInfo {
 	browsers = MergeDiscoveredBrowsers(browsers, discovered, fileExists)
 
 	// 4. Check Native Messaging registration for every browser
+	chromeManifestPath, _ := ManifestPathForChannel("chrome")
+	edgeManifestPath, _ := ManifestPathForChannel("edge")
 	for i := range browsers {
 		b := &browsers[i]
-		if manifestPath == "" {
-			continue
+		expectedChannelPath := chromeManifestPath
+		if StoreChannelForBrowser(b.ID) == "edge" {
+			expectedChannelPath = edgeManifestPath
 		}
 		for _, key := range b.AllNativeMessagingKeys() {
-			if val, ok := getRegDefaultString(key); ok && strings.EqualFold(strings.TrimSpace(val), manifestPath) {
-				b.NativeRegistered = true
-				break
+			if val, ok := getRegDefaultString(key); ok {
+				v := strings.TrimSpace(val)
+				if (expectedChannelPath != "" && strings.EqualFold(v, expectedChannelPath)) ||
+					(manifestPath != "" && strings.EqualFold(v, manifestPath)) {
+					b.NativeRegistered = true
+					break
+				}
 			}
 		}
 	}
 	return browsers
 }
 
-// IntegrateBrowsers registers the Native Messaging host manifest and HKCU registry keys
-// for each selected browser, and optionally opens the browser's extensions page so the
-// user can enable/load the unpacked extension immediately.
+// IntegrateBrowsers registers validated Native Messaging host manifests and HKCU registry keys
+// for each selected browser (separating Chrome and Edge origins via ExtensionIDConfig), and
+// optionally opens the browser's extensions page.
 func IntegrateBrowsers(selected []BrowserInfo, hostBinaryPath, extensionID string, openBrowserUI bool) []BrowserInstallResult {
 	if strings.TrimSpace(hostBinaryPath) == "" {
 		if resolved, err := ResolveHostBinary(); err == nil {
 			hostBinaryPath = resolved
 		}
 	}
-	manifestPath, err := DefaultManifestPath()
-	var manifestErr error
-	if err != nil {
-		manifestErr = err
-	} else {
-		m, buildErr := BuildManifest(hostBinaryPath, extensionID)
-		if buildErr != nil {
-			manifestErr = buildErr
-		} else {
-			manifestErr = WriteManifest(manifestPath, m)
-		}
+	absBin, absErr := filepath.Abs(strings.TrimSpace(hostBinaryPath))
+	if absErr == nil {
+		hostBinaryPath = absBin
 	}
+
+	cfg, cfgErr := LoadExtensionIDConfig("")
+	mode := EffectiveBuildMode()
 
 	extDir := ResolveExtensionDir()
 	results := make([]BrowserInstallResult, 0, len(selected))
@@ -105,7 +107,34 @@ func IntegrateBrowsers(selected []BrowserInfo, hostBinaryPath, extensionID strin
 			BrowserName:  b.Name,
 			ExtensionDir: extDir,
 		}
+
+		channel := StoreChannelForBrowser(b.ID)
+		var manifestPath string
+		var m Manifest
+		var manifestErr error
+
+		if strings.TrimSpace(extensionID) != "" {
+			manifestPath, manifestErr = DefaultManifestPath()
+			if manifestErr == nil {
+				m, manifestErr = BuildManifest(hostBinaryPath, extensionID)
+			}
+		} else if cfgErr != nil {
+			manifestErr = cfgErr
+		} else {
+			manifestPath, manifestErr = ManifestPathForChannel(channel)
+			if manifestErr == nil {
+				m, manifestErr = BuildManifestForBrowser(hostBinaryPath, b.ID, mode, cfg)
+			}
+		}
+
+		if manifestErr == nil {
+			manifestErr = ValidateManifest(m)
+		}
+		if manifestErr == nil {
+			manifestErr = WriteManifest(manifestPath, m)
+		}
 		if manifestErr != nil {
+			LogEvent("ERROR", "manifest_validate", map[string]any{"browser": b.ID, "error": manifestErr.Error()})
 			res.Err = manifestErr
 			res.StatusText = "Manifest error: " + manifestErr.Error()
 			results = append(results, res)
@@ -122,11 +151,13 @@ func IntegrateBrowsers(selected []BrowserInfo, hostBinaryPath, extensionID strin
 				}
 			}
 			if regErr != nil {
+				LogEvent("ERROR", "registry_register", map[string]any{"browser": b.ID, "error": regErr.Error()})
 				res.Err = fmt.Errorf("registry error: %w", regErr)
 				res.StatusText = "Failed to register Native Host"
 				results = append(results, res)
 				continue
 			}
+			LogEvent("INFO", "registry_register", map[string]any{"browser": b.ID, "channel": channel, "manifest": manifestPath})
 			res.NativeHostOK = true
 		}
 

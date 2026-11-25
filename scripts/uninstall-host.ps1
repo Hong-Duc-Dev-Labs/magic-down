@@ -8,7 +8,15 @@ $ErrorActionPreference = "Stop"
 $HostName = "com.magicdown.downloader"
 $RegPaths = @(
     "HKCU:\Software\Google\Chrome\NativeMessagingHosts\$HostName",
-    "HKCU:\Software\Microsoft\Edge\NativeMessagingHosts\$HostName"
+    "HKCU:\Software\Microsoft\Edge\NativeMessagingHosts\$HostName",
+    "HKCU:\Software\BraveSoftware\Brave-Browser\NativeMessagingHosts\$HostName",
+    "HKCU:\Software\Vivaldi\NativeMessagingHosts\$HostName",
+    "HKCU:\Software\Opera Software\Opera Stable\NativeMessagingHosts\$HostName",
+    "HKCU:\Software\Opera Software\Opera GX Stable\NativeMessagingHosts\$HostName",
+    "HKCU:\Software\CocCoc\Browser\NativeMessagingHosts\$HostName",
+    "HKCU:\Software\TheBrowserCompany\Dia\NativeMessagingHosts\$HostName",
+    "HKCU:\Software\ArcBrowser\Arc\NativeMessagingHosts\$HostName",
+    "HKCU:\Software\Chromium\NativeMessagingHosts\$HostName"
 )
 
 foreach ($RegPath in $RegPaths) {
@@ -18,10 +26,13 @@ foreach ($RegPath in $RegPaths) {
     }
 }
 
-$ManifestPath = Join-Path (Join-Path $env:LOCALAPPDATA "MagicDown") "$HostName.json"
-if (Test-Path $ManifestPath) {
-    Remove-Item -Path $ManifestPath -Force
-    Write-Host "Removed: $ManifestPath"
+$LocalMagicDownDir = Join-Path $env:LOCALAPPDATA "MagicDown"
+foreach ($mfName in @("$HostName.json", "$HostName.chrome.json", "$HostName.edge.json")) {
+    $ManifestPath = Join-Path $LocalMagicDownDir $mfName
+    if (Test-Path $ManifestPath) {
+        Remove-Item -Path $ManifestPath -Force
+        Write-Host "Removed: $ManifestPath"
+    }
 }
 
 Write-Host "MagicDown Native Messaging Host uninstalled." -ForegroundColor Yellow
