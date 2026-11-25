@@ -10,7 +10,7 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$Version,
 
-    [string]$GitHubRepo = "Hong-Duc-Dev-Labs/MagicDown",
+    [string]$GitHubRepo = "Hong-Duc-Dev-Labs/magic-down",
     [string]$Notes = "",
     [switch]$Draft,
     [switch]$Prerelease

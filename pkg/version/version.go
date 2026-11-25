@@ -12,7 +12,7 @@ var (
 	Version    = "0.1.0"
 	Commit     = "dev"
 	BuildDate  = "unknown"
-	GitHubRepo = "Hong-Duc-Dev-Labs/MagicDown"
+	GitHubRepo = "Hong-Duc-Dev-Labs/magic-down"
 )
 
 // NormalizedVersion returns Version with a leading "v" prefix (e.g. "v0.1.0").
