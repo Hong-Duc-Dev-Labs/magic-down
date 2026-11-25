@@ -11,14 +11,15 @@ import (
 
 // InboundMessage represents a message received from the browser extension.
 type InboundMessage struct {
-	Action      string            `json:"action"`
-	URL         string            `json:"url,omitempty"`
-	Filename    string            `json:"filename,omitempty"`
-	Referrer    string            `json:"referrer,omitempty"`
-	Cookies     string            `json:"cookies,omitempty"`
-	Headers     map[string]string `json:"headers,omitempty"`
-	NumSegments int               `json:"num_segments,omitempty"`
-	AutoStart   bool              `json:"auto_start,omitempty"`
+	Action        string            `json:"action"`
+	URL           string            `json:"url,omitempty"`
+	Filename      string            `json:"filename,omitempty"`
+	Referrer      string            `json:"referrer,omitempty"`
+	Cookies       string            `json:"cookies,omitempty"`
+	Headers       map[string]string `json:"headers,omitempty"`
+	NumSegments   int               `json:"num_segments,omitempty"`
+	ConvertFormat string            `json:"convert_format,omitempty"`
+	AutoStart     bool              `json:"auto_start,omitempty"`
 }
 
 // OutboundMessage represents a response sent back to the browser extension.
@@ -105,13 +106,14 @@ func (h *Handler) HandleMessage(msgBytes []byte) ([]byte, error) {
 
 		// Forward download job to desktop app
 		taskResp, err := h.ipcClient.AddDownload(ipc.AddDownloadRequest{
-			URL:         in.URL,
-			Filename:    in.Filename,
-			Referrer:    in.Referrer,
-			Cookies:     in.Cookies,
-			Headers:     in.Headers,
-			NumSegments: in.NumSegments,
-			AutoStart:   true, // default to starting automatically from browser
+			URL:           in.URL,
+			Filename:      in.Filename,
+			Referrer:      in.Referrer,
+			Cookies:       in.Cookies,
+			Headers:       in.Headers,
+			NumSegments:   in.NumSegments,
+			ConvertFormat: in.ConvertFormat,
+			AutoStart:     true, // default to starting automatically from browser
 		})
 		if err != nil {
 			resp := OutboundMessage{

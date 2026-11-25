@@ -129,8 +129,18 @@ func (t *Task) processProbeResponse(resp *http.Response, downloadDir string) {
 	if t.Filename == "" {
 		t.Filename = ExtractFilename(t.URL, resp.Header)
 	}
+	if fmtExt, ok := NormalizeImageFormat(t.ConvertFormat); ok {
+		t.Filename = ReplaceExtension(t.Filename, fmtExt)
+	}
 	t.SavePath = filepath.Join(downloadDir, t.Filename)
 	t.PartPath = t.SavePath + ".magicpart"
+
+	// Detect HLS playlist (.m3u8)
+	if IsHLSURL(t.URL, resp.Header.Get("Content-Type")) {
+		t.IsHLS = true
+		t.SupportsRanges = false
+		return
+	}
 
 	// Check Range support
 	acceptRanges := resp.Header.Get("Accept-Ranges")
@@ -208,6 +218,7 @@ func (t *Task) Start(parentCtx context.Context, client *http.Client, onUpdate fu
 	t.ErrorMessage = ""
 	t.speedCalc = newSpeedCalculator(atomic.LoadInt64(&t.DownloadedBytes))
 	supportsRanges := t.SupportsRanges
+	isHLS := t.IsHLS || IsHLSURL(t.URL, "")
 	totalBytes := t.TotalBytes
 	numSegments := len(t.Segments)
 	savePath := t.SavePath
@@ -218,6 +229,10 @@ func (t *Task) Start(parentCtx context.Context, client *http.Client, onUpdate fu
 	if err := os.MkdirAll(saveDir, 0755); err != nil {
 		t.fail(fmt.Sprintf("failed to create directory: %v", err), onUpdate)
 		return err
+	}
+
+	if isHLS {
+		return t.runHLSDownload(ctx, client, onUpdate)
 	}
 
 	if supportsRanges && totalBytes > 0 && numSegments > 0 {
@@ -445,15 +460,38 @@ func (t *Task) runSingleStreamDownload(ctx context.Context, client *http.Client,
 }
 
 func (t *Task) finalizeFile(onUpdate func(*Task)) error {
-	// Atomic rename from .part to final destination
-	// If final destination exists, remove first on Windows to avoid access conflict
-	if _, err := os.Stat(t.SavePath); err == nil {
-		_ = os.Remove(t.SavePath)
-	}
+	t.mu.RLock()
+	convertFmt := t.ConvertFormat
+	partPath := t.PartPath
+	savePath := t.SavePath
+	t.mu.RUnlock()
 
-	if err := os.Rename(t.PartPath, t.SavePath); err != nil {
-		t.fail(fmt.Sprintf("atomic file rename failed: %v", err), onUpdate)
-		return err
+	if fmtExt, ok := NormalizeImageFormat(convertFmt); ok {
+		savePath = ReplaceExtension(savePath, fmtExt)
+		if err := ConvertImageFile(partPath, savePath, fmtExt); err != nil {
+			t.fail(fmt.Sprintf("image conversion to %s failed: %v", fmtExt, err), onUpdate)
+			return err
+		}
+		_ = os.Remove(partPath)
+		t.mu.Lock()
+		t.SavePath = savePath
+		t.Filename = filepath.Base(savePath)
+		if fi, err := os.Stat(savePath); err == nil {
+			atomic.StoreInt64(&t.DownloadedBytes, fi.Size())
+			t.TotalBytes = fi.Size()
+		}
+		t.mu.Unlock()
+	} else {
+		// Atomic rename from .part to final destination
+		// If final destination exists, remove first on Windows to avoid access conflict
+		if _, err := os.Stat(savePath); err == nil {
+			_ = os.Remove(savePath)
+		}
+
+		if err := os.Rename(partPath, savePath); err != nil {
+			t.fail(fmt.Sprintf("atomic file rename failed: %v", err), onUpdate)
+			return err
+		}
 	}
 
 	now := time.Now()
@@ -569,6 +607,8 @@ func (t *Task) Clone() *Task {
 		ETA:             t.ETA,
 		Status:          t.Status,
 		SupportsRanges:  t.SupportsRanges,
+		IsHLS:           t.IsHLS,
+		ConvertFormat:   t.ConvertFormat,
 		NumSegments:     t.NumSegments,
 		ErrorMessage:    t.ErrorMessage,
 		Referrer:        t.Referrer,

@@ -16,14 +16,15 @@ import (
 
 // AddTaskRequest specifies parameters for adding a new download task.
 type AddTaskRequest struct {
-	URL         string            `json:"url"`
-	Filename    string            `json:"filename,omitempty"`
-	SaveDir     string            `json:"save_dir,omitempty"`
-	NumSegments int               `json:"num_segments,omitempty"`
-	Referrer    string            `json:"referrer,omitempty"`
-	Cookies     string            `json:"cookies,omitempty"`
-	Headers     map[string]string `json:"headers,omitempty"`
-	AutoStart   bool              `json:"auto_start"`
+	URL           string            `json:"url"`
+	Filename      string            `json:"filename,omitempty"`
+	SaveDir       string            `json:"save_dir,omitempty"`
+	NumSegments   int               `json:"num_segments,omitempty"`
+	Referrer      string            `json:"referrer,omitempty"`
+	Cookies       string            `json:"cookies,omitempty"`
+	Headers       map[string]string `json:"headers,omitempty"`
+	ConvertFormat string            `json:"convert_format,omitempty"`
+	AutoStart     bool              `json:"auto_start"`
 }
 
 // Engine coordinates download tasks, queues, concurrency, and persistence.
@@ -115,17 +116,23 @@ func (e *Engine) AddTask(req AddTaskRequest) (*Task, error) {
 	if req.Filename != "" {
 		filename = SanitizeFilename(req.Filename)
 	}
+	convertFmt, _ := NormalizeImageFormat(req.ConvertFormat)
+	if filename != "" && convertFmt != "" {
+		filename = ReplaceExtension(filename, convertFmt)
+	}
 
 	task := &Task{
-		ID:          generateID(),
-		URL:         req.URL,
-		Filename:    filename,
-		Status:      StatusQueued,
-		NumSegments: numSegs,
-		Referrer:    req.Referrer,
-		Cookies:     req.Cookies,
-		Headers:     req.Headers,
-		CreatedAt:   time.Now(),
+		ID:            generateID(),
+		URL:           req.URL,
+		Filename:      filename,
+		Status:        StatusQueued,
+		NumSegments:   numSegs,
+		Referrer:      req.Referrer,
+		Cookies:       req.Cookies,
+		Headers:       req.Headers,
+		ConvertFormat: convertFmt,
+		IsHLS:         IsHLSURL(req.URL, ""),
+		CreatedAt:     time.Now(),
 	}
 
 	if task.Filename != "" {

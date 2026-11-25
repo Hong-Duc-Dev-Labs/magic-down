@@ -55,6 +55,8 @@ type Task struct {
 	ETA             int64             `json:"eta"`   // seconds remaining
 	Status          TaskStatus        `json:"status"`
 	SupportsRanges  bool              `json:"supports_ranges"`
+	IsHLS           bool              `json:"is_hls,omitempty"`
+	ConvertFormat   string            `json:"convert_format,omitempty"`
 	NumSegments     int               `json:"num_segments"`
 	Segments        []*Segment        `json:"segments"`
 	ErrorMessage    string            `json:"error_message,omitempty"`

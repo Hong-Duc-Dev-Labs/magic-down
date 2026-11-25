@@ -16,14 +16,15 @@ const DefaultPort = 28888
 
 // AddDownloadRequest is the JSON payload for adding a download over IPC.
 type AddDownloadRequest struct {
-	URL         string            `json:"url"`
-	Filename    string            `json:"filename,omitempty"`
-	SaveDir     string            `json:"save_dir,omitempty"`
-	NumSegments int               `json:"num_segments,omitempty"`
-	Referrer    string            `json:"referrer,omitempty"`
-	Cookies     string            `json:"cookies,omitempty"`
-	Headers     map[string]string `json:"headers,omitempty"`
-	AutoStart   bool              `json:"auto_start"`
+	URL           string            `json:"url"`
+	Filename      string            `json:"filename,omitempty"`
+	SaveDir       string            `json:"save_dir,omitempty"`
+	NumSegments   int               `json:"num_segments,omitempty"`
+	Referrer      string            `json:"referrer,omitempty"`
+	Cookies       string            `json:"cookies,omitempty"`
+	Headers       map[string]string `json:"headers,omitempty"`
+	ConvertFormat string            `json:"convert_format,omitempty"`
+	AutoStart     bool              `json:"auto_start"`
 }
 
 // StatusResponse is returned by /status.
@@ -165,14 +166,15 @@ func (s *Server) handleAddDownload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	task, err := s.engine.AddTask(engine.AddTaskRequest{
-		URL:         req.URL,
-		Filename:    req.Filename,
-		SaveDir:     req.SaveDir,
-		NumSegments: req.NumSegments,
-		Referrer:    req.Referrer,
-		Cookies:     req.Cookies,
-		Headers:     req.Headers,
-		AutoStart:   req.AutoStart,
+		URL:           req.URL,
+		Filename:      req.Filename,
+		SaveDir:       req.SaveDir,
+		NumSegments:   req.NumSegments,
+		Referrer:      req.Referrer,
+		Cookies:       req.Cookies,
+		Headers:       req.Headers,
+		ConvertFormat: req.ConvertFormat,
+		AutoStart:     req.AutoStart,
 	})
 	if err != nil {
 		http.Error(w, fmt.Sprintf("failed to add task: %v", err), http.StatusInternalServerError)
