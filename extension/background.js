@@ -1,3 +1,19 @@
+if (typeof importScripts === "function") {
+  try {
+    importScripts("i18n.js");
+  } catch {
+    // ignore in non-worker test environments
+  }
+}
+const I18N =
+  (typeof self !== "undefined" && self.MagicDownI18n) ||
+  (typeof globalThis !== "undefined" && globalThis.MagicDownI18n) ||
+  (typeof require === "function" ? require("./i18n.js") : null);
+
+function t(key, params) {
+  return I18N ? I18N.t(key, params) : key;
+}
+
 const HOST_NAME = "com.magicdown.downloader";
 const MAX_HISTORY = 25;
 const MAX_TAB_VIDEOS = 40;
@@ -966,60 +982,77 @@ function createContextMenu(props) {
 function ensureContextMenus() {
   createContextMenu({
     id: "magicdown-download",
-    title: "Download with MagicDown",
+    title: t("menu.download"),
     contexts: ["link", "video", "audio"]
   });
 
   createContextMenu({
     id: "magicdown-download-all",
-    title: "Download all with MagicDown",
+    title: t("menu.download_all"),
     contexts: ["page", "frame", "selection", "link", "image", "video", "audio"]
   });
 
   // Nested MagicDown menu for right-clicked images with real format conversion
   createContextMenu({
     id: "magicdown-image-parent",
-    title: "MagicDown",
+    title: t("menu.image_root"),
     contexts: ["image"]
   });
   createContextMenu({
     id: "magicdown-img-original",
     parentId: "magicdown-image-parent",
-    title: "Download Image (Original)",
+    title: t("menu.image_original"),
     contexts: ["image"]
   });
   createContextMenu({
     id: "magicdown-img-png",
     parentId: "magicdown-image-parent",
-    title: "Save Image as PNG",
+    title: t("menu.image_png"),
     contexts: ["image"]
   });
   createContextMenu({
     id: "magicdown-img-jpg",
     parentId: "magicdown-image-parent",
-    title: "Save Image as JPG",
+    title: t("menu.image_jpg"),
     contexts: ["image"]
   });
   createContextMenu({
     id: "magicdown-img-webp",
     parentId: "magicdown-image-parent",
-    title: "Save Image as WebP",
+    title: t("menu.image_webp"),
     contexts: ["image"]
   });
 }
 
 function setupContextMenus() {
-  chrome.contextMenus.removeAll(() => {
-    ensureContextMenus();
-  });
+  const apply = () => {
+    chrome.contextMenus.removeAll(() => {
+      ensureContextMenus();
+    });
+  };
+  if (typeof chrome !== "undefined" && chrome.storage && chrome.storage.local && I18N) {
+    chrome.storage.local.get(["language"], (stored) => {
+      I18N.setLang(I18N.resolveLang(stored && stored.language));
+      apply();
+    });
+    return;
+  }
+  apply();
 }
 
-// Menus persist across service worker restarts, but a worker that was replaced
-// while menus were never (re)registered would otherwise stay menu-less until the
-// next install/update. Re-assert them on every cold start; existing ids are
-// ignored by createContextMenu above.
+// Re-assert menus on cold start and rebuild immediately when language changes.
 if (typeof chrome !== "undefined" && chrome.contextMenus) {
-  ensureContextMenus();
+  setupContextMenus();
+}
+if (typeof chrome !== "undefined" && chrome.storage && chrome.storage.onChanged) {
+  chrome.storage.onChanged.addListener((changes, areaName) => {
+    if (areaName === "local" && changes.language && I18N) {
+      I18N.setLang(I18N.resolveLang(changes.language.newValue));
+      if (chrome.contextMenus) {
+        setupContextMenus();
+      }
+    }
+  });
 }
 
 if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.onInstalled) {

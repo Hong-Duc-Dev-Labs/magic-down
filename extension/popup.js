@@ -5,12 +5,18 @@ const DEFAULT_EXTS = [
   "mp3", "flac", "wav", "pdf"
 ];
 
+const I18N = window.MagicDownI18n;
+function t(key, params) {
+  return I18N ? I18N.t(key, params) : key;
+}
+
 const isExtensionEnv = typeof chrome !== "undefined" && Boolean(chrome.runtime && chrome.runtime.id);
 
 const els = {
   root: document.documentElement,
   statusPill: document.getElementById("statusPill"),
   statusText: document.getElementById("statusText"),
+  langToggleBtn: document.getElementById("langToggleBtn"),
   themeToggleBtn: document.getElementById("themeToggleBtn"),
   iconSun: document.getElementById("iconSun"),
   iconMoon: document.getElementById("iconMoon"),
@@ -46,13 +52,46 @@ const els = {
 
 let state = {
   theme: "dark",
+  language: I18N ? I18N.detectBrowserLang() : "en",
   interceptEnabled: true,
   extensions: [...DEFAULT_EXTS],
   minFileSizeMB: 0,
   excludedDomains: [],
   recentDownloads: [],
-  currentHost: ""
+  currentHost: "",
+  lastConnectionKind: "checking",
+  lastDetectedVideos: []
 };
+
+function applyLanguage(lang) {
+  state.language = I18N ? I18N.setLang(lang) : (lang === "vi" ? "vi" : "en");
+  els.root.setAttribute("lang", state.language);
+  if (els.langToggleBtn) {
+    els.langToggleBtn.textContent = state.language.toUpperCase();
+    els.langToggleBtn.title = t("popup.lang_toggle");
+  }
+  if (els.statusPill) els.statusPill.title = t("popup.status_tooltip");
+  if (els.themeToggleBtn) els.themeToggleBtn.title = t("popup.theme_toggle");
+
+  for (const el of document.querySelectorAll("[data-i18n]")) {
+    el.textContent = t(el.dataset.i18n);
+  }
+  for (const el of document.querySelectorAll("[data-i18n-placeholder]")) {
+    el.placeholder = t(el.dataset.i18nPlaceholder);
+  }
+  const statusMap = {
+    checking: "popup.status_checking",
+    online: "popup.status_connected",
+    offline: "popup.status_offline",
+    error: "popup.status_host_missing"
+  };
+  setConnectionStatus(state.lastConnectionKind, t(statusMap[state.lastConnectionKind] || "popup.status_checking"));
+  renderActivity();
+  renderFilters();
+  if (state.lastDetectedVideos.length > 0) {
+    renderDetectedVideos(state.lastDetectedVideos);
+  }
+}
 
 let toastTimer = null;
 
@@ -75,14 +114,15 @@ function applyTheme(theme) {
 }
 
 function setConnectionStatus(kind, label) {
+  state.lastConnectionKind = kind;
   els.statusPill.className = `status-pill status-${kind}`;
   els.statusText.textContent = label;
   if (kind === "online") {
-    els.footerStatus.textContent = "IPC :28888 Connected";
+    els.footerStatus.textContent = t("popup.footer_connected");
   } else if (kind === "offline") {
-    els.footerStatus.textContent = "Desktop App Offline";
+    els.footerStatus.textContent = t("popup.footer_offline");
   } else if (kind === "error") {
-    els.footerStatus.textContent = "Host Not Registered";
+    els.footerStatus.textContent = t("popup.footer_host_missing");
   }
 }
 
@@ -98,12 +138,12 @@ function setActiveTab(tab) {
 
 function formatRelativeTime(ts) {
   const diffSec = Math.max(0, Math.floor((Date.now() - ts) / 1000));
-  if (diffSec < 60) return "just now";
+  if (diffSec < 60) return t("popup.just_now");
   const mins = Math.floor(diffSec / 60);
-  if (mins < 60) return `${mins}m ago`;
+  if (mins < 60) return t("popup.mins_ago", { n: mins });
   const hrs = Math.floor(mins / 60);
-  if (hrs < 24) return `${hrs}h ago`;
-  return `${Math.floor(hrs / 24)}d ago`;
+  if (hrs < 24) return t("popup.hrs_ago", { n: hrs });
+  return t("popup.days_ago", { n: Math.floor(hrs / 24) });
 }
 
 function renderActivity() {
@@ -144,7 +184,7 @@ function renderActivity() {
     const pill = document.createElement("span");
     const isSent = item.status === "sent";
     pill.className = `activity-pill ${isSent ? "sent" : "failed"}`;
-    pill.textContent = isSent ? "Sent" : "Failed";
+    pill.textContent = isSent ? t("popup.sent") : t("popup.failed");
     if (!isSent && item.error) pill.title = item.error;
 
     row.appendChild(main);
@@ -174,7 +214,7 @@ function renderChips(container, values, onRemove, emptyText) {
     btn.className = "chip-remove";
     btn.type = "button";
     btn.textContent = "×";
-    btn.setAttribute("aria-label", `Remove ${val}`);
+    btn.setAttribute("aria-label", t("popup.remove_aria", { val }));
     btn.addEventListener("click", () => onRemove(val));
 
     chip.appendChild(text);
@@ -185,15 +225,15 @@ function renderChips(container, values, onRemove, emptyText) {
 
 function renderFilters() {
   els.extCount.textContent = String(state.extensions.length);
-  renderChips(els.extChips, state.extensions, removeExtension, "All files intercepted");
+  renderChips(els.extChips, state.extensions, removeExtension, t("popup.all_intercepted"));
   els.minSizeInput.value = String(state.minFileSizeMB);
-  renderChips(els.domainChips, state.excludedDomains, removeDomain, "No excluded domains");
+  renderChips(els.domainChips, state.excludedDomains, removeDomain, t("popup.no_excluded_domains"));
   renderCurrentSiteToggle();
 }
 
 function renderCurrentSiteToggle() {
   if (!state.currentHost) {
-    els.currentSiteLabel.textContent = "Not available on this page";
+    els.currentSiteLabel.textContent = t("popup.exclude_unavailable");
     els.excludeSiteToggle.checked = false;
     els.excludeSiteToggle.disabled = true;
     els.excludeSiteRow.classList.add("disabled");
@@ -231,7 +271,7 @@ async function addExtensionsFromInput() {
   els.addExtInput.value = "";
   await persist({ extensions: merged });
   renderFilters();
-  showToast(`Added ${incoming.join(", ")}`, "success");
+  showToast(t("popup.toast_added", { val: incoming.join(", ") }), "success");
 }
 
 async function removeDomain(domain) {
@@ -258,25 +298,25 @@ async function addDomainFromInput() {
   els.addDomainInput.value = "";
   await persist({ excludedDomains: merged });
   renderFilters();
-  showToast(`Excluded ${raw}`, "success");
+  showToast(t("popup.toast_excluded", { val: raw }), "success");
 }
 
 async function checkConnection() {
   if (!isExtensionEnv) {
-    setConnectionStatus("online", "Connected");
+    setConnectionStatus("online", t("popup.status_connected"));
     return;
   }
-  setConnectionStatus("checking", "Checking...");
+  setConnectionStatus("checking", t("popup.status_checking"));
   const resp = await chrome.runtime.sendMessage({ type: "ping" });
   if (!resp || resp.hostError) {
-    setConnectionStatus("error", "Host Missing");
-    showToast("Run scripts/install-host.ps1 to register Native Host.", "error");
+    setConnectionStatus("error", t("popup.status_host_missing"));
+    showToast(t("popup.toast_host_missing"), "error");
     return;
   }
   if (resp.success && resp.app_running) {
-    setConnectionStatus("online", "Connected");
+    setConnectionStatus("online", t("popup.status_connected"));
   } else {
-    setConnectionStatus("offline", "App Offline");
+    setConnectionStatus("offline", t("popup.status_offline"));
   }
 }
 
@@ -292,6 +332,7 @@ function formatVideoMeta(v) {
 }
 
 function renderDetectedVideos(videos) {
+  state.lastDetectedVideos = Array.isArray(videos) ? videos : [];
   if (!els.detectedVideosCard || !els.detectedVideoList) return;
   if (!Array.isArray(videos) || videos.length === 0) {
     els.detectedVideosCard.classList.add("hidden");
@@ -310,7 +351,7 @@ function renderDetectedVideos(videos) {
 
     const q = document.createElement("span");
     q.className = "detected-quality";
-    q.textContent = v.quality || "Original";
+    q.textContent = v.quality || t("popup.quality_original");
 
     const meta = document.createElement("span");
     meta.className = "detected-meta";
@@ -322,10 +363,10 @@ function renderDetectedVideos(videos) {
     const btn = document.createElement("button");
     btn.type = "button";
     btn.className = "detected-dl-btn";
-    btn.textContent = "Download";
+    btn.textContent = t("popup.download_btn");
     btn.addEventListener("click", async () => {
       if (!isExtensionEnv) {
-        showToast("Preview mode: video queued.", "success");
+        showToast(t("popup.toast_preview_video"), "success");
         return;
       }
       const resp = await chrome.runtime.sendMessage({
@@ -333,10 +374,10 @@ function renderDetectedVideos(videos) {
         url: v.url
       });
       if (resp && resp.success) {
-        showToast("Video sent to MagicDown.", "success");
+        showToast(t("popup.toast_video_sent"), "success");
         await loadState();
       } else {
-        showToast(resp?.error || "Desktop app offline.", "error");
+        showToast(resp?.error || t("popup.toast_app_offline"), "error");
       }
     });
 
@@ -408,15 +449,15 @@ async function loadState() {
       }
     ];
     applyTheme(state.theme);
+    applyLanguage(params.get("lang") || state.language);
     els.interceptToggle.checked = state.interceptEnabled;
-    renderActivity();
-    renderFilters();
     setActiveTab(params.get("tab") === "filters" ? "filters" : "activity");
     return;
   }
 
   const stored = await chrome.storage.local.get([
     "theme",
+    "language",
     "interceptEnabled",
     "extensions",
     "minFileSizeMB",
@@ -425,6 +466,7 @@ async function loadState() {
   ]);
 
   state.theme = stored.theme || "dark";
+  state.language = I18N ? I18N.resolveLang(stored.language) : (stored.language || "en");
   state.interceptEnabled = stored.interceptEnabled !== false;
   state.extensions = Array.isArray(stored.extensions) ? stored.extensions : [...DEFAULT_EXTS];
   state.minFileSizeMB = typeof stored.minFileSizeMB === "number" ? stored.minFileSizeMB : 0;
@@ -433,12 +475,19 @@ async function loadState() {
 
   applyTheme(state.theme);
   els.interceptToggle.checked = state.interceptEnabled;
-  renderActivity();
-  renderFilters();
+  applyLanguage(state.language);
 }
 
 // Event bindings (strict MV3 CSP — zero inline handlers)
 els.statusPill.addEventListener("click", checkConnection);
+
+if (els.langToggleBtn) {
+  els.langToggleBtn.addEventListener("click", async () => {
+    const nextLang = state.language === "vi" ? "en" : "vi";
+    applyLanguage(nextLang);
+    await persist({ language: nextLang });
+  });
+}
 
 els.themeToggleBtn.addEventListener("click", async () => {
   const nextTheme = state.theme === "dark" ? "light" : "dark";
@@ -449,7 +498,7 @@ els.themeToggleBtn.addEventListener("click", async () => {
 els.interceptToggle.addEventListener("change", async () => {
   const enabled = els.interceptToggle.checked;
   await persist({ interceptEnabled: enabled });
-  showToast(enabled ? "Auto-interception enabled." : "Auto-interception paused.", enabled ? "success" : "info");
+  showToast(enabled ? t("popup.toast_intercept_on") : t("popup.toast_intercept_off"), enabled ? "success" : "info");
 });
 
 els.excludeSiteToggle.addEventListener("change", async () => {
@@ -457,10 +506,10 @@ els.excludeSiteToggle.addEventListener("change", async () => {
   let next;
   if (els.excludeSiteToggle.checked) {
     next = Array.from(new Set([...state.excludedDomains, state.currentHost]));
-    showToast(`Excluded ${state.currentHost} from interception.`);
+    showToast(t("popup.toast_site_excluded", { host: state.currentHost }));
   } else {
     next = state.excludedDomains.filter((d) => d !== state.currentHost);
-    showToast(`Re-enabled interception on ${state.currentHost}.`, "success");
+    showToast(t("popup.toast_site_enabled", { host: state.currentHost }), "success");
   }
   await persist({ excludedDomains: next });
   renderFilters();
@@ -483,35 +532,35 @@ els.minSizeInput.addEventListener("change", async () => {
   const val = Math.max(0, Number.parseInt(els.minSizeInput.value, 10) || 0);
   els.minSizeInput.value = String(val);
   await persist({ minFileSizeMB: val });
-  showToast(val > 0 ? `Minimum size set to ${val} MB.` : "Minimum size filter disabled.", "success");
+  showToast(val > 0 ? t("popup.toast_min_size_set", { n: val }) : t("popup.toast_min_size_off"), "success");
 });
 
 els.clearHistoryBtn.addEventListener("click", async () => {
   await persist({ recentDownloads: [] });
   renderActivity();
-  showToast("Cleared recent activity.");
+  showToast(t("popup.toast_cleared"));
 });
 
 async function handleSendUrl() {
   const url = els.quickUrlInput.value.trim();
   if (!url || (!url.startsWith("http://") && !url.startsWith("https://"))) {
-    showToast("Enter a valid http:// or https:// URL.", "error");
+    showToast(t("popup.toast_invalid_url"), "error");
     return;
   }
 
   if (!isExtensionEnv) {
     els.quickUrlInput.value = "";
-    showToast("Preview mode: download queued.", "success");
+    showToast(t("popup.toast_preview_queued"), "success");
     return;
   }
 
   const resp = await chrome.runtime.sendMessage({ type: "download", url });
   if (resp && resp.success) {
     els.quickUrlInput.value = "";
-    showToast("Sent to MagicDown desktop app.", "success");
+    showToast(t("popup.toast_sent"), "success");
     await loadState();
   } else {
-    showToast(resp?.error || "Failed to send download.", "error");
+    showToast(resp?.error || t("popup.toast_send_failed"), "error");
   }
 }
 
@@ -523,23 +572,23 @@ els.quickUrlInput.addEventListener("keydown", (e) => {
 if (els.scanPageBtn) {
   els.scanPageBtn.addEventListener("click", async () => {
     if (!isExtensionEnv) {
-      showToast("Preview mode: opened batch picker.", "success");
+      showToast(t("popup.toast_preview_batch"), "success");
       return;
     }
     try {
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
       if (!tab || typeof tab.id !== "number") {
-        showToast("No active web page to scan.", "error");
+        showToast(t("popup.toast_no_active_page"), "error");
         return;
       }
       const resp = await chrome.runtime.sendMessage({ type: "openBatchPicker", tabId: tab.id });
       if (resp && resp.ok) {
         window.close();
       } else {
-        showToast(resp?.error || "Cannot scan this page (try reloading the tab).", "error");
+        showToast(resp?.error || t("popup.toast_cannot_scan"), "error");
       }
     } catch (err) {
-      showToast(err?.message || "Failed to scan page.", "error");
+      showToast(err?.message || t("popup.toast_scan_failed"), "error");
     }
   });
 }

@@ -1,6 +1,20 @@
 package gui
 
-import "github.com/egoist/mygo/ui"
+import (
+	"runtime"
+
+	"github.com/egoist/mygo/ui"
+)
+
+// defaultUIFont returns a system font family with full Vietnamese Unicode
+// diacritic coverage (ă, â, đ, ê, ô, ơ, ư and all tone marks) to prevent
+// missing-glyph boxes on Windows.
+func defaultUIFont() string {
+	if runtime.GOOS == "windows" {
+		return "Segoe UI"
+	}
+	return ""
+}
 
 // Palette holds the semantic design tokens for MagicDown's native UI.
 type Palette struct {
@@ -62,6 +76,7 @@ func DarkPalette() Palette {
 	t.Radius = 8
 	t.Spacing = 4
 	t.FontSize = 13
+	t.Font = defaultUIFont()
 
 	return Palette{
 		Dark:          true,
@@ -118,6 +133,7 @@ func LightPalette() Palette {
 	t.Radius = 8
 	t.Spacing = 4
 	t.FontSize = 13
+	t.Font = defaultUIFont()
 
 	return Palette{
 		Dark:          false,

@@ -12,6 +12,7 @@ import (
 
 	"magicdown/pkg/engine"
 	"magicdown/pkg/gui"
+	"magicdown/pkg/i18n"
 	"magicdown/pkg/ipc"
 	"magicdown/pkg/nativemessaging"
 	"magicdown/pkg/notify"
@@ -127,39 +128,47 @@ func main() {
 		})
 		appUI.StartAutoUpdateCheck()
 
-		trayMenu := mygo.NewMenu([]*mygo.MenuItem{
-			{
-				Label: "Open MagicDown",
-				Click: func(*mygo.MenuItem, *mygo.Window) { appUI.WakeFromTray() },
-			},
-			mygo.Separator(),
-			{
-				Label: "Pause All",
-				Click: func(*mygo.MenuItem, *mygo.Window) { eng.PauseAll() },
-			},
-			{
-				Label: "Resume All",
-				Click: func(*mygo.MenuItem, *mygo.Window) { eng.ResumeAll() },
-			},
-			mygo.Separator(),
-			{
-				Label: "Quit",
-				Click: quitApp,
-			},
-		})
+		buildTrayMenu := func() *mygo.Menu {
+			return mygo.NewMenu([]*mygo.MenuItem{
+				{
+					Label: i18n.T("tray.open"),
+					Click: func(*mygo.MenuItem, *mygo.Window) { appUI.WakeFromTray() },
+				},
+				mygo.Separator(),
+				{
+					Label: i18n.T("tray.pause_all"),
+					Click: func(*mygo.MenuItem, *mygo.Window) { eng.PauseAll() },
+				},
+				{
+					Label: i18n.T("tray.resume_all"),
+					Click: func(*mygo.MenuItem, *mygo.Window) { eng.ResumeAll() },
+				},
+				mygo.Separator(),
+				{
+					Label: i18n.T("tray.quit"),
+					Click: quitApp,
+				},
+			})
+		}
 
 		var trayErr error
 		tray, trayErr = mygo.NewTray(mygo.TrayOptions{
 			ID:      "magicdown-tray",
 			Icon:    appIconPNG,
-			ToolTip: "MagicDown — Multi-Segment Download Manager",
-			Menu:    trayMenu,
+			ToolTip: i18n.T("tray.tooltip"),
+			Menu:    buildTrayMenu(),
 		})
 		if trayErr != nil {
 			log.Printf("warning: failed to create system tray icon: %v", trayErr)
 		} else {
 			tray.OnClick(func() {
 				appUI.WakeFromTray()
+			})
+			appUI.SetOnLanguageChange(func(lang i18n.Lang) {
+				if tray != nil {
+					tray.SetMenu(buildTrayMenu())
+					tray.SetToolTip(i18n.T("tray.tooltip"))
+				}
 			})
 		}
 

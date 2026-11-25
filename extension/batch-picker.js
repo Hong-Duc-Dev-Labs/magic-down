@@ -1,5 +1,24 @@
 (() => {
   const scanner = window.MagicDownBatchScanner;
+  const I18N = window.MagicDownI18n;
+  function t(key, params) {
+    return I18N ? I18N.t(key, params) : key;
+  }
+  function applyLanguage(lang) {
+    const resolved = I18N ? I18N.setLang(lang) : (lang === "vi" ? "vi" : "en");
+    els.root.setAttribute("lang", resolved);
+    document.title = t("batch.title");
+    for (const el of document.querySelectorAll("[data-i18n]")) {
+      el.textContent = t(el.dataset.i18n);
+    }
+    for (const el of document.querySelectorAll("[data-i18n-placeholder]")) {
+      el.placeholder = t(el.dataset.i18nPlaceholder);
+    }
+    for (const el of document.querySelectorAll("[data-i18n-title]")) {
+      el.title = t(el.dataset.i18nTitle);
+    }
+    updateFooterCounts(getFilteredItems());
+  }
   const isExtensionEnv = typeof chrome !== "undefined" && Boolean(chrome.runtime && chrome.runtime.id);
 
   const els = {
@@ -72,9 +91,9 @@
   function updateFooterCounts(visibleItems) {
     els.visibleCount.textContent = String(visibleItems.length);
     els.selectedCount.textContent = String(state.selectedUrls.size);
-    els.downloadSelectedBtn.textContent = `Tải các mục đã chọn (${state.selectedUrls.size})`;
+    els.downloadSelectedBtn.textContent = t("batch.download_selected", { n: state.selectedUrls.size });
     els.downloadSelectedBtn.disabled = state.busy || state.selectedUrls.size === 0;
-    els.downloadAllBtn.textContent = `Tải toàn bộ (${visibleItems.length})`;
+    els.downloadAllBtn.textContent = t("batch.download_all", { n: visibleItems.length });
     els.downloadAllBtn.disabled = state.busy || visibleItems.length === 0;
   }
 
@@ -208,7 +227,7 @@
     if (!itemsToDownload.length || state.busy) return;
     state.busy = true;
     updateFooterCounts(getFilteredItems());
-    showStatus(`Đang gửi ${itemsToDownload.length} mục sang MagicDown...`, "info");
+    showStatus(t("batch.status_sending", { n: itemsToDownload.length }), "info");
 
     try {
       const resp = await chrome.runtime.sendMessage({
@@ -223,15 +242,15 @@
         const failed = typeof resp.failed === "number" ? resp.failed : 0;
         showStatus(
           failed > 0
-            ? `Đã thêm ${added} mục vào hàng đợi MagicDown (${failed} mục lỗi).`
-            : `Đã thêm ${added} mục vào hàng đợi MagicDown thành công!`,
+            ? t("batch.status_added_partial", { added, failed })
+            : t("batch.status_added_ok", { added }),
           "success"
         );
       } else {
-        showStatus(resp?.error || "Không thể kết nối tới ứng dụng MagicDown Desktop.", "error");
+        showStatus(resp?.error || t("batch.status_connect_err"), "error");
       }
     } catch (err) {
-      showStatus(`Lỗi gửi danh sách tải: ${err?.message || err}`, "error");
+      showStatus(t("batch.status_send_err", { err: err?.message || err }), "error");
     } finally {
       state.busy = false;
       updateFooterCounts(getFilteredItems());
@@ -247,7 +266,7 @@
 
     els.pageSourceLabel.textContent = state.pageTitle
       ? `${state.pageTitle} — ${state.pageUrl}`
-      : state.pageUrl || "Không rõ nguồn trang";
+      : state.pageUrl || t("batch.unknown_source");
     els.subfolderInput.value = scanner.suggestSubfolder(state.pageTitle, state.pageUrl);
 
     // Pick best initial tab (default to image if images exist, otherwise all)
@@ -264,10 +283,22 @@
   }
 
   async function boot() {
-    if (!isExtensionEnv) return;
+    if (!isExtensionEnv) {
+      applyLanguage(I18N ? I18N.detectBrowserLang() : "en");
+      return;
+    }
 
-    const stored = await chrome.storage.local.get(["theme"]);
+    const stored = await chrome.storage.local.get(["theme", "language"]);
     els.root.setAttribute("data-theme", stored.theme === "light" ? "light" : "dark");
+    applyLanguage(I18N ? I18N.resolveLang(stored.language) : (stored.language || "en"));
+
+    if (chrome.storage && chrome.storage.onChanged) {
+      chrome.storage.onChanged.addListener((changes, areaName) => {
+        if (areaName === "local" && changes.language && I18N) {
+          applyLanguage(I18N.resolveLang(changes.language.newValue));
+        }
+      });
+    }
 
     const params = new URLSearchParams(window.location.search);
     const scanId = params.get("scanId") || "";
@@ -275,7 +306,7 @@
     if (resp && resp.ok && resp.data) {
       applyScanResult(resp.data);
     } else {
-      showStatus("Không tìm thấy dữ liệu quét. Hãy thử quét lại từ trang web.", "error");
+      showStatus(t("batch.no_scan_data"), "error");
     }
   }
 
@@ -327,12 +358,12 @@
 
   els.rescanBtn.addEventListener("click", async () => {
     if (!isExtensionEnv || state.tabId < 0) return;
-    showStatus("Đang quét lại trang...", "info");
+    showStatus(t("batch.rescanning"), "info");
     const resp = await chrome.runtime.sendMessage({ type: "rescanTabResources", tabId: state.tabId });
     if (resp && resp.ok && resp.data) {
       applyScanResult(resp.data);
     } else {
-      showStatus(resp?.error || "Không thể quét lại tab gốc (có thể tab đã đóng).", "error");
+      showStatus(resp?.error || t("batch.rescan_err"), "error");
     }
   });
 

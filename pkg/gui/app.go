@@ -16,6 +16,7 @@ import (
 
 	"magicdown/pkg/autostart"
 	"magicdown/pkg/engine"
+	"magicdown/pkg/i18n"
 	"magicdown/pkg/ipc"
 	"magicdown/pkg/nativemessaging"
 	"magicdown/pkg/updater"
@@ -140,15 +141,22 @@ type App struct {
 	onboardingRunInTray       bool
 	onboardingError           string
 
+	// Language & i18n
+	language         i18n.Lang
+	onLanguageChange func(i18n.Lang)
+
 	statusMessage string
 }
 
 // NewApp creates a new MagicDown UI state instance with sleek dark mode enabled by default.
 func NewApp(eng *engine.Engine, srv *ipc.Server) *App {
 	cfg := eng.Config()
+	lang := i18n.ParseOrDetect(cfg.Language)
+	i18n.SetLang(lang)
 	app := &App{
 		engine:                    eng,
 		ipcServer:                 srv,
+		language:                  lang,
 		autostartSetter:           autostart.SetEnabled,
 		nativeRegFn:               func() (string, error) { return nativemessaging.RegisterHost("", nativemessaging.DefaultExtensionID) },
 		nativeStatusFn:            nativemessaging.CheckRegistration,
@@ -182,6 +190,29 @@ func NewApp(eng *engine.Engine, srv *ipc.Server) *App {
 	app.refreshNativeStatus()
 	app.refreshDetectedBrowsers()
 	return app
+}
+
+// SetOnLanguageChange registers a callback invoked immediately when the user switches UI language.
+func (a *App) SetOnLanguageChange(fn func(i18n.Lang)) {
+	a.onLanguageChange = fn
+}
+
+// SetLanguage applies a new UI language immediately, persists it in config, and notifies listeners (e.g., System Tray).
+func (a *App) SetLanguage(lang i18n.Lang) {
+	norm := i18n.Normalize(string(lang))
+	a.language = norm
+	i18n.SetLang(norm)
+	if a.engine != nil {
+		cfg := a.engine.Config()
+		if cfg.Language != string(norm) {
+			cfg.Language = string(norm)
+			a.engine.UpdateConfig(cfg)
+		}
+	}
+	if a.onLanguageChange != nil {
+		a.onLanguageChange(norm)
+	}
+	a.invalidateUI()
 }
 
 func (a *App) refreshNativeStatus() {
@@ -221,7 +252,7 @@ func (a *App) integrateSelectedBrowsers(openBrowserUI bool) {
 	}
 	selected := a.selectedBrowserList()
 	if len(selected) == 0 {
-		a.nativeRegMsg = "Select at least one installed browser to integrate."
+		a.nativeRegMsg = i18n.T("onboarding.select_one_browser")
 		return
 	}
 	results := a.integrateBrowsersFn(selected, "", nativemessaging.DefaultExtensionID, openBrowserUI)
@@ -237,7 +268,7 @@ func (a *App) integrateSelectedBrowsers(openBrowserUI bool) {
 	}
 	a.refreshNativeStatus()
 	a.refreshDetectedBrowsers()
-	a.nativeRegMsg = fmt.Sprintf("Integrated %d/%d browser(s).", okCount, len(results))
+	a.nativeRegMsg = i18n.Tf("onboarding.integrated_count", okCount, len(results))
 	a.statusMessage = a.nativeRegMsg
 }
 
@@ -541,7 +572,7 @@ func (a *App) renderTitleBar(c *ui.Context, pal Palette) {
 						ui.Text(c, "v1.0").FontSize(10).FontWeight(600).TextColor(pal.TextMuted).SingleLine()
 					})
 					ui.Text(c, "—").FontSize(11).TextColor(pal.BorderStrong).SingleLine()
-					ui.Text(c, "Multi-Segment Download Manager").FontSize(11).TextColor(pal.TextMuted).SingleLine()
+					ui.Text(c, i18n.T("app.subtitle")).FontSize(11).TextColor(pal.TextMuted).SingleLine()
 					ui.Spacer(c)
 				})
 
@@ -678,17 +709,17 @@ func (a *App) renderSidebar(c *ui.Context, pal Palette, statusCounts map[string]
 		Children(func() {
 			// Status section
 			ui.Column(c).Gap(3).Children(func() {
-				ui.Text(c, "DOWNLOADS").FontSize(10).FontWeight(700).TextColor(pal.TextMuted).Padding(0, 10, 4, 10)
+				ui.Text(c, i18n.T("sidebar.downloads")).FontSize(10).FontWeight(700).TextColor(pal.TextMuted).Padding(0, 10, 4, 10)
 				statusNav := []struct {
 					key   string
 					label string
 					icon  *ui.SVG
 				}{
-					{"All", "All Downloads", iconInbox},
-					{"Downloading", "Downloading", iconDownload},
-					{"Completed", "Completed", iconCheck},
-					{"Queued", "Queued & Paused", iconClock},
-					{"Failed", "Failed", iconAlert},
+					{"All", i18n.T("sidebar.all_downloads"), iconInbox},
+					{"Downloading", i18n.T("sidebar.downloading"), iconDownload},
+					{"Completed", i18n.T("sidebar.completed"), iconCheck},
+					{"Queued", i18n.T("sidebar.queued_paused"), iconClock},
+					{"Failed", i18n.T("sidebar.failed"), iconAlert},
 				}
 				for _, item := range statusNav {
 					active := a.filterStatus == item.key && a.filterCategory == CatAll
@@ -701,18 +732,18 @@ func (a *App) renderSidebar(c *ui.Context, pal Palette, statusCounts map[string]
 
 			// Categories section
 			ui.Column(c).Gap(3).Children(func() {
-				ui.Text(c, "CATEGORIES").FontSize(10).FontWeight(700).TextColor(pal.TextMuted).Padding(0, 10, 4, 10)
+				ui.Text(c, i18n.T("sidebar.categories")).FontSize(10).FontWeight(700).TextColor(pal.TextMuted).Padding(0, 10, 4, 10)
 				catNav := []struct {
 					cat   FileCategory
 					label string
 					icon  *ui.SVG
 				}{
-					{CatVideo, "Video", iconMedia},
-					{CatMusic, "Music", iconMedia},
-					{CatCompressed, "Compressed", iconArchive},
-					{CatDocuments, "Documents", iconDoc},
-					{CatPrograms, "Programs", iconProgram},
-					{CatOther, "Other", iconFile},
+					{CatVideo, i18n.T("cat.Video"), iconMedia},
+					{CatMusic, i18n.T("cat.Music"), iconMedia},
+					{CatCompressed, i18n.T("cat.Compressed"), iconArchive},
+					{CatDocuments, i18n.T("cat.Documents"), iconDoc},
+					{CatPrograms, i18n.T("cat.Programs"), iconProgram},
+					{CatOther, i18n.T("cat.Other"), iconFile},
 				}
 				for _, item := range catNav {
 					active := a.filterCategory == item.cat
@@ -732,15 +763,15 @@ func (a *App) renderSidebar(c *ui.Context, pal Palette, statusCounts map[string]
 			// Bottom pinned utility controls
 			ui.Column(c).Gap(3).BorderWidth(1, 0, 0, 0).BorderColor(pal.Border).Padding(10, 0, 0, 0).Children(func() {
 				themeIcon := iconSun
-				themeLabel := "Light Mode"
+				themeLabel := i18n.T("sidebar.light_mode")
 				if !a.darkMode {
 					themeIcon = iconMoon
-					themeLabel = "Dark Mode"
+					themeLabel = i18n.T("sidebar.dark_mode")
 				}
 				if navPill(c, pal, themeIcon, themeLabel, -1, false) {
 					a.darkMode = !a.darkMode
 				}
-				if navPill(c, pal, iconSettings, "Settings", -1, a.showSettingsModal) {
+				if navPill(c, pal, iconSettings, i18n.T("sidebar.settings"), -1, a.showSettingsModal) {
 					a.openSettingsModal()
 				}
 			})
@@ -775,7 +806,7 @@ func (a *App) renderHeader(c *ui.Context, pal Palette, selected *engine.Task, co
 				Children(func() {
 					ui.Icon(c, iconSearch).Width(14).Height(14).TextColor(pal.TextMuted).Shrink(0)
 					ui.TextInput(c, &a.searchQuery).
-						Placeholder("Search downloads...").
+						Placeholder(i18n.T("toolbar.search_placeholder")).
 						Background(ui.Transparent).
 						Border(0, ui.Transparent).
 						Padding(6, 0).
@@ -785,32 +816,32 @@ func (a *App) renderHeader(c *ui.Context, pal Palette, selected *engine.Task, co
 			ui.Spacer(c)
 
 			// Contextual action buttons
-			if toolbarButton(c, pal, iconPlay, "Resume", !canResume, false) {
+			if toolbarButton(c, pal, iconPlay, i18n.T("toolbar.resume"), !canResume, false) {
 				if err := a.engine.ResumeTask(selected.ID); err != nil {
 					a.statusMessage = err.Error()
 				} else {
-					a.statusMessage = "Resumed " + selected.Filename
+					a.statusMessage = i18n.Tf("msg.resumed", selected.Filename)
 				}
 			}
 
-			if toolbarButton(c, pal, iconPause, "Pause", !canPause, false) {
+			if toolbarButton(c, pal, iconPause, i18n.T("toolbar.pause"), !canPause, false) {
 				if err := a.engine.PauseTask(selected.ID); err != nil {
 					a.statusMessage = err.Error()
 				} else {
-					a.statusMessage = "Paused " + selected.Filename
+					a.statusMessage = i18n.Tf("msg.paused", selected.Filename)
 				}
 			}
 
-			if toolbarButton(c, pal, iconTrash, "Delete", !canDelete, true) {
+			if toolbarButton(c, pal, iconTrash, i18n.T("toolbar.delete"), !canDelete, true) {
 				if err := a.engine.DeleteTask(selected.ID, false); err != nil {
 					a.statusMessage = err.Error()
 				} else {
-					a.statusMessage = "Removed " + selected.Filename
+					a.statusMessage = i18n.Tf("msg.removed", selected.Filename)
 					a.selectedTaskID = ""
 				}
 			}
 
-			if toolbarButton(c, pal, iconCheck, "Clear Done", !canClearDone, false) {
+			if toolbarButton(c, pal, iconCheck, i18n.T("toolbar.clear_done"), !canClearDone, false) {
 				removed := 0
 				for _, t := range a.engine.GetTasks() {
 					if t.Status == engine.StatusCompleted {
@@ -822,11 +853,11 @@ func (a *App) renderHeader(c *ui.Context, pal Palette, selected *engine.Task, co
 						}
 					}
 				}
-				a.statusMessage = fmt.Sprintf("Cleared %d completed download(s)", removed)
+				a.statusMessage = i18n.Tf("msg.cleared_done", removed)
 			}
 
 			// Primary CTA
-			if primaryCTA(c, pal, iconPlus, "New Download") {
+			if primaryCTA(c, pal, iconPlus, i18n.T("toolbar.new_download")) {
 				a.openAddModal()
 			}
 		})
@@ -894,11 +925,11 @@ func (a *App) renderEmptyState(c *ui.Context, pal Palette, noDownloadsAtAll bool
 			ui.Icon(c, iconDownload).Width(24).Height(24).TextColor(pal.Accent)
 		})
 
-		title := "No downloads yet"
-		subtitle := "Add a URL or click any file in Chrome/Edge to accelerate downloads with multi-segment streams."
+		title := i18n.T("empty.no_downloads_title")
+		subtitle := i18n.T("empty.no_downloads_sub")
 		if !noDownloadsAtAll {
-			title = "No matching downloads"
-			subtitle = "Try clearing your search query or switching to another status or category."
+			title = i18n.T("empty.no_match_title")
+			subtitle = i18n.T("empty.no_match_sub")
 		}
 
 		ui.Text(c, title).FontSize(16).FontWeight(600).TextColor(pal.TextPrimary)
@@ -906,10 +937,10 @@ func (a *App) renderEmptyState(c *ui.Context, pal Palette, noDownloadsAtAll bool
 
 		ui.Box(c).Height(4)
 		if noDownloadsAtAll {
-			if primaryCTA(c, pal, iconPlus, "Add New Download") {
+			if primaryCTA(c, pal, iconPlus, i18n.T("empty.add_new")) {
 				a.openAddModal()
 			}
-		} else if toolbarButton(c, pal, iconRefresh, "Reset Filters", false, false) {
+		} else if toolbarButton(c, pal, iconRefresh, i18n.T("empty.reset_filters"), false, false) {
 			a.filterStatus = "All"
 			a.filterCategory = CatAll
 			a.searchQuery = ""
@@ -956,11 +987,11 @@ func (a *App) renderDownloadCard(c *ui.Context, pal Palette, task *engine.Task) 
 		barColor = pal.Danger
 	}
 
-	segLabel := "1 stream"
+	segLabel := i18n.T("card.single_stream")
 	if task.SupportsRanges && len(task.Segments) > 1 {
-		segLabel = fmt.Sprintf("%d segs", len(task.Segments))
+		segLabel = i18n.Tf("card.multi_segs", len(task.Segments))
 	} else if task.NumSegments > 1 {
-		segLabel = fmt.Sprintf("%d segs", task.NumSegments)
+		segLabel = i18n.Tf("card.multi_segs", task.NumSegments)
 	}
 
 	card.Background(bg).Border(1, border).Children(func() {
@@ -981,7 +1012,7 @@ func (a *App) renderDownloadCard(c *ui.Context, pal Palette, task *engine.Task) 
 					})
 					if task.Retries > 0 && (task.Status == engine.StatusDownloading || task.Status == engine.StatusProbing) {
 						ui.Box(c).Padding(1, 6).Radius(4).Background(pal.WarningSoft).Shrink(0).Children(func() {
-							ui.Text(c, fmt.Sprintf("retry %d", task.Retries)).FontSize(10).FontWeight(600).FontFeatures("tnum").TextColor(pal.Warning).SingleLine()
+							ui.Text(c, i18n.Tf("card.retry", task.Retries)).FontSize(10).FontWeight(600).FontFeatures("tnum").TextColor(pal.Warning).SingleLine()
 						})
 					}
 					if task.ErrorMessage != "" {
@@ -999,24 +1030,24 @@ func (a *App) renderDownloadCard(c *ui.Context, pal Palette, task *engine.Task) 
 				case engine.StatusDownloading, engine.StatusProbing:
 					if rowIconButton(c, pal, iconPause, false) {
 						_ = a.engine.PauseTask(task.ID)
-						a.statusMessage = "Paused " + name
+						a.statusMessage = i18n.Tf("msg.paused", name)
 					}
 				case engine.StatusPaused, engine.StatusQueued:
 					if rowIconButton(c, pal, iconPlay, false) {
 						_ = a.engine.ResumeTask(task.ID)
-						a.statusMessage = "Resumed " + name
+						a.statusMessage = i18n.Tf("msg.resumed", name)
 					}
 				case engine.StatusFailed, engine.StatusCancelled:
 					if rowIconButton(c, pal, iconRefresh, false) {
 						_ = a.engine.ResumeTask(task.ID)
-						a.statusMessage = "Retrying " + name
+						a.statusMessage = i18n.Tf("msg.retrying", name)
 					}
 				}
 
 				if task.SavePath != "" {
 					if rowIconButton(c, pal, iconFolder, false) {
 						openInFileManager(task.SavePath)
-						a.statusMessage = "Opened folder for " + name
+						a.statusMessage = i18n.Tf("msg.opened_folder", name)
 					}
 				}
 
@@ -1025,7 +1056,7 @@ func (a *App) renderDownloadCard(c *ui.Context, pal Palette, task *engine.Task) 
 					if a.selectedTaskID == task.ID {
 						a.selectedTaskID = ""
 					}
-					a.statusMessage = "Removed " + name
+					a.statusMessage = i18n.Tf("msg.removed", name)
 				}
 			})
 		})
@@ -1082,10 +1113,10 @@ func (a *App) renderStatusBar(c *ui.Context, pal Palette, activeCount, queuedCou
 	}
 
 	dotColor := pal.Success
-	ipcLabel := fmt.Sprintf("Extension IPC :%d Ready", ipcPort)
+	ipcLabel := i18n.Tf("statusbar.ipc_ready", ipcPort)
 	if !ipcConnected {
 		dotColor = pal.Warning
-		ipcLabel = "IPC Offline"
+		ipcLabel = i18n.T("statusbar.ipc_offline")
 	}
 
 	ui.Row(c).
@@ -1110,8 +1141,7 @@ func (a *App) renderStatusBar(c *ui.Context, pal Palette, activeCount, queuedCou
 
 			ui.Spacer(c)
 
-			summary := fmt.Sprintf("Active: %d   •   Queued: %d   •   Speed: %s",
-				activeCount, queuedCount, FormatSpeed(totalSpeed))
+			summary := i18n.Tf("statusbar.summary", activeCount, queuedCount, FormatSpeed(totalSpeed))
 			ui.Text(c, summary).FontSize(11).FontWeight(500).FontFeatures("tnum").TextColor(pal.TextSecondary).SingleLine()
 		})
 }
@@ -1141,11 +1171,11 @@ func (a *App) renderAddModal(c *ui.Context, pal Palette) {
 			}
 
 			// Modal Header
-			modalTitle := "New Download"
-			modalSub := "Enter a direct HTTP/HTTPS link to accelerate"
+			modalTitle := i18n.T("add.title_new")
+			modalSub := i18n.T("add.sub_new")
 			if a.inputFromExtension {
-				modalTitle = "Download File Info"
-				modalSub = "Review destination, category, and filename before starting"
+				modalTitle = i18n.T("add.title_info")
+				modalSub = i18n.T("add.sub_info")
 			}
 			ui.Row(c).AlignItems(ui.Center).Justify(ui.SpaceBetween).Children(func() {
 				ui.Row(c).Gap(10).AlignItems(ui.Center).Children(func() {
@@ -1167,14 +1197,14 @@ func (a *App) renderAddModal(c *ui.Context, pal Palette) {
 			// Estimated size & Auto-Mux badge bar
 			if a.inputEstimatedSize > 0 || a.inputAudioURL != "" {
 				ui.Row(c).Padding(8, 10).Radius(7).Background(pal.InputBg).Border(1, pal.Border).Gap(10).AlignItems(ui.Center).Justify(ui.SpaceBetween).Children(func() {
-					sizeLabel := "Estimated Size: Unknown"
+					sizeLabel := i18n.T("add.estimated_unknown")
 					if a.inputEstimatedSize > 0 {
-						sizeLabel = "Estimated Size: " + FormatBytes(a.inputEstimatedSize)
+						sizeLabel = i18n.Tf("add.estimated_size", FormatBytes(a.inputEstimatedSize))
 					}
 					ui.Text(c, sizeLabel).FontSize(12).FontWeight(600).TextColor(pal.TextSecondary)
 					if a.inputAudioURL != "" {
 						ui.Box(c).Padding(2, 7).Radius(999).Background(pal.PurpleSoft).Children(func() {
-							ui.Text(c, "Video + Audio (Auto-Mux MP4)").FontSize(11).FontWeight(600).TextColor(pal.Purple)
+							ui.Text(c, i18n.T("add.auto_mux_badge")).FontSize(11).FontWeight(600).TextColor(pal.Purple)
 						})
 					}
 				})
@@ -1182,15 +1212,15 @@ func (a *App) renderAddModal(c *ui.Context, pal Palette) {
 
 			// URL Field + Clipboard Paste button
 			ui.Column(c).Gap(6).Children(func() {
-				ui.Text(c, "Download URL").FontSize(12).FontWeight(600).TextColor(pal.TextSecondary)
+				ui.Text(c, i18n.T("add.url_label")).FontSize(12).FontWeight(600).TextColor(pal.TextSecondary)
 				ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
 					ui.TextInput(c, &a.inputURL).
-						Placeholder("https://example.com/archive.zip").
+						Placeholder(i18n.T("add.url_placeholder")).
 						Background(pal.InputBg).
 						Border(1, pal.Border).
 						Radius(7).
 						Grow(1)
-					if toolbarButton(c, pal, iconClipboard, "Paste", false, false) {
+					if toolbarButton(c, pal, iconClipboard, i18n.T("add.paste"), false, false) {
 						clip := strings.TrimSpace(c.ReadClipboard())
 						if clip != "" {
 							a.inputURL = clip
@@ -1200,15 +1230,15 @@ func (a *App) renderAddModal(c *ui.Context, pal Palette) {
 				})
 				if strings.TrimSpace(a.inputFilename) == "" && strings.HasPrefix(strings.TrimSpace(a.inputURL), "http") {
 					preview := engine.ExtractFilename(strings.TrimSpace(a.inputURL), nil)
-					ui.Text(c, "Auto-detected filename: "+preview).FontSize(11).TextColor(pal.Accent)
+					ui.Text(c, i18n.Tf("add.auto_filename", preview)).FontSize(11).TextColor(pal.Accent)
 				}
 			})
 
 			// Filename
 			ui.Column(c).Gap(6).Children(func() {
-				ui.Text(c, "Filename").FontSize(12).FontWeight(600).TextColor(pal.TextSecondary)
+				ui.Text(c, i18n.T("add.filename_label")).FontSize(12).FontWeight(600).TextColor(pal.TextSecondary)
 				ui.TextInput(c, &a.inputFilename).
-					Placeholder("Leave blank to auto-detect from server or URL").
+					Placeholder(i18n.T("add.filename_placeholder")).
 					Background(pal.InputBg).
 					Border(1, pal.Border).
 					Radius(7)
@@ -1216,11 +1246,11 @@ func (a *App) renderAddModal(c *ui.Context, pal Palette) {
 
 			// Category Selector
 			ui.Column(c).Gap(6).Children(func() {
-				ui.Text(c, "Category").FontSize(12).FontWeight(600).TextColor(pal.TextSecondary)
+				ui.Text(c, i18n.T("add.category_label")).FontSize(12).FontWeight(600).TextColor(pal.TextSecondary)
 				ui.Row(c).Gap(6).Children(func() {
 					cfg := a.engine.Config()
 					for _, cat := range engine.AllCategories {
-						if segmentOption(c, pal, cat, a.inputCategory == cat) {
+						if segmentOption(c, pal, i18n.T("cat."+cat), a.inputCategory == cat) {
 							a.inputCategory = cat
 							a.inputSaveDir = engine.ResolveSaveDir(cfg.DownloadDir, cat, cfg.AutoCategorize)
 						}
@@ -1230,7 +1260,7 @@ func (a *App) renderAddModal(c *ui.Context, pal Palette) {
 
 			// Save Dir
 			ui.Column(c).Gap(6).Children(func() {
-				ui.Text(c, "Save Directory").FontSize(12).FontWeight(600).TextColor(pal.TextSecondary)
+				ui.Text(c, i18n.T("add.savedir_label")).FontSize(12).FontWeight(600).TextColor(pal.TextSecondary)
 				ui.TextInput(c, &a.inputSaveDir).
 					Background(pal.InputBg).
 					Border(1, pal.Border).
@@ -1239,10 +1269,10 @@ func (a *App) renderAddModal(c *ui.Context, pal Palette) {
 
 			// Segment Count Selector
 			ui.Column(c).Gap(6).Children(func() {
-				ui.Text(c, "Concurrent Segments").FontSize(12).FontWeight(600).TextColor(pal.TextSecondary)
+				ui.Text(c, i18n.T("add.segments_label")).FontSize(12).FontWeight(600).TextColor(pal.TextSecondary)
 				ui.Row(c).Gap(8).Children(func() {
 					for _, seg := range []int{4, 8, 16} {
-						if segmentOption(c, pal, fmt.Sprintf("%d connections", seg), a.inputSegments == seg) {
+						if segmentOption(c, pal, i18n.Tf("add.connections", seg), a.inputSegments == seg) {
 							a.inputSegments = seg
 						}
 					}
@@ -1261,13 +1291,13 @@ func (a *App) renderAddModal(c *ui.Context, pal Palette) {
 			// Modal Footer
 			ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
 				ui.Spacer(c)
-				if toolbarButton(c, pal, nil, "Cancel", false, false) {
+				if toolbarButton(c, pal, nil, i18n.T("add.cancel"), false, false) {
 					a.showAddModal = false
 				}
-				if toolbarButton(c, pal, iconClock, "Download Later", false, false) {
+				if toolbarButton(c, pal, iconClock, i18n.T("add.download_later"), false, false) {
 					a.submitAddDownload(false)
 				}
-				if primaryCTA(c, pal, iconDownload, "Start Download") {
+				if primaryCTA(c, pal, iconDownload, i18n.T("add.start_download")) {
 					a.submitAddDownload(true)
 				}
 			})
@@ -1278,7 +1308,7 @@ func (a *App) renderAddModal(c *ui.Context, pal Palette) {
 func (a *App) submitAddDownload(autoStart bool) {
 	rawURL := strings.TrimSpace(a.inputURL)
 	if rawURL == "" || (!strings.HasPrefix(rawURL, "http://") && !strings.HasPrefix(rawURL, "https://")) {
-		a.addError = "Please enter a valid http:// or https:// URL."
+		a.addError = i18n.T("add.err_invalid_url")
 		return
 	}
 
@@ -1312,7 +1342,7 @@ func (a *App) submitAddDownload(autoStart bool) {
 	}
 
 	a.selectedTaskID = task.ID
-	a.statusMessage = fmt.Sprintf("Added download: %s", task.URL)
+	a.statusMessage = i18n.Tf("msg.added_download", task.URL)
 	a.showAddModal = false
 }
 
@@ -1330,8 +1360,8 @@ func (a *App) renderSettingsModal(c *ui.Context, pal Palette) {
 						ui.Icon(c, iconSettings).Width(16).Height(16).TextColor(pal.Accent)
 					})
 					ui.Column(c).Gap(1).Children(func() {
-						ui.Text(c, "Settings").FontSize(16).FontWeight(700).TextColor(pal.TextPrimary)
-						ui.Text(c, "Configure downloads, concurrency, and browser integration").FontSize(12).TextColor(pal.TextMuted)
+						ui.Text(c, i18n.T("settings.title")).FontSize(16).FontWeight(700).TextColor(pal.TextPrimary)
+						ui.Text(c, i18n.T("settings.subtitle")).FontSize(12).TextColor(pal.TextMuted)
 					})
 				})
 				if rowIconButton(c, pal, iconClose, false) {
@@ -1341,9 +1371,22 @@ func (a *App) renderSettingsModal(c *ui.Context, pal Palette) {
 
 			ui.Divider(c)
 
+			// Language (takes effect immediately)
+			ui.Column(c).Gap(6).Children(func() {
+				ui.Text(c, i18n.T("lang.label")).FontSize(12).FontWeight(600).TextColor(pal.TextSecondary)
+				ui.Row(c).Gap(8).Children(func() {
+					if segmentOption(c, pal, i18n.T("lang.vi"), a.language == i18n.LangVI) {
+						a.SetLanguage(i18n.LangVI)
+					}
+					if segmentOption(c, pal, i18n.T("lang.en"), a.language == i18n.LangEN) {
+						a.SetLanguage(i18n.LangEN)
+					}
+				})
+			})
+
 			// Download Directory
 			ui.Column(c).Gap(6).Children(func() {
-				ui.Text(c, "Default Download Directory").FontSize(12).FontWeight(600).TextColor(pal.TextSecondary)
+				ui.Text(c, i18n.T("settings.download_dir")).FontSize(12).FontWeight(600).TextColor(pal.TextSecondary)
 				ui.TextInput(c, &a.settingDownloadDir).
 					Background(pal.InputBg).
 					Border(1, pal.Border).
@@ -1352,7 +1395,7 @@ func (a *App) renderSettingsModal(c *ui.Context, pal Palette) {
 
 			// Max Concurrent Downloads
 			ui.Column(c).Gap(6).Children(func() {
-				ui.Text(c, "Max Concurrent Downloads").FontSize(12).FontWeight(600).TextColor(pal.TextSecondary)
+				ui.Text(c, i18n.T("settings.max_concurrent")).FontSize(12).FontWeight(600).TextColor(pal.TextSecondary)
 				ui.Row(c).Gap(8).Children(func() {
 					for _, n := range []int{1, 2, 3, 5, 8} {
 						if segmentOption(c, pal, fmt.Sprintf("%d", n), a.settingMaxConcurrent == n) {
@@ -1364,10 +1407,10 @@ func (a *App) renderSettingsModal(c *ui.Context, pal Palette) {
 
 			// Default Segments
 			ui.Column(c).Gap(6).Children(func() {
-				ui.Text(c, "Default Segments per File").FontSize(12).FontWeight(600).TextColor(pal.TextSecondary)
+				ui.Text(c, i18n.T("settings.default_segments")).FontSize(12).FontWeight(600).TextColor(pal.TextSecondary)
 				ui.Row(c).Gap(8).Children(func() {
 					for _, seg := range []int{4, 8, 16} {
-						if segmentOption(c, pal, fmt.Sprintf("%d connections", seg), a.settingSegments == seg) {
+						if segmentOption(c, pal, i18n.Tf("add.connections", seg), a.settingSegments == seg) {
 							a.settingSegments = seg
 						}
 					}
@@ -1377,31 +1420,31 @@ func (a *App) renderSettingsModal(c *ui.Context, pal Palette) {
 			// Reliability & throughput limits
 			ui.Row(c).Gap(16).Children(func() {
 				ui.Column(c).Gap(6).Grow(1).Children(func() {
-					ui.Text(c, "Max Retries per Download").FontSize(12).FontWeight(600).TextColor(pal.TextSecondary)
+					ui.Text(c, i18n.T("settings.max_retries")).FontSize(12).FontWeight(600).TextColor(pal.TextSecondary)
 					ui.TextInput(c, &a.settingMaxRetries).
 						Background(pal.InputBg).
 						Border(1, pal.Border).
 						Radius(7)
-					ui.Text(c, "0 = no retry").FontSize(10).TextColor(pal.TextMuted)
+					ui.Text(c, i18n.T("settings.max_retries_hint")).FontSize(10).TextColor(pal.TextMuted)
 				})
 				ui.Column(c).Gap(6).Grow(1).Children(func() {
-					ui.Text(c, "Speed Limit (KB/s)").FontSize(12).FontWeight(600).TextColor(pal.TextSecondary)
+					ui.Text(c, i18n.T("settings.speed_limit")).FontSize(12).FontWeight(600).TextColor(pal.TextSecondary)
 					ui.TextInput(c, &a.settingSpeedLimit).
 						Background(pal.InputBg).
 						Border(1, pal.Border).
 						Radius(7)
-					ui.Text(c, "0 = unlimited").FontSize(10).TextColor(pal.TextMuted)
+					ui.Text(c, i18n.T("settings.speed_limit_hint")).FontSize(10).TextColor(pal.TextMuted)
 				})
 			})
 
 			// Auto-Categorize toggle
 			ui.Column(c).Gap(6).Children(func() {
-				ui.Text(c, "Auto-Categorize Subfolders").FontSize(12).FontWeight(600).TextColor(pal.TextSecondary)
+				ui.Text(c, i18n.T("settings.auto_categorize")).FontSize(12).FontWeight(600).TextColor(pal.TextSecondary)
 				ui.Row(c).Gap(8).Children(func() {
-					if segmentOption(c, pal, "Enabled (Video, Music, ...)", a.settingAutoCategorize) {
+					if segmentOption(c, pal, i18n.T("settings.auto_categorize_on"), a.settingAutoCategorize) {
 						a.settingAutoCategorize = true
 					}
-					if segmentOption(c, pal, "Disabled", !a.settingAutoCategorize) {
+					if segmentOption(c, pal, i18n.T("settings.disabled"), !a.settingAutoCategorize) {
 						a.settingAutoCategorize = false
 					}
 				})
@@ -1410,23 +1453,23 @@ func (a *App) renderSettingsModal(c *ui.Context, pal Palette) {
 			// Windows Startup & System Tray
 			ui.Row(c).Gap(16).Children(func() {
 				ui.Column(c).Gap(6).Grow(1).Children(func() {
-					ui.Text(c, "Launch at Windows Startup").FontSize(12).FontWeight(600).TextColor(pal.TextSecondary)
+					ui.Text(c, i18n.T("settings.launch_startup")).FontSize(12).FontWeight(600).TextColor(pal.TextSecondary)
 					ui.Row(c).Gap(6).Children(func() {
-						if segmentOption(c, pal, "Enabled", a.settingLaunchAtStartup) {
+						if segmentOption(c, pal, i18n.T("settings.enabled"), a.settingLaunchAtStartup) {
 							a.settingLaunchAtStartup = true
 						}
-						if segmentOption(c, pal, "Disabled", !a.settingLaunchAtStartup) {
+						if segmentOption(c, pal, i18n.T("settings.disabled"), !a.settingLaunchAtStartup) {
 							a.settingLaunchAtStartup = false
 						}
 					})
 				})
 				ui.Column(c).Gap(6).Grow(1).Children(func() {
-					ui.Text(c, "Appearance").FontSize(12).FontWeight(600).TextColor(pal.TextSecondary)
+					ui.Text(c, i18n.T("settings.appearance")).FontSize(12).FontWeight(600).TextColor(pal.TextSecondary)
 					ui.Row(c).Gap(6).Children(func() {
-						if segmentOption(c, pal, "Dark", a.darkMode) {
+						if segmentOption(c, pal, i18n.T("settings.dark"), a.darkMode) {
 							a.darkMode = true
 						}
-						if segmentOption(c, pal, "Light", !a.darkMode) {
+						if segmentOption(c, pal, i18n.T("settings.light"), !a.darkMode) {
 							a.darkMode = false
 						}
 					})
@@ -1435,23 +1478,23 @@ func (a *App) renderSettingsModal(c *ui.Context, pal Palette) {
 
 			ui.Row(c).Gap(16).Children(func() {
 				ui.Column(c).Gap(6).Grow(1).Children(func() {
-					ui.Text(c, "Close Button (X) Behavior").FontSize(12).FontWeight(600).TextColor(pal.TextSecondary)
+					ui.Text(c, i18n.T("settings.close_behavior")).FontSize(12).FontWeight(600).TextColor(pal.TextSecondary)
 					ui.Row(c).Gap(6).Children(func() {
-						if segmentOption(c, pal, "Hide to Tray", a.settingCloseToTray) {
+						if segmentOption(c, pal, i18n.T("settings.hide_to_tray"), a.settingCloseToTray) {
 							a.settingCloseToTray = true
 						}
-						if segmentOption(c, pal, "Exit App", !a.settingCloseToTray) {
+						if segmentOption(c, pal, i18n.T("settings.exit_app"), !a.settingCloseToTray) {
 							a.settingCloseToTray = false
 						}
 					})
 				})
 				ui.Column(c).Gap(6).Grow(1).Children(func() {
-					ui.Text(c, "Minimize Button Behavior").FontSize(12).FontWeight(600).TextColor(pal.TextSecondary)
+					ui.Text(c, i18n.T("settings.minimize_behavior")).FontSize(12).FontWeight(600).TextColor(pal.TextSecondary)
 					ui.Row(c).Gap(6).Children(func() {
-						if segmentOption(c, pal, "Hide to Tray", a.settingMinimizeToTray) {
+						if segmentOption(c, pal, i18n.T("settings.hide_to_tray"), a.settingMinimizeToTray) {
 							a.settingMinimizeToTray = true
 						}
-						if segmentOption(c, pal, "Taskbar", !a.settingMinimizeToTray) {
+						if segmentOption(c, pal, i18n.T("settings.taskbar"), !a.settingMinimizeToTray) {
 							a.settingMinimizeToTray = false
 						}
 					})
@@ -1465,17 +1508,17 @@ func (a *App) renderSettingsModal(c *ui.Context, pal Palette) {
 			}
 			ui.Row(c).Padding(10, 12).Radius(8).Background(pal.InputBg).Border(1, pal.Border).AlignItems(ui.Center).Justify(ui.SpaceBetween).Children(func() {
 				ui.Column(c).Gap(2).Children(func() {
-					ui.Text(c, "Chrome / Edge Native Messaging").FontSize(12).FontWeight(600).TextColor(pal.TextPrimary)
-					regState := "Not registered"
+					ui.Text(c, i18n.T("settings.native_title")).FontSize(12).FontWeight(600).TextColor(pal.TextPrimary)
+					regState := i18n.T("settings.native_not_registered")
 					if a.nativeStatus.IsReady() {
-						regState = "Registered"
+						regState = i18n.T("settings.native_registered")
 					}
 					ui.Text(c, fmt.Sprintf("%s  •  IPC 127.0.0.1:%d", regState, ipcPort)).FontSize(11).FontFeatures("tnum").TextColor(pal.TextMuted)
 				})
 				ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
-					regLabel := "Register"
+					regLabel := i18n.T("settings.native_register")
 					if a.nativeStatus.IsReady() {
-						regLabel = "Re-register"
+						regLabel = i18n.T("settings.native_reregister")
 					}
 					if toolbarButton(c, pal, nil, regLabel, false, false) {
 						a.registerNativeMessaging()
@@ -1499,14 +1542,14 @@ func (a *App) renderSettingsModal(c *ui.Context, pal Palette) {
 			ui.Divider(c)
 
 			ui.Row(c).Gap(8).Children(func() {
-				if toolbarButton(c, pal, nil, "Welcome Setup", false, false) {
+				if toolbarButton(c, pal, nil, i18n.T("settings.welcome_setup"), false, false) {
 					a.OpenOnboardingModal()
 				}
 				ui.Spacer(c)
-				if toolbarButton(c, pal, nil, "Cancel", false, false) {
+				if toolbarButton(c, pal, nil, i18n.T("settings.cancel"), false, false) {
 					a.showSettingsModal = false
 				}
-				if primaryCTA(c, pal, iconCheck, "Save Changes") {
+				if primaryCTA(c, pal, iconCheck, i18n.T("settings.save")) {
 					a.saveSettings()
 				}
 			})
@@ -1520,12 +1563,12 @@ func (a *App) registerNativeMessaging() {
 	}
 	path, err := a.nativeRegFn()
 	if err != nil {
-		a.nativeRegMsg = "Native Messaging error: " + err.Error()
+		a.nativeRegMsg = i18n.Tf("settings.native_err", err.Error())
 		return
 	}
 	a.refreshNativeStatus()
-	a.nativeRegMsg = "Registered Native Messaging: " + filepath.Base(path)
-	a.statusMessage = "Chrome/Edge Native Messaging registered"
+	a.nativeRegMsg = i18n.Tf("settings.native_ok", filepath.Base(path))
+	a.statusMessage = i18n.T("msg.native_registered")
 }
 
 // SetQuitFunc registers a callback used to cleanly exit the application (e.g. before self-update restart).
@@ -1562,7 +1605,7 @@ func (a *App) triggerUpdateCheck() {
 		return
 	}
 	a.updateStatus = "checking"
-	a.updateMessage = "Checking for updates..."
+	a.updateMessage = i18n.T("update.checking_msg")
 	a.updateMu.Unlock()
 	a.invalidateUI()
 
@@ -1580,15 +1623,15 @@ func (a *App) triggerUpdateCheck() {
 		a.updateMu.Lock()
 		if err != nil {
 			a.updateStatus = "error"
-			a.updateMessage = "Update check failed: " + err.Error()
+			a.updateMessage = i18n.Tf("update.check_failed", err.Error())
 		} else if res.UpdateAvailable && res.Release != nil {
 			a.updateStatus = "available"
 			a.updateRelease = res.Release
-			a.updateMessage = fmt.Sprintf("New version %s available", res.LatestVersion)
+			a.updateMessage = i18n.Tf("update.available", res.LatestVersion)
 		} else {
 			a.updateStatus = "up_to_date"
 			a.updateRelease = res.Release
-			a.updateMessage = fmt.Sprintf("You're up to date (%s)", version.NormalizedVersion())
+			a.updateMessage = i18n.Tf("update.up_to_date", version.NormalizedVersion())
 		}
 		a.updateMu.Unlock()
 		a.invalidateUI()
@@ -1605,7 +1648,7 @@ func (a *App) triggerDownloadAndInstall() {
 	a.updateStatus = "downloading"
 	a.updateDownloaded = 0
 	a.updateTotal = rel.AssetSize
-	a.updateMessage = "Downloading update..."
+	a.updateMessage = i18n.T("update.downloading_msg")
 	a.updateMu.Unlock()
 	a.invalidateUI()
 
@@ -1657,13 +1700,13 @@ func (a *App) triggerDownloadAndInstall() {
 		a.updateMu.Lock()
 		if err != nil {
 			a.updateStatus = "error"
-			a.updateMessage = "Update failed: " + err.Error()
+			a.updateMessage = i18n.Tf("update.failed", err.Error())
 			a.updateMu.Unlock()
 			a.invalidateUI()
 			return
 		}
 		a.updateStatus = "applying"
-		a.updateMessage = "Applying update & restarting MagicDown..."
+		a.updateMessage = i18n.T("update.applying")
 		a.updateMu.Unlock()
 		a.invalidateUI()
 
@@ -1706,19 +1749,19 @@ func (a *App) renderUpdateCard(c *ui.Context, pal Palette) {
 	ui.Column(c).Padding(10, 12).Radius(8).Background(pal.InputBg).Border(1, pal.Border).Gap(8).Children(func() {
 		ui.Row(c).AlignItems(ui.Center).Justify(ui.SpaceBetween).Children(func() {
 			ui.Column(c).Gap(2).Children(func() {
-				ui.Text(c, fmt.Sprintf("Software Updates  •  %s", version.DisplayVersion())).FontSize(12).FontWeight(600).TextColor(pal.TextPrimary)
-				ui.Text(c, "Auto-check on startup").FontSize(11).TextColor(pal.TextMuted)
+				ui.Text(c, i18n.Tf("update.title", version.DisplayVersion())).FontSize(12).FontWeight(600).TextColor(pal.TextPrimary)
+				ui.Text(c, i18n.T("update.auto_check_sub")).FontSize(11).TextColor(pal.TextMuted)
 			})
 			ui.Row(c).Gap(6).AlignItems(ui.Center).Children(func() {
-				if segmentOption(c, pal, "Auto", a.settingAutoCheckUpdates) {
+				if segmentOption(c, pal, i18n.T("update.auto"), a.settingAutoCheckUpdates) {
 					a.settingAutoCheckUpdates = true
 				}
-				if segmentOption(c, pal, "Manual", !a.settingAutoCheckUpdates) {
+				if segmentOption(c, pal, i18n.T("update.manual"), !a.settingAutoCheckUpdates) {
 					a.settingAutoCheckUpdates = false
 				}
-				checkLabel := "Check for Updates"
+				checkLabel := i18n.T("update.check_btn")
 				if status == "checking" {
-					checkLabel = "Checking..."
+					checkLabel = i18n.T("update.checking_btn")
 				}
 				if toolbarButton(c, pal, nil, checkLabel, false, status == "checking" || status == "downloading" || status == "applying") {
 					a.triggerUpdateCheck()
@@ -1741,8 +1784,8 @@ func (a *App) renderUpdateCard(c *ui.Context, pal Palette) {
 				ui.Text(c, summary).FontSize(11).TextColor(pal.TextMuted)
 			}
 			ui.Row(c).AlignItems(ui.Center).Justify(ui.SpaceBetween).Gap(8).Children(func() {
-				ui.Text(c, "App will restart automatically to apply.").FontSize(10).TextColor(pal.TextMuted)
-				if primaryCTA(c, pal, iconDownload, "Download & Install Update") {
+				ui.Text(c, i18n.T("update.restart_hint")).FontSize(10).TextColor(pal.TextMuted)
+				if primaryCTA(c, pal, iconDownload, i18n.T("update.download_install")) {
 					a.triggerDownloadAndInstall()
 				}
 			})
@@ -1765,9 +1808,9 @@ func (a *App) renderUpdateCard(c *ui.Context, pal Palette) {
 					ui.Row(c).Width(float32(barW)).Height(6).Radius(3).Background(pal.Accent)
 				}
 			})
-			progressLabel := fmt.Sprintf("Downloading... %s", FormatBytes(downloaded))
+			progressLabel := i18n.Tf("update.progress", FormatBytes(downloaded))
 			if total > 0 {
-				progressLabel = fmt.Sprintf("Downloading... %s / %s (%.0f%%)", FormatBytes(downloaded), FormatBytes(total), pct*100)
+				progressLabel = i18n.Tf("update.progress_total", FormatBytes(downloaded), FormatBytes(total), pct*100)
 			}
 			ui.Text(c, progressLabel).FontSize(10).FontFeatures("tnum").TextColor(pal.TextMuted)
 		}
@@ -1777,7 +1820,7 @@ func (a *App) renderUpdateCard(c *ui.Context, pal Palette) {
 func (a *App) saveSettings() {
 	dir := strings.TrimSpace(a.settingDownloadDir)
 	if dir == "" {
-		a.settingsError = "Download directory cannot be empty."
+		a.settingsError = i18n.T("settings.err_empty_dir")
 		return
 	}
 	maxC := a.settingMaxConcurrent
@@ -1790,7 +1833,7 @@ func (a *App) saveSettings() {
 	}
 	retries, err := strconv.Atoi(strings.TrimSpace(a.settingMaxRetries))
 	if err != nil || retries < 0 {
-		a.settingsError = "Max retries must be a number of 0 or greater (0 = no retry)."
+		a.settingsError = i18n.T("settings.err_retries")
 		return
 	}
 	if retries > 20 {
@@ -1798,7 +1841,7 @@ func (a *App) saveSettings() {
 	}
 	speedKBps, err := strconv.ParseInt(strings.TrimSpace(a.settingSpeedLimit), 10, 64)
 	if err != nil || speedKBps < 0 {
-		a.settingsError = "Speed limit must be 0 (unlimited) or a positive number of KB/s."
+		a.settingsError = i18n.T("settings.err_speed_limit")
 		return
 	}
 	if speedKBps > 1048576 {
@@ -1807,7 +1850,7 @@ func (a *App) saveSettings() {
 
 	if a.autostartSetter != nil {
 		if err := a.autostartSetter(a.settingLaunchAtStartup); err != nil {
-			a.settingsError = "Failed to update Windows startup: " + err.Error()
+			a.settingsError = i18n.Tf("settings.err_startup", err.Error())
 			return
 		}
 	}
@@ -1823,12 +1866,13 @@ func (a *App) saveSettings() {
 	cfg.MinimizeToTray = a.settingMinimizeToTray
 	cfg.CloseToTray = a.settingCloseToTray
 	cfg.AutoCheckUpdates = a.settingAutoCheckUpdates
+	cfg.Language = string(a.language)
 	a.engine.UpdateConfig(cfg)
 
 	a.settingMaxRetries = strconv.Itoa(retries)
 	a.settingSpeedLimit = strconv.FormatInt(speedKBps, 10)
 	a.settingsError = ""
-	a.statusMessage = "Settings saved"
+	a.statusMessage = i18n.T("msg.settings_saved")
 	a.showSettingsModal = false
 }
 
@@ -1846,8 +1890,8 @@ func (a *App) renderOnboardingModal(c *ui.Context, pal Palette) {
 						ui.Icon(c, iconBolt).Width(18).Height(18).TextColor(pal.AccentText)
 					})
 					ui.Column(c).Gap(2).Children(func() {
-						ui.Text(c, "Welcome to MagicDown").FontSize(17).FontWeight(700).TextColor(pal.TextPrimary)
-						ui.Text(c, "Quick setup for downloads, startup, system tray, and browser integration").FontSize(12).TextColor(pal.TextMuted)
+						ui.Text(c, i18n.T("onboarding.title")).FontSize(17).FontWeight(700).TextColor(pal.TextPrimary)
+						ui.Text(c, i18n.T("onboarding.subtitle")).FontSize(12).TextColor(pal.TextMuted)
 					})
 				})
 				if rowIconButton(c, pal, iconClose, false) {
@@ -1857,9 +1901,22 @@ func (a *App) renderOnboardingModal(c *ui.Context, pal Palette) {
 
 			ui.Divider(c)
 
+			// Language selector (takes effect immediately)
+			ui.Column(c).Gap(6).Children(func() {
+				ui.Text(c, i18n.T("lang.label")).FontSize(12).FontWeight(600).TextColor(pal.TextSecondary)
+				ui.Row(c).Gap(8).Children(func() {
+					if segmentOption(c, pal, i18n.T("lang.vi"), a.language == i18n.LangVI) {
+						a.SetLanguage(i18n.LangVI)
+					}
+					if segmentOption(c, pal, i18n.T("lang.en"), a.language == i18n.LangEN) {
+						a.SetLanguage(i18n.LangEN)
+					}
+				})
+			})
+
 			// Default Download Directory
 			ui.Column(c).Gap(6).Children(func() {
-				ui.Text(c, "Default Download Folder").FontSize(12).FontWeight(600).TextColor(pal.TextSecondary)
+				ui.Text(c, i18n.T("onboarding.download_folder")).FontSize(12).FontWeight(600).TextColor(pal.TextSecondary)
 				ui.TextInput(c, &a.onboardingDownloadDir).
 					Background(pal.InputBg).
 					Border(1, pal.Border).
@@ -1868,12 +1925,12 @@ func (a *App) renderOnboardingModal(c *ui.Context, pal Palette) {
 
 			// Auto-Categorize
 			ui.Column(c).Gap(6).Children(func() {
-				ui.Text(c, "Auto-Categorize Subfolders (Video, Music, Compressed, ...)").FontSize(12).FontWeight(600).TextColor(pal.TextSecondary)
+				ui.Text(c, i18n.T("onboarding.auto_categorize")).FontSize(12).FontWeight(600).TextColor(pal.TextSecondary)
 				ui.Row(c).Gap(8).Children(func() {
-					if segmentOption(c, pal, "Enabled (Recommended)", a.onboardingAutoCategorize) {
+					if segmentOption(c, pal, i18n.T("onboarding.enabled_recommended"), a.onboardingAutoCategorize) {
 						a.onboardingAutoCategorize = true
 					}
-					if segmentOption(c, pal, "Disabled", !a.onboardingAutoCategorize) {
+					if segmentOption(c, pal, i18n.T("settings.disabled"), !a.onboardingAutoCategorize) {
 						a.onboardingAutoCategorize = false
 					}
 				})
@@ -1882,23 +1939,23 @@ func (a *App) renderOnboardingModal(c *ui.Context, pal Palette) {
 			// Startup & System Tray
 			ui.Row(c).Gap(16).Children(func() {
 				ui.Column(c).Gap(6).Grow(1).Children(func() {
-					ui.Text(c, "Launch with Windows").FontSize(12).FontWeight(600).TextColor(pal.TextSecondary)
+					ui.Text(c, i18n.T("onboarding.launch_windows")).FontSize(12).FontWeight(600).TextColor(pal.TextSecondary)
 					ui.Row(c).Gap(6).Children(func() {
-						if segmentOption(c, pal, "Enabled", a.onboardingLaunchAtStartup) {
+						if segmentOption(c, pal, i18n.T("settings.enabled"), a.onboardingLaunchAtStartup) {
 							a.onboardingLaunchAtStartup = true
 						}
-						if segmentOption(c, pal, "Disabled", !a.onboardingLaunchAtStartup) {
+						if segmentOption(c, pal, i18n.T("settings.disabled"), !a.onboardingLaunchAtStartup) {
 							a.onboardingLaunchAtStartup = false
 						}
 					})
 				})
 				ui.Column(c).Gap(6).Grow(1).Children(func() {
-					ui.Text(c, "Run in System Tray").FontSize(12).FontWeight(600).TextColor(pal.TextSecondary)
+					ui.Text(c, i18n.T("onboarding.run_in_tray")).FontSize(12).FontWeight(600).TextColor(pal.TextSecondary)
 					ui.Row(c).Gap(6).Children(func() {
-						if segmentOption(c, pal, "Enabled", a.onboardingRunInTray) {
+						if segmentOption(c, pal, i18n.T("settings.enabled"), a.onboardingRunInTray) {
 							a.onboardingRunInTray = true
 						}
-						if segmentOption(c, pal, "Disabled", !a.onboardingRunInTray) {
+						if segmentOption(c, pal, i18n.T("settings.disabled"), !a.onboardingRunInTray) {
 							a.onboardingRunInTray = false
 						}
 					})
@@ -1909,10 +1966,10 @@ func (a *App) renderOnboardingModal(c *ui.Context, pal Palette) {
 			ui.Column(c).Gap(8).Padding(10, 12).Radius(8).Background(pal.InputBg).Border(1, pal.Border).Children(func() {
 				ui.Row(c).AlignItems(ui.Center).Justify(ui.SpaceBetween).Children(func() {
 					ui.Column(c).Gap(2).Children(func() {
-						ui.Text(c, "Browser Extension Integration").FontSize(12).FontWeight(600).TextColor(pal.TextPrimary)
-						ui.Text(c, "Select installed Chromium browsers to register Native Messaging & open Extensions").FontSize(11).TextColor(pal.TextMuted)
+						ui.Text(c, i18n.T("onboarding.browser_title")).FontSize(12).FontWeight(600).TextColor(pal.TextPrimary)
+						ui.Text(c, i18n.T("onboarding.browser_sub")).FontSize(11).TextColor(pal.TextMuted)
 					})
-					if toolbarButton(c, pal, nil, "Install Selected", false, false) {
+					if toolbarButton(c, pal, nil, i18n.T("onboarding.install_selected"), false, false) {
 						a.integrateSelectedBrowsers(true)
 					}
 				})
@@ -1949,7 +2006,7 @@ func (a *App) renderOnboardingModal(c *ui.Context, pal Palette) {
 							ui.Text(c, b.Name).FontSize(12).FontWeight(600).TextColor(pal.TextPrimary)
 						})
 
-						statusLabel := "Ready to integrate"
+						statusLabel := i18n.T("onboarding.browser_ready")
 						statusColor := pal.TextMuted
 						if res, hasRes := a.browserResults[b.ID]; hasRes {
 							statusLabel = res.StatusText
@@ -1959,7 +2016,7 @@ func (a *App) renderOnboardingModal(c *ui.Context, pal Palette) {
 								statusColor = pal.Success
 							}
 						} else if b.NativeRegistered {
-							statusLabel = "Native Host registered"
+							statusLabel = i18n.T("onboarding.browser_registered")
 							statusColor = pal.Success
 						}
 						ui.Text(c, statusLabel).FontSize(11).TextColor(statusColor)
@@ -1969,14 +2026,14 @@ func (a *App) renderOnboardingModal(c *ui.Context, pal Palette) {
 					}
 				}
 				if installedCount == 0 {
-					ui.Text(c, "No supported Chromium browser detected automatically. You can still load the extension folder manually.").FontSize(11).TextColor(pal.TextMuted)
+					ui.Text(c, i18n.T("onboarding.no_browser")).FontSize(11).TextColor(pal.TextMuted)
 				}
 				if a.extensionDir != "" {
 					ui.Row(c).Gap(8).AlignItems(ui.Center).Justify(ui.SpaceBetween).Children(func() {
-						ui.Text(c, "Extension folder: "+a.extensionDir).FontSize(10).TextColor(pal.TextMuted).SingleLine()
-						if toolbarButton(c, pal, iconClipboard, "Copy Path", false, false) {
+						ui.Text(c, i18n.Tf("onboarding.extension_folder", a.extensionDir)).FontSize(10).TextColor(pal.TextMuted).SingleLine()
+						if toolbarButton(c, pal, iconClipboard, i18n.T("onboarding.copy_path"), false, false) {
 							c.WriteClipboard(a.extensionDir)
-							a.nativeRegMsg = "Copied extension folder path to clipboard"
+							a.nativeRegMsg = i18n.T("onboarding.copied_path")
 						}
 					})
 				}
@@ -1995,11 +2052,11 @@ func (a *App) renderOnboardingModal(c *ui.Context, pal Palette) {
 			ui.Divider(c)
 
 			ui.Row(c).Gap(8).Children(func() {
-				if toolbarButton(c, pal, nil, "Skip for now", false, false) {
+				if toolbarButton(c, pal, nil, i18n.T("onboarding.skip"), false, false) {
 					a.skipOnboarding()
 				}
 				ui.Spacer(c)
-				if primaryCTA(c, pal, iconCheck, "Finish Setup") {
+				if primaryCTA(c, pal, iconCheck, i18n.T("onboarding.finish")) {
 					a.completeOnboarding()
 				}
 			})
@@ -2017,12 +2074,12 @@ func (a *App) skipOnboarding() {
 func (a *App) completeOnboarding() {
 	dir := strings.TrimSpace(a.onboardingDownloadDir)
 	if dir == "" {
-		a.onboardingError = "Default download folder cannot be empty."
+		a.onboardingError = i18n.T("onboarding.err_empty_dir")
 		return
 	}
 	if a.autostartSetter != nil {
 		if err := a.autostartSetter(a.onboardingLaunchAtStartup); err != nil {
-			a.onboardingError = "Failed to update Windows startup: " + err.Error()
+			a.onboardingError = i18n.Tf("settings.err_startup", err.Error())
 			return
 		}
 	}
@@ -2037,10 +2094,11 @@ func (a *App) completeOnboarding() {
 	cfg.MinimizeToTray = a.onboardingRunInTray
 	cfg.CloseToTray = a.onboardingRunInTray
 	cfg.OnboardingCompleted = true
+	cfg.Language = string(a.language)
 	a.engine.UpdateConfig(cfg)
 
 	a.onboardingError = ""
-	a.statusMessage = "Setup complete"
+	a.statusMessage = i18n.T("msg.setup_complete")
 	a.showOnboardingModal = false
 }
 

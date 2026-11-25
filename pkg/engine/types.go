@@ -102,6 +102,7 @@ type Config struct {
 	OnboardingCompleted    bool   `json:"onboarding_completed"`
 	AutoCheckUpdates       bool   `json:"auto_check_updates"`
 	UpdateRepo             string `json:"update_repo,omitempty"`
+	Language               string `json:"language,omitempty"`
 }
 
 // DefaultConfig returns reasonable default configuration values.

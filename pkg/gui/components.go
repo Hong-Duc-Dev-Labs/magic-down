@@ -7,6 +7,7 @@ import (
 	"github.com/egoist/mygo/ui"
 
 	"magicdown/pkg/engine"
+	"magicdown/pkg/i18n"
 )
 
 // FileCategory classifies downloads for sidebar filtering and icon badges.
@@ -215,7 +216,7 @@ func statusBadge(c *ui.Context, pal Palette, st engine.TaskStatus) {
 
 	ui.Row(c).Padding(3, 8).Gap(5).Radius(999).Background(bg).AlignItems(ui.Center).Shrink(0).Children(func() {
 		ui.Box(c).Width(6).Height(6).Radius(999).Background(fg).Shrink(0)
-		ui.Text(c, string(st)).FontSize(11).FontWeight(600).TextColor(fg).SingleLine()
+		ui.Text(c, i18n.T("status."+string(st))).FontSize(11).FontWeight(600).TextColor(fg).SingleLine()
 	})
 }
 

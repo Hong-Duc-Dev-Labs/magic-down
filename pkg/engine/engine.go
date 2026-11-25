@@ -70,6 +70,7 @@ type persistedConfig struct {
 	OnboardingCompleted    *bool   `json:"onboarding_completed,omitempty"`
 	AutoCheckUpdates       *bool   `json:"auto_check_updates,omitempty"`
 	UpdateRepo             *string `json:"update_repo,omitempty"`
+	Language               *string `json:"language,omitempty"`
 }
 
 // NewEngine initializes a new download engine.
@@ -690,6 +691,7 @@ func (e *Engine) saveConfig() error {
 		OnboardingCompleted:    &cfg.OnboardingCompleted,
 		AutoCheckUpdates:       &cfg.AutoCheckUpdates,
 		UpdateRepo:             &cfg.UpdateRepo,
+		Language:               &cfg.Language,
 	}
 	data, err := json.MarshalIndent(pc, "", "  ")
 	if err != nil {
@@ -748,6 +750,9 @@ func (e *Engine) loadConfig() {
 	}
 	if pc.UpdateRepo != nil {
 		e.config.UpdateRepo = *pc.UpdateRepo
+	}
+	if pc.Language != nil {
+		e.config.Language = *pc.Language
 	}
 	e.limiter.setRate(e.config.SpeedLimitKBps * 1024)
 }

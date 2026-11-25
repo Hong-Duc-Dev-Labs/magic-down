@@ -3,12 +3,14 @@ package gui
 import (
 	"fmt"
 	"time"
+
+	"magicdown/pkg/i18n"
 )
 
 // FormatBytes formats byte counts into human-readable strings (B, KB, MB, GB).
 func FormatBytes(b int64) string {
 	if b < 0 {
-		return "Unknown"
+		return i18n.T("format.unknown")
 	}
 	const (
 		kb = 1024

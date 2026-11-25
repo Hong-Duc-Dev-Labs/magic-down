@@ -4,6 +4,29 @@
 
   const isExtensionEnv = typeof chrome !== "undefined" && Boolean(chrome.runtime && chrome.runtime.id);
   const isTopFrame = window.top === window;
+  const I18N = typeof window !== "undefined" && window.MagicDownI18n ? window.MagicDownI18n : null;
+  function t(key, params) {
+    return I18N ? I18N.t(key, params) : key;
+  }
+  if (isExtensionEnv && chrome.storage && chrome.storage.local && I18N) {
+    chrome.storage.local.get(["language"], (stored) => {
+      if (chrome.runtime.lastError) return;
+      I18N.setLang(I18N.resolveLang(stored && stored.language));
+      lastRenderSignature = "";
+      if (dropdownOpen) renderDropdown();
+    });
+    if (chrome.storage.onChanged) {
+      chrome.storage.onChanged.addListener((changes, areaName) => {
+        if (areaName === "local" && changes.language) {
+          I18N.setLang(I18N.resolveLang(changes.language.newValue));
+          lastRenderSignature = "";
+          if (ddTitleEl) ddTitleEl.textContent = t("overlay.header_title");
+          if (dismissBtnEl) dismissBtnEl.title = t("overlay.dismiss_title");
+          if (dropdownOpen) renderDropdown();
+        }
+      });
+    }
+  }
 
   let networkVideos = [];
   let dismissedVideos = new WeakSet();
@@ -16,7 +39,9 @@
   let countBadge = null;
   let dropdownEl = null;
   let listEl = null;
+  let ddTitleEl = null;
   let ddSubEl = null;
+  let dismissBtnEl = null;
 
   // Media discovered by the MAIN-world sniffer (inject-main.js) in this frame.
   // Everything here is per-frame: a manifest seen in an iframe must not be
@@ -1467,9 +1492,10 @@
     pillBtn.appendChild(countBadge);
 
     const dismissBtn = document.createElement("button");
+    dismissBtnEl = dismissBtn;
     dismissBtn.className = "md-dismiss";
     dismissBtn.type = "button";
-    dismissBtn.title = "Dismiss for this video";
+    dismissBtn.title = t("overlay.dismiss_title");
     dismissBtn.textContent = "×";
     dismissBtn.addEventListener("click", (e) => {
       e.stopPropagation();
@@ -1506,8 +1532,11 @@
 
     const ddHeader = document.createElement("div");
     ddHeader.className = "md-dd-header";
-    ddHeader.innerHTML = `<span class="md-dd-title">SELECT QUALITY & FORMAT</span><span class="md-dd-sub">1-click to MagicDown</span>`;
+    ddHeader.innerHTML = `<span class="md-dd-title"></span><span class="md-dd-sub"></span>`;
+    ddTitleEl = ddHeader.querySelector(".md-dd-title");
     ddSubEl = ddHeader.querySelector(".md-dd-sub");
+    if (ddTitleEl) ddTitleEl.textContent = t("overlay.header_title");
+    if (ddSubEl) ddSubEl.textContent = t("overlay.header_sub");
 
     listEl = document.createElement("div");
     listEl.className = "md-list";
@@ -1593,12 +1622,12 @@
       const ytCount = videos.filter((v) => v.source === "youtube").length;
       const biliCount = videos.filter((v) => v.source === "bilibili").length;
       const dashCount = videos.filter((v) => v.source === "dash").length;
-      if (ytCount > 0) ddSubEl.textContent = `YouTube · ${ytCount} ${ytCount === 1 ? "stream" : "streams"}`;
-      else if (biliCount > 0) ddSubEl.textContent = `Bilibili · ${biliCount} ${biliCount === 1 ? "stream" : "streams"}`;
-      else if (dashCount > 0) ddSubEl.textContent = `DASH · ${dashCount} ${dashCount === 1 ? "quality" : "qualities"}`;
-      else if (videos.some((v) => v.isHLS)) ddSubEl.textContent = "HLS · quality list";
-      else if (videos.length > 0) ddSubEl.textContent = "1-click to MagicDown";
-      else ddSubEl.textContent = sniffDrm || (activeVideo && activeVideo.mediaKeys) ? "DRM protected" : "Unresolved";
+      if (ytCount > 0) ddSubEl.textContent = ytCount === 1 ? t("overlay.sub_youtube_one") : t("overlay.sub_youtube", { n: ytCount });
+      else if (biliCount > 0) ddSubEl.textContent = biliCount === 1 ? t("overlay.sub_bilibili_one") : t("overlay.sub_bilibili", { n: biliCount });
+      else if (dashCount > 0) ddSubEl.textContent = dashCount === 1 ? t("overlay.sub_dash_one") : t("overlay.sub_dash", { n: dashCount });
+      else if (videos.some((v) => v.isHLS)) ddSubEl.textContent = t("overlay.sub_hls");
+      else if (videos.length > 0) ddSubEl.textContent = t("overlay.header_sub");
+      else ddSubEl.textContent = sniffDrm || (activeVideo && activeVideo.mediaKeys) ? t("overlay.sub_drm") : t("overlay.sub_unresolved");
     }
 
     listEl.textContent = "";
@@ -1626,9 +1655,9 @@
       if (v.source === "dash") metaParts.push("DASH");
       else if (v.source === "hls" || v.isHLS) metaParts.push("HLS");
       metaParts.push(v.format || "MP4");
-      if (v.streamType === "progressive" || v.streamType === "muxed" || v.audioUrl) metaParts.push("Video+Audio");
-      else if (v.streamType === "video-only") metaParts.push("Video only");
-      else if (v.streamType === "audio-only") metaParts.push("Audio only");
+      if (v.streamType === "progressive" || v.streamType === "muxed" || v.audioUrl) metaParts.push(t("overlay.video_audio"));
+      else if (v.streamType === "video-only") metaParts.push(t("overlay.video_only"));
+      else if (v.streamType === "audio-only") metaParts.push(t("overlay.audio_only"));
       if (v.size > 0) metaParts.push(formatSize(v.size));
       else if (v.bandwidth > 0) metaParts.push(formatBandwidth(v.bandwidth));
       if (v.plan && v.plan.kind === "range") {
@@ -1647,7 +1676,7 @@
 
       const dlPill = document.createElement("span");
       dlPill.className = "md-dl-pill";
-      dlPill.textContent = "Download";
+      dlPill.textContent = t("overlay.download");
 
       btn.appendChild(left);
       btn.appendChild(dlPill);
@@ -1686,13 +1715,13 @@
             resp = null;
           }
           if (resp && resp.success) {
-            dlPill.textContent = "Sent!";
+            dlPill.textContent = t("overlay.sent");
             dlPill.classList.add("sent");
           } else {
-            dlPill.textContent = "Offline";
+            dlPill.textContent = t("overlay.offline");
           }
         } else {
-          dlPill.textContent = "Sent!";
+          dlPill.textContent = t("overlay.sent");
           dlPill.classList.add("sent");
         }
       });
@@ -1721,7 +1750,7 @@
 
         const meta = document.createElement("span");
         meta.className = "md-meta";
-        meta.textContent = "Audio · MP3";
+        meta.textContent = t("overlay.audio_mp3");
 
         left.appendChild(q);
         left.appendChild(meta);
@@ -1792,7 +1821,7 @@
 
       const badge = document.createElement("span");
       badge.className = "md-q-badge md-thumb-badge";
-      badge.textContent = "Thumb";
+      badge.textContent = t("overlay.thumb_badge");
 
       const metaParts = [thumb.format || "JPG"];
       if (thumb.width > 0 && thumb.height > 0) {
@@ -1808,7 +1837,7 @@
 
       const dlPill = document.createElement("span");
       dlPill.className = "md-dl-pill";
-      dlPill.textContent = "Download";
+      dlPill.textContent = t("overlay.download");
 
       btn.appendChild(left);
       btn.appendChild(dlPill);
@@ -1840,13 +1869,13 @@
             resp = null;
           }
           if (resp && resp.success) {
-            dlPill.textContent = "Sent!";
+            dlPill.textContent = t("overlay.sent");
             dlPill.classList.add("sent");
           } else {
-            dlPill.textContent = "Offline";
+            dlPill.textContent = t("overlay.offline");
           }
         } else {
-          dlPill.textContent = "Sent!";
+          dlPill.textContent = t("overlay.sent");
           dlPill.classList.add("sent");
         }
       });

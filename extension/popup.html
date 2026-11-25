@@ -31,6 +31,8 @@
           </svg>
         </button>
 
+        <button id="langToggleBtn" class="icon-btn" title="Switch Language (VI / EN)" aria-label="Switch language" style="font-size:11px;font-weight:700;padding:0 7px;width:auto;min-width:28px;">EN</button>
+
         <button id="themeToggleBtn" class="icon-btn" title="Toggle Dark / Light Mode" aria-label="Toggle theme">
           <svg id="iconSun" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/>
@@ -48,8 +50,8 @@
       <section class="card control-card">
         <div class="control-row">
           <div class="control-info">
-            <div class="control-title">Auto-Intercept Downloads</div>
-            <div class="control-sub">Accelerate matching browser downloads</div>
+            <div class="control-title" data-i18n="popup.intercept_title">Auto-Intercept Downloads</div>
+            <div class="control-sub" data-i18n="popup.intercept_sub">Accelerate matching browser downloads</div>
           </div>
           <label class="switch">
             <input type="checkbox" id="interceptToggle" />
@@ -61,8 +63,8 @@
 
         <div class="control-row" id="excludeSiteRow">
           <div class="control-info">
-            <div class="control-title">Exclude Current Site</div>
-            <div class="control-sub mono" id="currentSiteLabel">No active web page</div>
+            <div class="control-title" data-i18n="popup.exclude_title">Exclude Current Site</div>
+            <div class="control-sub mono" id="currentSiteLabel" data-i18n="popup.exclude_none">No active web page</div>
           </div>
           <label class="switch">
             <input type="checkbox" id="excludeSiteToggle" />
@@ -78,13 +80,13 @@
             <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>
             <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
           </svg>
-          <input type="url" id="quickUrlInput" placeholder="Paste direct URL to download..." autocomplete="off" />
+          <input type="url" id="quickUrlInput" data-i18n-placeholder="popup.quick_placeholder" placeholder="Paste direct URL to download..." autocomplete="off" />
         </div>
         <button id="sendUrlBtn" class="btn-primary">
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
             <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
           </svg>
-          <span>Download</span>
+          <span data-i18n="popup.download_btn">Download</span>
         </button>
       </section>
 
@@ -94,7 +96,7 @@
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/>
           </svg>
-          <span>Quét &amp; tải toàn bộ trang (Scan Page)</span>
+          <span data-i18n="popup.scan_page_btn">Scan &amp; Download All on Page</span>
         </button>
       </section>
 
@@ -104,7 +106,7 @@
       <!-- Detected Videos on Active Tab (shown when videos found) -->
       <section id="detectedVideosCard" class="card detected-card hidden">
         <div class="panel-header">
-          <span class="section-label">VIDEOS ON THIS PAGE</span>
+          <span class="section-label" data-i18n="popup.detected_videos">VIDEOS ON THIS PAGE</span>
           <span id="detectedVideoCount" class="tab-badge">0</span>
         </div>
         <div id="detectedVideoList" class="detected-list"></div>
@@ -113,11 +115,11 @@
       <!-- Segmented Tabs -->
       <div class="tabs" role="tablist">
         <button id="tabActivityBtn" class="tab active" role="tab" aria-selected="true">
-          <span>Activity</span>
+          <span data-i18n="popup.tab_activity">Activity</span>
           <span id="activityCount" class="tab-badge">0</span>
         </button>
         <button id="tabFiltersBtn" class="tab" role="tab" aria-selected="false">
-          <span>Filters</span>
+          <span data-i18n="popup.tab_filters">Filters</span>
           <span id="extCount" class="tab-badge">0</span>
         </button>
       </div>
@@ -125,8 +127,8 @@
       <!-- Tab Panel: Activity -->
       <section id="panelActivity" class="panel">
         <div class="panel-header">
-          <span class="section-label">RECENT HANDOFFS</span>
-          <button id="clearHistoryBtn" class="ghost-link">Clear</button>
+          <span class="section-label" data-i18n="popup.recent_handoffs">RECENT HANDOFFS</span>
+          <button id="clearHistoryBtn" class="ghost-link" data-i18n="popup.clear">Clear</button>
         </div>
 
         <div id="activityList" class="activity-list"></div>
@@ -137,8 +139,8 @@
               <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
             </svg>
           </div>
-          <div class="empty-title">No recent downloads</div>
-          <div class="empty-sub">Files intercepted or sent to MagicDown will appear here.</div>
+          <div class="empty-title" data-i18n="popup.empty_title">No recent downloads</div>
+          <div class="empty-sub" data-i18n="popup.empty_sub">Files intercepted or sent to MagicDown will appear here.</div>
         </div>
       </section>
 
@@ -146,13 +148,13 @@
       <section id="panelFilters" class="panel hidden">
         <div class="filter-group">
           <div class="panel-header">
-            <span class="section-label">FILE EXTENSIONS</span>
-            <span class="hint-text">Use * for all files</span>
+            <span class="section-label" data-i18n="popup.file_extensions">FILE EXTENSIONS</span>
+            <span class="hint-text" data-i18n="popup.ext_hint">Use * for all files</span>
           </div>
           <div id="extChips" class="chips"></div>
           <div class="chip-add-row">
-            <input type="text" id="addExtInput" placeholder="Add extension (e.g. dmg, tar)" autocomplete="off" />
-            <button id="addExtBtn" class="btn-secondary">Add</button>
+            <input type="text" id="addExtInput" data-i18n-placeholder="popup.ext_placeholder" placeholder="Add extension (e.g. dmg, tar)" autocomplete="off" />
+            <button id="addExtBtn" class="btn-secondary" data-i18n="popup.add">Add</button>
           </div>
         </div>
 
@@ -160,8 +162,8 @@
 
         <div class="filter-row-inline">
           <div class="control-info">
-            <div class="control-title">Minimum File Size</div>
-            <div class="control-sub">Skip files smaller than threshold (0 = all)</div>
+            <div class="control-title" data-i18n="popup.min_size_title">Minimum File Size</div>
+            <div class="control-sub" data-i18n="popup.min_size_sub">Skip files smaller than threshold (0 = all)</div>
           </div>
           <div class="size-input-wrap">
             <input type="number" id="minSizeInput" min="0" max="10240" step="1" value="0" />
@@ -173,13 +175,13 @@
 
         <div class="filter-group">
           <div class="panel-header">
-            <span class="section-label">EXCLUDED DOMAINS</span>
-            <span class="hint-text">Never intercept</span>
+            <span class="section-label" data-i18n="popup.excluded_domains">EXCLUDED DOMAINS</span>
+            <span class="hint-text" data-i18n="popup.never_intercept">Never intercept</span>
           </div>
           <div id="domainChips" class="chips"></div>
           <div class="chip-add-row">
-            <input type="text" id="addDomainInput" placeholder="Add domain (e.g. intranet.local)" autocomplete="off" />
-            <button id="addDomainBtn" class="btn-secondary">Add</button>
+            <input type="text" id="addDomainInput" data-i18n-placeholder="popup.domain_placeholder" placeholder="Add domain (e.g. intranet.local)" autocomplete="off" />
+            <button id="addDomainBtn" class="btn-secondary" data-i18n="popup.add">Add</button>
           </div>
         </div>
       </section>
@@ -192,6 +194,7 @@
     </footer>
   </div>
 
+  <script src="i18n.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>

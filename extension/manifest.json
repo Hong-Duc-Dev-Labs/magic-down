@@ -35,7 +35,7 @@
     },
     {
       "matches": ["http://*/*", "https://*/*"],
-      "js": ["youtube.js", "bilibili.js", "thumbnail.js", "batch-scanner.js", "content.js"],
+      "js": ["i18n.js", "youtube.js", "bilibili.js", "thumbnail.js", "batch-scanner.js", "content.js"],
       "run_at": "document_idle",
       "all_frames": true
     }
