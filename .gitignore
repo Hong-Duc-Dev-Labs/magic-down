@@ -1,0 +1,21 @@
+# Binaries and executables
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Go build cache and test artifacts
+*.part
+*.magicdown
+*.tmp
+temp_downloads/
+downloads/
+
+# IDE / OS files
+.vscode/
+.idea/
+Thumbs.db
+[Dd]esktop.ini
