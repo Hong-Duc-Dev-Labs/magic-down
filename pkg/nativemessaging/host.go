@@ -19,6 +19,7 @@ type InboundMessage struct {
 	Headers       map[string]string `json:"headers,omitempty"`
 	NumSegments   int               `json:"num_segments,omitempty"`
 	ConvertFormat string            `json:"convert_format,omitempty"`
+	Plan          json.RawMessage   `json:"plan,omitempty"`
 	AutoStart     bool              `json:"auto_start,omitempty"`
 }
 
@@ -113,6 +114,7 @@ func (h *Handler) HandleMessage(msgBytes []byte) ([]byte, error) {
 			Headers:       in.Headers,
 			NumSegments:   in.NumSegments,
 			ConvertFormat: in.ConvertFormat,
+			Plan:          in.Plan,
 			AutoStart:     true, // default to starting automatically from browser
 		})
 		if err != nil {

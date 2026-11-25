@@ -24,6 +24,7 @@ type AddTaskRequest struct {
 	Cookies       string            `json:"cookies,omitempty"`
 	Headers       map[string]string `json:"headers,omitempty"`
 	ConvertFormat string            `json:"convert_format,omitempty"`
+	Plan          *DownloadPlan     `json:"plan,omitempty"`
 	AutoStart     bool              `json:"auto_start"`
 }
 
@@ -121,6 +122,17 @@ func generateID() string {
 
 // AddTask creates, stores, and optionally starts a new download job.
 func (e *Engine) AddTask(req AddTaskRequest) (*Task, error) {
+	var plan *DownloadPlan
+	if req.Plan != nil {
+		normalized, err := req.Plan.Normalize(req.URL)
+		if err != nil {
+			return nil, err
+		}
+		plan = normalized
+		if req.URL == "" {
+			req.URL = plan.FirstURL()
+		}
+	}
 	if req.URL == "" {
 		return nil, errors.New("empty URL")
 	}
@@ -142,6 +154,14 @@ func (e *Engine) AddTask(req AddTaskRequest) (*Task, error) {
 	filename := ""
 	if req.Filename != "" {
 		filename = SanitizeFilename(req.Filename)
+	} else if plan != nil {
+		// A plan replaces the page URL as the source of truth, so the page URL
+		// often has no usable name (facebook.com/video or a signed CDN path).
+		name := ExtractFilename(plan.FirstURL(), nil)
+		if ext := plan.Extension(); ext != "" {
+			name = ReplaceExtension(name, ext)
+		}
+		filename = SanitizeFilename(name)
 	}
 	convertFmt, _ := NormalizeImageFormat(req.ConvertFormat)
 	if filename != "" && convertFmt != "" {
@@ -158,7 +178,8 @@ func (e *Engine) AddTask(req AddTaskRequest) (*Task, error) {
 		Cookies:       req.Cookies,
 		Headers:       req.Headers,
 		ConvertFormat: convertFmt,
-		IsHLS:         IsHLSURL(req.URL, ""),
+		Plan:          plan,
+		IsHLS:         plan == nil && IsHLSURL(req.URL, ""),
 		CreatedAt:     time.Now(),
 		limiter:       e.limiter,
 		retryLimit:    cfg.MaxRetries,
@@ -395,9 +416,10 @@ func (e *Engine) processQueue() {
 			go e.processQueue()
 		}()
 
-		// Probe if needed
+		// Probe if needed. A browser-supplied plan already describes every byte
+		// to fetch, so probing the (often signed, range-only) base URL is noise.
 		snap := t.Clone()
-		if snap.TotalBytes <= 0 || snap.SavePath == "" {
+		if snap.Plan == nil && (snap.TotalBytes <= 0 || snap.SavePath == "") {
 			if err := t.Probe(runCtx, e.httpClient, downloadDir); err != nil {
 				if runCtx.Err() != nil {
 					// Paused or cancelled while probing; the status is already set.

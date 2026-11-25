@@ -7,8 +7,10 @@ import (
 	"io"
 )
 
-// MaxMessageSize limits the incoming message size to 1MB to prevent DOS.
-const MaxMessageSize = 1024 * 1024
+// MaxMessageSize bounds one framed JSON message. Download plans carry per-segment
+// URLs (a DASH presentation can list thousands), so the cap must exceed a single
+// job description while still refusing unbounded allocation.
+const MaxMessageSize = 8 * 1024 * 1024
 
 // ReadMessage reads a 4-byte little-endian length-prefixed JSON message from r.
 func ReadMessage(r io.Reader) ([]byte, error) {

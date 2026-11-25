@@ -163,7 +163,7 @@ function sendNativeMessage(payload) {
   });
 }
 
-async function forwardDownload({ url, filename = "", referrer = "", convertFormat = "" }) {
+async function forwardDownload({ url, filename = "", referrer = "", convertFormat = "", plan = null }) {
   const cookies = await getCookiesHeader(url);
   const payload = {
     action: "download",
@@ -175,6 +175,10 @@ async function forwardDownload({ url, filename = "", referrer = "", convertForma
   };
   if (convertFormat) {
     payload.convert_format = convertFormat;
+  }
+  const safePlan = sanitizeDownloadPlan(plan);
+  if (safePlan) {
+    payload.plan = safePlan;
   }
 
   const resp = await sendNativeMessage(payload);
@@ -192,6 +196,63 @@ async function forwardDownload({ url, filename = "", referrer = "", convertForma
 }
 
 // --- Video & HLS Detection ---
+
+const MAX_PLAN_PARTS = 4000;
+
+// The engine re-validates everything; this pass only drops malformed shapes so
+// a broken page cannot push absurd payloads through native messaging.
+function sanitizeDownloadPlan(plan) {
+  if (!plan || typeof plan !== "object") return null;
+  const rawParts = Array.isArray(plan.parts) ? plan.parts.slice(0, MAX_PLAN_PARTS) : [];
+  if (rawParts.length === 0) return null;
+
+  const parts = [];
+  for (const raw of rawParts) {
+    if (!raw || typeof raw !== "object") continue;
+    const part = {};
+    if (typeof raw.url === "string" && raw.url) {
+      part.url = raw.url.slice(0, 4096);
+    }
+    for (const key of ["start", "end"]) {
+      const value = Number(raw[key]);
+      if (Number.isFinite(value) && value > 0) {
+        part[key] = Math.min(Math.floor(value), Number.MAX_SAFE_INTEGER);
+      }
+    }
+    parts.push(part);
+  }
+  if (parts.length === 0) return null;
+
+  const kind = plan.kind === "segments" ? "segments" : plan.kind === "range" ? "range" : "";
+  const safe = {
+    parts,
+    kind: kind || (parts.every((p) => p.url && p.url === parts[0].url) ? "range" : "segments"),
+    url: typeof plan.url === "string" ? plan.url.slice(0, 4096) : "",
+    format: typeof plan.format === "string" ? plan.format.toLowerCase().replace(/[^a-z0-9]/g, "").slice(0, 8) : ""
+  };
+  return safe;
+}
+
+// Manifest text fetch stays in the worker: it has host permissions and the
+// cookies permission, so DASH/HLS manifests behind CORS or login still parse.
+async function fetchManifestText(url) {
+  if (typeof url !== "string" || !/^https?:/i.test(url)) {
+    return { ok: false, error: "unsupported manifest URL" };
+  }
+  try {
+    const resp = await fetch(url, { credentials: "include", cache: "no-store" });
+    if (!resp.ok) {
+      return { ok: false, error: `HTTP ${resp.status}` };
+    }
+    const text = await resp.text();
+    if (text.length > 4 * 1024 * 1024) {
+      return { ok: false, error: "manifest is too large" };
+    }
+    return { ok: true, text, contentType: resp.headers.get("content-type") || "" };
+  } catch (err) {
+    return { ok: false, error: String((err && err.message) || err) };
+  }
+}
 
 function getTabVideoList(tabId) {
   const map = tabVideos.get(tabId);
@@ -580,8 +641,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       url: message.url,
       filename: message.filename || "",
       referrer: message.referrer || "",
-      convertFormat: message.convertFormat || ""
+      convertFormat: message.convertFormat || "",
+      plan: message.plan || null
     }).then(sendResponse);
+    return true;
+  }
+  if (message.type === "fetchManifestText") {
+    fetchManifestText(message.url).then(sendResponse);
     return true;
   }
   if (message.type === "getDetectedVideos") {

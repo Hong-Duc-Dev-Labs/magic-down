@@ -24,6 +24,7 @@ type AddDownloadRequest struct {
 	Cookies       string            `json:"cookies,omitempty"`
 	Headers       map[string]string `json:"headers,omitempty"`
 	ConvertFormat string            `json:"convert_format,omitempty"`
+	Plan          json.RawMessage   `json:"plan,omitempty"`
 	AutoStart     bool              `json:"auto_start"`
 }
 
@@ -166,6 +167,16 @@ func (s *Server) handleAddDownload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var plan *engine.DownloadPlan
+	if len(req.Plan) > 0 {
+		parsed, err := engine.ParseDownloadPlan(req.Plan, req.URL)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("invalid download plan: %v", err), http.StatusBadRequest)
+			return
+		}
+		plan = parsed
+	}
+
 	task, err := s.engine.AddTask(engine.AddTaskRequest{
 		URL:           req.URL,
 		Filename:      req.Filename,
@@ -175,6 +186,7 @@ func (s *Server) handleAddDownload(w http.ResponseWriter, r *http.Request) {
 		Cookies:       req.Cookies,
 		Headers:       req.Headers,
 		ConvertFormat: req.ConvertFormat,
+		Plan:          plan,
 		AutoStart:     req.AutoStart,
 	})
 	if err != nil {

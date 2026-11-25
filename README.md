@@ -11,6 +11,7 @@ A fast, IDM-inspired desktop download manager built in pure Go with **MyGo Nativ
   - Automatic retry with exponential backoff (500ms → 10s) for transient network, 5xx, 408 and 429 failures; retried segments resume from the bytes already written. Configurable `max_retries` (default `3`, `0` disables retries), with a live retry counter per task.
   - One shared token bucket for a global speed limit (`speed_limit_kbps`, `0` = unlimited) enforced across every segment and HLS fragment; raising or lowering it applies to running downloads within ~250ms.
   - Download queue with configurable max concurrent active downloads (default `3`).
+  - Browser media plans: a job can carry byte ranges of one URL (single-file DASH, e.g. Facebook) or a list of separate segment URLs (DASH `.m4s`/`.ts`, e.g. Weibo), which are fetched concurrently and concatenated in order. HLS `#EXT-X-MAP` init sections are included, so fMP4 HLS output is playable.
   - Tunable settings persist to `config.json` next to the state file.
 - **Desktop App (`cmd/magicdown`, `pkg/gui`)**
   - Pure Go **MyGo Native UI** (`github.com/egoist/mygo` v0.10.0) with IDM-inspired toolbar, status sidebar, download list, Add URL modal, and Settings modal (concurrency, segments, retries, speed limit).
@@ -22,6 +23,7 @@ A fast, IDM-inspired desktop download manager built in pure Go with **MyGo Nativ
 - **Chrome / Edge Extension (`extension/`)**
   - Manifest V3 extension that intercepts browser downloads (with enable/disable toggle and configurable file-type filter in popup) and forwards URL, filename, referrer, and cookies to MagicDown.
   - Right-click context menu: **Download with MagicDown**.
+  - Floating video tag with a quality menu for plain `<video>`, HLS, and MSE/`blob:` players. A tiny MAIN-world sniffer reports `URL.createObjectURL`, `addSourceBuffer`, `fetch`/XHR/`sendBeacon` and resource-timing URLs; DASH/MPD manifests are parsed (SegmentTemplate `$Number$`/`$Time$`, SegmentList, SegmentBase byte ranges) into a real quality list and a downloadable plan. Players with no resolvable manifest show an explicit reason (MSE without manifest / DRM / not loaded yet) instead of a dead tag.
   - Popup showing desktop app connection status, interception toggle, extension filter, and quick URL sender.
 
 ## Project Structure

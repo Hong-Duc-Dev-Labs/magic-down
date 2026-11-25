@@ -96,6 +96,41 @@ func ParseM3U8(baseURL string, body string) (variants []HLSVariant, segments []s
 	return variants, segments, scanner.Err()
 }
 
+// ParseHLSInitURI returns the absolute URI of the first EXT-X-MAP init section, or
+// "" when the playlist has none. fMP4 HLS packs an ftyp/moov initialisation
+// segment that is not listed under #EXTINF; without it the concatenated media
+// segments are not playable.
+func ParseHLSInitURI(baseURL, body string) string {
+	base, err := url.Parse(baseURL)
+	if err != nil {
+		return ""
+	}
+	scanner := bufio.NewScanner(strings.NewReader(body))
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if !strings.HasPrefix(line, "#EXT-X-MAP:") {
+			continue
+		}
+		attrs := strings.TrimPrefix(line, "#EXT-X-MAP:")
+		for _, part := range splitHLSAttrs(attrs) {
+			kv := strings.SplitN(strings.TrimSpace(part), "=", 2)
+			if len(kv) != 2 || strings.TrimSpace(kv[0]) != "URI" {
+				continue
+			}
+			ref := strings.Trim(strings.TrimSpace(kv[1]), `"`)
+			if ref == "" {
+				continue
+			}
+			u, err := url.Parse(ref)
+			if err != nil {
+				return ""
+			}
+			return base.ResolveReference(u).String()
+		}
+	}
+	return ""
+}
+
 func splitHLSAttrs(s string) []string {
 	var parts []string
 	var cur strings.Builder
@@ -195,6 +230,12 @@ func (t *Task) runHLSDownload(ctx context.Context, client *http.Client, onUpdate
 			t.fail(fmt.Sprintf("HLS variant parse failed: %v", err), onUpdate)
 			return err
 		}
+	}
+
+	initURI := ParseHLSInitURI(playlistURL, body)
+	if initURI != "" {
+		// The init section is part of the output and must come first.
+		segURLs = append([]string{initURI}, segURLs...)
 	}
 
 	if len(segURLs) == 0 {

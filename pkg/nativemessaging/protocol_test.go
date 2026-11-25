@@ -102,4 +102,37 @@ func TestNativeMessagingIPCForwarding(t *testing.T) {
 	if task.Referrer != "https://example.com" {
 		t.Errorf("expected referrer https://example.com, got %s", task.Referrer)
 	}
+
+	// 4. A media plan must reach the engine intact through host -> IPC.
+	planJSON := json.RawMessage(`{"kind":"range","url":"https://cdn.example.com/v.mp4","format":"mp4","parts":[{"start":0,"end":999},{"start":2000}]}`)
+	planMsg, _ := json.Marshal(InboundMessage{
+		Action:   "download",
+		URL:      "https://example.com/watch?v=42",
+		Filename: "clip.mp4",
+		Plan:     planJSON,
+	})
+	planRespBytes, err := handler.HandleMessage(planMsg)
+	if err != nil {
+		t.Fatalf("HandleMessage plan download error: %v", err)
+	}
+	var planResp OutboundMessage
+	if err := json.Unmarshal(planRespBytes, &planResp); err != nil {
+		t.Fatalf("failed to unmarshal plan response: %v", err)
+	}
+	if !planResp.Success || planResp.TaskID == "" {
+		t.Fatalf("unexpected plan download response: %+v", planResp)
+	}
+	planTask, err := eng.GetTask(planResp.TaskID)
+	if err != nil {
+		t.Fatalf("plan task was not created: %v", err)
+	}
+	if planTask.Plan == nil {
+		t.Fatalf("plan was dropped between native host and engine")
+	}
+	if planTask.Plan.Kind != "range" || len(planTask.Plan.Parts) != 2 {
+		t.Fatalf("unexpected plan in task: %+v", planTask.Plan)
+	}
+	if planTask.IsHLS || planTask.SupportsRanges {
+		t.Errorf("plan task must not be flagged as HLS/ranged: %+v", planTask)
+	}
 }

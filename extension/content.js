@@ -16,6 +16,99 @@
   let countBadge = null;
   let dropdownEl = null;
   let listEl = null;
+  let ddSubEl = null;
+
+  // Media discovered by the MAIN-world sniffer (inject-main.js) in this frame.
+  // Everything here is per-frame: a manifest seen in an iframe must not be
+  // offered for a video in the top document.
+  const SNIFF_MSG = "magicdown:media-sniff:v1";
+  const sniffed = new Map(); // url -> { kind, mime, at }
+  const manifestCache = new Map(); // manifest url -> { at, ok, kind, variants, reason }
+  const pendingManifests = new Set();
+  const videoTiming = new WeakMap(); // video -> { at }
+  const hookedVideos = new WeakSet();
+  const videoIds = new WeakMap();
+  let nextVideoId = 0;
+  let sniffDrm = false;
+  let sniffMime = "";
+  let hoveredVideo = null;
+  let positionFrame = 0;
+  let lastRenderSignature = "";
+  const MAX_MANIFEST_CACHE = 16;
+  const MAX_PLAN_PARTS = 4000;
+
+  function manifestKindFor(url, contentType) {
+    let path = "";
+    try {
+      path = new URL(url, location.href).pathname.toLowerCase();
+    } catch {
+      path = String(url).split("?")[0].toLowerCase();
+    }
+    if (path.endsWith(".mpd")) return "dash";
+    if (path.endsWith(".m3u8")) return "hls";
+    const ct = String(contentType || "").toLowerCase();
+    if (ct.includes("dash+xml")) return "dash";
+    if (ct.includes("mpegurl")) return "hls";
+    return "";
+  }
+
+  function isDirectMediaURL(url) {
+    const path = String(url).split("?")[0].split("#")[0].toLowerCase();
+    return /\.(mp4|webm|mkv|mov|m4v)$/.test(path);
+  }
+
+  function ingestSniff(item) {
+    if (!item || typeof item !== "object") return;
+    const kind = typeof item.k === "string" ? item.k : "";
+    const mime = typeof item.m === "string" ? item.m.slice(0, 120) : "";
+    const url = typeof item.u === "string" ? item.u.slice(0, 4096) : "";
+    const at = Number.isFinite(item.t) ? item.t : Date.now();
+
+    if (kind === "mime") {
+      if (mime) sniffMime = mime;
+      return;
+    }
+    if (kind === "drm") {
+      sniffDrm = true;
+      return;
+    }
+    if (!url) return;
+    if (!/^https?:/i.test(url) && !url.startsWith("blob:")) return;
+
+    sniffed.set(url, { kind, mime, at });
+    if (sniffed.size > 300) {
+      // Drop the oldest entry; the ring is ordered by insertion on purpose.
+      sniffed.delete(sniffed.keys().next().value);
+    }
+
+    const mediaKind = manifestKindFor(url, mime);
+    if (mediaKind) {
+      resolveManifest(url, mediaKind);
+      scheduleRefresh();
+    }
+  }
+
+  // Main-world messages are only trusted when this window sent them; a
+  // cross-origin frame cannot forge event.source.
+  window.addEventListener(
+    "message",
+    (event) => {
+      if (event.source !== window) return;
+      const data = event.data;
+      if (!data || data.__mdSniff !== SNIFF_MSG || !Array.isArray(data.items)) return;
+      for (const item of data.items) ingestSniff(item);
+      if (data.replay) scheduleRefresh();
+    },
+    false
+  );
+
+  // The MAIN-world sniffer may have seen the manifest before this script ran;
+  // ask it to replay its bounded ring buffer now that the listener exists.
+  try {
+    window.postMessage({ __mdSniff: "magicdown:media-sniff-ready:v1" }, "*");
+  } catch {
+    // ignore
+  }
 
   function formatSize(bytes) {
     if (!bytes || bytes <= 0) return "";
@@ -42,21 +135,42 @@
 
   // Walk the document plus open shadow roots: players are often mounted inside
   // web components, where document.querySelectorAll("video") cannot see them.
+  // Discovered roots are cached and only rediscovered on a short interval so a
+  // busy feed does not pay a full "*" traversal every refresh.
+  const shadowRoots = new Set();
+  let lastShadowScan = 0;
+
+  function discoverShadowRoots(scope) {
+    const stack = [scope];
+    let guard = 0;
+    while (stack.length > 0 && guard < 4000) {
+      guard++;
+      const node = stack.pop();
+      for (const el of node.querySelectorAll("*")) {
+        if (!el.shadowRoot) continue;
+        if (!shadowRoots.has(el.shadowRoot)) shadowRoots.add(el.shadowRoot);
+        stack.push(el.shadowRoot);
+      }
+    }
+  }
+
   function collectVideoElements(root) {
+    const now = performance.now();
+    if (now - lastShadowScan > 400) {
+      lastShadowScan = now;
+      discoverShadowRoots(root || document);
+    }
     const found = [];
     const seen = new Set();
-    const visit = (scope) => {
+    const scopes = [root || document];
+    for (const shadowRoot of shadowRoots) scopes.push(shadowRoot);
+    for (const scope of scopes) {
       for (const video of scope.querySelectorAll("video")) {
-        if (!seen.has(video)) {
-          seen.add(video);
-          found.push(video);
-        }
+        if (!video.isConnected || seen.has(video)) continue;
+        seen.add(video);
+        found.push(video);
       }
-      for (const el of scope.querySelectorAll("*")) {
-        if (el.shadowRoot) visit(el.shadowRoot);
-      }
-    };
-    visit(root || document);
+    }
     return found;
   }
 
@@ -91,15 +205,548 @@
     return found;
   }
 
+  // --- Manifest resolution (DASH/MPD and HLS) ---------------------------------
+  //
+  // The page's own player fetches the manifest; the sniffer only sees the URL.
+  // Fetching it needs the page's cookies, so the extension background worker
+  // does the request (it holds host permissions and cookie access) and the
+  // parsing happens here, where DOMParser exists.
+
+  function intAttr(el, name, fallback) {
+    const raw = el.getAttribute(name);
+    if (raw === null) return fallback;
+    const num = Number.parseInt(raw, 10);
+    return Number.isFinite(num) ? num : fallback;
+  }
+
+  function kids(el, name) {
+    if (!el) return [];
+    const out = [];
+    for (const child of el.children) {
+      if (child.localName === name) out.push(child);
+    }
+    return out;
+  }
+
+  function firstKid(el, name) {
+    return kids(el, name)[0] || null;
+  }
+
+  function dashBase(el, inherited) {
+    const baseEl = firstKid(el, "BaseURL");
+    if (!baseEl) return inherited;
+    const text = (baseEl.textContent || "").trim();
+    if (!text) return inherited;
+    try {
+      return new URL(text, inherited).toString();
+    } catch {
+      return inherited;
+    }
+  }
+
+  function resolveDashURL(ref, base) {
+    try {
+      return new URL(ref, base).toString();
+    } catch {
+      return ref;
+    }
+  }
+
+  // DASH byte ranges use "start-end" (no "bytes=" prefix).
+  function parseDashRange(value) {
+    if (!value) return null;
+    const spec = String(value).trim().replace(/^bytes=/i, "");
+    const dash = spec.indexOf("-");
+    if (dash < 0) return null;
+    const start = Number.parseInt(spec.slice(0, dash), 10);
+    const end = Number.parseInt(spec.slice(dash + 1), 10);
+    if (!Number.isFinite(start) || start < 0) return null;
+    if (!Number.isFinite(end) || end < start) return { start, end: 0 };
+    return { start, end };
+  }
+
+  // ISO-8601 duration ("PT1H2M3.5S") -> seconds.
+  function parseISODuration(value) {
+    if (!value) return 0;
+    const match = /^P(?:(\d+(?:\.\d+)?)Y)?(?:(\d+(?:\.\d+)?)M)?(?:(\d+(?:\.\d+)?)D)?(?:T(?:(\d+(?:\.\d+)?)H)?(?:(\d+(?:\.\d+)?)M)?(?:(\d+(?:\.\d+)?)S)?)?$/i.exec(
+      String(value).trim()
+    );
+    if (!match) return 0;
+    const num = (v) => (v ? Number.parseFloat(v) : 0);
+    return (
+      num(match[1]) * 365 * 24 * 3600 +
+      num(match[2]) * 30 * 24 * 3600 +
+      num(match[3]) * 24 * 3600 +
+      num(match[4]) * 3600 +
+      num(match[5]) * 60 +
+      num(match[6])
+    );
+  }
+
+  function expandDASH(template, ctx, segment) {
+    return String(template)
+      .replace(/\$\$/g, "\u0000")
+      .replace(/\$([A-Za-z]+)(?:%0(\d+)d)?\$/g, (whole, name, width) => {
+        let value = null;
+        switch (name) {
+          case "RepresentationID":
+            value = ctx.repID || "";
+            break;
+          case "Bandwidth":
+            value = String(ctx.bandwidth || 0);
+            break;
+          case "Number":
+            value = String(segment ? segment.number : 0);
+            break;
+          case "Time":
+            value = String(segment ? segment.time : 0);
+            break;
+          default:
+            return whole;
+        }
+        if (width && (name === "Number" || name === "Time")) {
+          return value.padStart(Number.parseInt(width, 10) || 0, "0");
+        }
+        return value;
+      })
+      .replace(/\u0000/g, "$");
+  }
+
+  function dashFormat(mime) {
+    return String(mime || "").toLowerCase().includes("webm") ? "webm" : "mp4";
+  }
+
+  function isVideoRepresentation(rep, mime, contentType, codecs) {
+    const m = String(mime || "").toLowerCase();
+    const c = String(contentType || "").toLowerCase();
+    const cd = String(codecs || "").toLowerCase();
+    if (c === "text" || m.startsWith("text/")) return false;
+    if (cd.startsWith("wvtt") || cd.startsWith("stpp") || cd.startsWith("tx3g")) return false;
+    if (c === "audio" || m.startsWith("audio/")) return false;
+    if (c === "video" || m.startsWith("video/")) return true;
+    return rep.hasAttribute("height") || rep.hasAttribute("width");
+  }
+
+  function buildTemplatePlan(tmpl, base, ctx) {
+    const mediaTemplate = tmpl.getAttribute("media");
+    if (!mediaTemplate) return null;
+    const initTemplate = tmpl.getAttribute("initialization");
+    const startNumber = intAttr(tmpl, "startNumber", 1);
+    const timescale = intAttr(tmpl, "timescale", 1) || 1;
+    const segDuration = intAttr(tmpl, "duration", 0);
+
+    const segments = [];
+    const timeline = firstKid(tmpl, "SegmentTimeline");
+    if (timeline) {
+      let time = 0;
+      let number = startNumber;
+      outer: for (const s of kids(timeline, "S")) {
+        if (s.hasAttribute("t")) {
+          const raw = Number(s.getAttribute("t"));
+          if (Number.isFinite(raw) && raw >= 0) time = raw;
+        }
+        const duration = Number(s.getAttribute("d"));
+        if (!Number.isFinite(duration) || duration <= 0) continue;
+        let repeat = Number(s.getAttribute("r"));
+        if (!Number.isFinite(repeat) || repeat < 0) repeat = 0;
+        for (let i = 0; i <= repeat; i++) {
+          segments.push({ number, time });
+          number++;
+          time += duration;
+          if (segments.length >= MAX_PLAN_PARTS) break outer;
+        }
+      }
+    } else if (segDuration > 0 && ctx.duration > 0) {
+      const count = Math.min(MAX_PLAN_PARTS, Math.ceil((ctx.duration * timescale) / segDuration));
+      for (let i = 0; i < count; i++) {
+        segments.push({ number: startNumber + i, time: i * segDuration });
+      }
+    }
+
+    const parts = [];
+    if (initTemplate) {
+      parts.push({ url: resolveDashURL(expandDASH(initTemplate, ctx, null), base) });
+    }
+    for (const segment of segments) {
+      parts.push({ url: resolveDashURL(expandDASH(mediaTemplate, ctx, segment), base) });
+    }
+    if (parts.length === 0) return null;
+    return { kind: "segments", url: base, format: dashFormat(ctx.mime), parts };
+  }
+
+  function buildSegmentListPlan(list, base, mime) {
+    const parts = [];
+    const initEl = firstKid(list, "Initialization");
+    if (initEl) {
+      const source = initEl.getAttribute("sourceURL");
+      const range = parseDashRange(initEl.getAttribute("range"));
+      const part = { url: source ? resolveDashURL(source, base) : base };
+      if (range) {
+        part.start = range.start;
+        if (range.end > 0) part.end = range.end;
+      }
+      parts.push(part);
+    }
+    for (const segEl of kids(list, "SegmentURL")) {
+      const media = segEl.getAttribute("media");
+      const range = parseDashRange(segEl.getAttribute("mediaRange"));
+      const part = { url: media ? resolveDashURL(media, base) : base };
+      if (range) {
+        part.start = range.start;
+        if (range.end > 0) part.end = range.end;
+      }
+      parts.push(part);
+      if (parts.length >= MAX_PLAN_PARTS) break;
+    }
+    if (parts.length === 0) return null;
+    return { kind: "segments", url: base, format: dashFormat(mime), parts };
+  }
+
+  function buildDASHPlan(ctx) {
+    const { rep, adaptation, period, base, mime } = ctx;
+
+    const segmentBase =
+      firstKid(rep, "SegmentBase") || firstKid(adaptation, "SegmentBase") || firstKid(period, "SegmentBase");
+    if (segmentBase) {
+      const indexRange = parseDashRange(segmentBase.getAttribute("indexRange"));
+      const initEl = firstKid(segmentBase, "Initialization");
+      const initRange = parseDashRange(initEl && initEl.getAttribute("range"));
+      let headerEnd = -1;
+      if (indexRange) headerEnd = Math.max(headerEnd, indexRange.end);
+      if (initRange) headerEnd = Math.max(headerEnd, initRange.end);
+      // One URL, byte ranges only: header (ftyp/moov/sidx) plus the media tail.
+      const parts =
+        headerEnd >= 0
+          ? [{ start: 0, end: headerEnd }, { start: headerEnd + 1 }]
+          : [{ start: 0 }];
+      return { kind: "range", url: base, format: dashFormat(mime), parts };
+    }
+
+    const template =
+      firstKid(rep, "SegmentTemplate") ||
+      firstKid(adaptation, "SegmentTemplate") ||
+      firstKid(period, "SegmentTemplate");
+    if (template) {
+      const plan = buildTemplatePlan(template, base, ctx);
+      if (plan) return plan;
+    }
+
+    const list =
+      firstKid(rep, "SegmentList") || firstKid(adaptation, "SegmentList") || firstKid(period, "SegmentList");
+    if (list) {
+      const plan = buildSegmentListPlan(list, base, mime);
+      if (plan) return plan;
+    }
+
+    // Progressive/on-demand representation: the BaseURL is the whole file.
+    return { kind: "range", url: base, format: dashFormat(mime), parts: [{ start: 0 }] };
+  }
+
+  function parseDASHManifest(manifestURL, text) {
+    let doc = null;
+    try {
+      doc = new DOMParser().parseFromString(text, "application/xml");
+    } catch {
+      return { ok: false, reason: "MPD could not be parsed" };
+    }
+    if (!doc || doc.getElementsByTagName("parsererror").length > 0) {
+      return { ok: false, reason: "MPD is not valid XML" };
+    }
+    const mpd = doc.documentElement;
+    if (!mpd || mpd.localName !== "MPD") {
+      return { ok: false, reason: "response is not an MPD" };
+    }
+
+    const mpdBase = dashBase(mpd, manifestURL);
+    const period = kids(mpd, "Period")[0];
+    if (!period) return { ok: false, reason: "MPD has no Period" };
+    const periodBase = dashBase(period, mpdBase);
+    const duration =
+      parseISODuration(period.getAttribute("duration")) ||
+      parseISODuration(mpd.getAttribute("mediaPresentationDuration")) ||
+      0;
+
+    const variants = [];
+    for (const adaptation of kids(period, "AdaptationSet")) {
+      const adaptationBase = dashBase(adaptation, periodBase);
+      const adaptationMime = adaptation.getAttribute("mimeType") || "";
+      const adaptationContent = adaptation.getAttribute("contentType") || "";
+      for (const rep of kids(adaptation, "Representation")) {
+        const mime = rep.getAttribute("mimeType") || adaptationMime;
+        const contentType = rep.getAttribute("contentType") || adaptationContent;
+        const codecs = rep.getAttribute("codecs") || adaptation.getAttribute("codecs") || "";
+        if (!isVideoRepresentation(rep, mime, contentType, codecs)) continue;
+
+        const base = dashBase(rep, adaptationBase);
+        const ctx = {
+          rep,
+          adaptation,
+          period,
+          base,
+          mime,
+          duration,
+          repID: rep.getAttribute("id") || "",
+          bandwidth: intAttr(rep, "bandwidth", 0)
+        };
+        const plan = buildDASHPlan(ctx);
+        if (!plan) continue;
+
+        const height = intAttr(rep, "height", intAttr(adaptation, "height", 0));
+        const width = intAttr(rep, "width", intAttr(adaptation, "width", 0));
+        const bandwidth = ctx.bandwidth;
+        variants.push({
+          url: plan.url,
+          quality: height > 0 ? `${height}p` : bandwidth > 0 ? `${(bandwidth / 1000000).toFixed(1)} Mbps` : "DASH",
+          height,
+          width,
+          bandwidth,
+          format: dashFormat(mime) === "webm" ? "WebM" : "MP4",
+          isHLS: false,
+          source: "dash",
+          plan
+        });
+        if (variants.length >= 40) break;
+      }
+    }
+
+    if (variants.length === 0) {
+      return { ok: false, reason: "MPD lists no video representation MagicDown can download" };
+    }
+    variants.sort((a, b) => (b.height || 0) - (a.height || 0) || (b.bandwidth || 0) - (a.bandwidth || 0));
+    return { ok: true, kind: "dash", variants };
+  }
+
+  function parseResolutionHeight(resolution) {
+    const parts = String(resolution || "").toLowerCase().split("x");
+    if (parts.length !== 2) return 0;
+    const h = Number.parseInt(parts[1], 10);
+    return Number.isFinite(h) ? h : 0;
+  }
+
+  // HLS master variant parsing for manifests discovered by the sniffer. The
+  // desktop engine performs the actual playlist download.
+  function parseHLSManifest(manifestURL, text) {
+    const variants = [];
+    let pending = null;
+    for (const rawLine of String(text).split(/\r?\n/)) {
+      const line = rawLine.trim();
+      if (!line) continue;
+      if (line.startsWith("#EXT-X-STREAM-INF:")) {
+        const attrs = line.slice("#EXT-X-STREAM-INF:".length);
+        const bandwidth = /BANDWIDTH=(\d+)/i.exec(attrs);
+        const resolution = /RESOLUTION=(\d+x\d+)/i.exec(attrs);
+        const height = parseResolutionHeight(resolution ? resolution[1] : "");
+        pending = {
+          height,
+          bandwidth: bandwidth ? Number.parseInt(bandwidth[1], 10) : 0
+        };
+        continue;
+      }
+      if (line.startsWith("#") || !pending) continue;
+      try {
+        variants.push({
+          url: new URL(line, manifestURL).toString(),
+          quality: pending.height > 0 ? `${pending.height}p` : pending.bandwidth > 0 ? `${(pending.bandwidth / 1000000).toFixed(1)} Mbps` : "HLS",
+          height: pending.height,
+          bandwidth: pending.bandwidth,
+          format: "HLS",
+          isHLS: true,
+          source: "hls"
+        });
+      } catch {
+        // ignore malformed variant URI
+      }
+      pending = null;
+    }
+    if (variants.length > 0) {
+      variants.sort((a, b) => (b.height || 0) - (a.height || 0) || (b.bandwidth || 0) - (a.bandwidth || 0));
+      return { ok: true, kind: "hls", variants };
+    }
+    if (String(text).includes("#EXTINF:")) {
+      return {
+        ok: true,
+        kind: "hls",
+        variants: [{ url: manifestURL, quality: "Original", format: "HLS", isHLS: true, source: "hls" }]
+      };
+    }
+    return { ok: false, reason: "playlist has no variants or segments" };
+  }
+
+  async function fetchManifestText(url) {
+    // Preferred: service worker fetch (page cookies, no CORS wall).
+    if (isExtensionEnv) {
+      try {
+        const resp = await chrome.runtime.sendMessage({ type: "fetchManifestText", url });
+        if (resp && resp.ok && typeof resp.text === "string" && resp.text) {
+          return { text: resp.text, contentType: resp.contentType || "" };
+        }
+      } catch {
+        // fall through to page fetch
+      }
+    }
+    try {
+      const resp = await fetch(url, { credentials: "include" });
+      if (!resp.ok) return { text: "", contentType: "" };
+      return { text: await resp.text(), contentType: resp.headers.get("content-type") || "" };
+    } catch {
+      return { text: "", contentType: "" };
+    }
+  }
+
+  function videoKey(video) {
+    if (!video) return "none";
+    let id = videoIds.get(video);
+    if (!id) {
+      id = ++nextVideoId;
+      videoIds.set(video, id);
+    }
+    return String(id);
+  }
+
+  async function resolveManifest(url, hintedKind) {
+    if (manifestCache.has(url) || pendingManifests.has(url)) return;
+    pendingManifests.add(url);
+    try {
+      const fetched = await fetchManifestText(url);
+      let entry;
+      if (!fetched.text) {
+        entry = { ok: false, reason: "manifest could not be fetched with page credentials" };
+      } else {
+        const kind = manifestKindFor(url, fetched.contentType) || hintedKind;
+        entry =
+          kind === "dash"
+            ? parseDASHManifest(url, fetched.text)
+            : kind === "hls"
+              ? parseHLSManifest(url, fetched.text)
+              : { ok: false, reason: "unrecognised manifest type" };
+      }
+      entry.at = Date.now();
+      entry.url = url;
+      manifestCache.set(url, entry);
+      while (manifestCache.size > MAX_MANIFEST_CACHE) {
+        manifestCache.delete(manifestCache.keys().next().value);
+      }
+    } catch (err) {
+      manifestCache.set(url, {
+        ok: false,
+        reason: `manifest parsing failed: ${String((err && err.message) || err)}`,
+        at: Date.now(),
+        url
+      });
+    } finally {
+      pendingManifests.delete(url);
+      scheduleRefresh();
+    }
+  }
+
+  function resolvedManifests() {
+    const list = [];
+    for (const entry of manifestCache.values()) {
+      if (entry && entry.ok) list.push(entry);
+    }
+    list.sort((a, b) => (b.at || 0) - (a.at || 0));
+    return list;
+  }
+
+  // Video-scoped manifests: prefer ones discovered around the moment this
+  // player started loading, so a feed with several videos offers the manifest
+  // that belongs to the hovered/centred player rather than the newest tab-wide.
+  function manifestsForVideo(video) {
+    const all = resolvedManifests();
+    if (all.length <= 1) return all;
+    const timing = video ? videoTiming.get(video) : null;
+    if (!timing || !timing.at) return all.slice(0, 3);
+    const near = all.filter((entry) => entry.at >= timing.at - 3000 && entry.at <= timing.at + 60000);
+    return (near.length > 0 ? near : all).slice(0, 3);
+  }
+
+  function sniffedDirectVideos() {
+    const found = [];
+    for (const [url, meta] of sniffed) {
+      if (!isDirectMediaURL(url)) continue;
+      if (/[?&](?:bytestart|byteend)=/i.test(url)) continue;
+      const format = url.toLowerCase().endsWith(".webm") ? "WebM" : "MP4";
+      found.push({ url, quality: "Original", format, isHLS: false, source: meta.kind || "sniff", at: meta.at });
+    }
+    found.sort((a, b) => (b.at || 0) - (a.at || 0));
+    return found.slice(0, 3);
+  }
+
   function getCombinedVideos() {
     const map = new Map();
-    for (const v of networkVideos) {
-      if (v && v.url) map.set(v.url, v);
+    const push = (key, item) => {
+      if (!item || !item.url || map.has(key)) return;
+      map.set(key, item);
+    };
+
+    const planURLs = new Set();
+    let manifestCount = 0;
+    const manifestList = manifestsForVideo(activeVideo);
+    const variantURLs = new Set();
+    for (const manifest of manifestList) {
+      for (const variant of manifest.variants) {
+        if (variant.url !== manifest.url) variantURLs.add(variant.url);
+      }
     }
-    for (const v of collectDOMVideos(activeVideo)) {
-      if (!map.has(v.url)) map.set(v.url, v);
+    for (const manifest of manifestList) {
+      // A media playlist that is also a variant of a resolved master is already
+      // represented by that master's quality list; listing it as "Original"
+      // would offer the same stream twice.
+      if (
+        manifest.variants.length === 1 &&
+        manifest.variants[0].quality === "Original" &&
+        variantURLs.has(manifest.url)
+      ) {
+        continue;
+      }
+      for (const variant of manifest.variants) {
+        const key = `${variant.url}|${variant.quality}|${variant.height || 0}|${variant.bandwidth || 0}|${variant.plan ? "plan" : ""}`;
+        push(key, { ...variant, manifestURL: manifest.url });
+        manifestCount++;
+        if (variant.plan) {
+          for (const part of variant.plan.parts) {
+            if (part.url) planURLs.add(part.url);
+          }
+        }
+      }
+    }
+
+    // A resolved manifest is authoritative for this player. Raw webRequest /
+    // sniffer candidates would only duplicate its byte-range or segment probes
+    // (e.g. the same .mp4 seen mid-range-request) as bogus "Original" entries.
+    const directCandidates = collectDOMVideos(activeVideo);
+    for (const item of directCandidates) {
+      if (planURLs.has(item.url)) continue;
+      push(item.url, item);
+    }
+    if (manifestCount === 0) {
+      for (const item of networkVideos) push(item.url, item);
+      for (const item of sniffedDirectVideos()) push(item.url, item);
     }
     return Array.from(map.values());
+  }
+
+  function unavailableReason(video) {
+    if (!video) return "No <video> element found in this frame. If the player is an iframe, scroll it into view to wake the frame.";
+    const src = video.currentSrc || video.src || "";
+    const isMse = src.startsWith("blob:") || Boolean(video.srcObject);
+    if (sniffDrm || video.mediaKeys) {
+      return "DRM-protected (EME) stream. MagicDown cannot download encrypted media.";
+    }
+    if (!isMse) {
+      return "No downloadable media URL found for this player yet. Press play, then reopen this menu.";
+    }
+    if (video.srcObject && !src.startsWith("blob:")) {
+      return "srcObject/captureStream player (no file URL exists). Nothing to hand to the desktop engine.";
+    }
+    if (pendingManifests.size > 0) {
+      return "Manifest found and still resolving. Reopen this menu in a moment.";
+    }
+    if (video.readyState === 0) {
+      return "MSE player has not buffered media yet and no MPD/M3U8 has been seen. Press play, then reopen this menu.";
+    }
+    const mimeNote = sniffMime ? ` (MSE mime: ${sniffMime})` : "";
+    return `MSE/blob stream with no MPD or M3U8 exposed by this page${mimeNote}. MagicDown has no file URL to hand to the desktop engine.`;
   }
 
   function ensureShadowUI() {
@@ -335,6 +982,7 @@
     const ddHeader = document.createElement("div");
     ddHeader.className = "md-dd-header";
     ddHeader.innerHTML = `<span class="md-dd-title">SELECT QUALITY & FORMAT</span><span class="md-dd-sub">1-click to MagicDown</span>`;
+    ddSubEl = ddHeader.querySelector(".md-dd-sub");
 
     listEl = document.createElement("div");
     listEl.className = "md-list";
@@ -362,13 +1010,31 @@
     }
 
     const videos = getCombinedVideos();
+    const reason = videos.length === 0 ? unavailableReason(activeVideo) : "";
+    const signature = `${videoKey(activeVideo)}::${reason}::${videos
+      .map((v) => `${v.url}|${v.quality}|${v.format}|${v.plan ? "p" : ""}`)
+      .join(";")}`;
+
+    if (signature === lastRenderSignature) {
+      dropdownEl.classList.remove("hidden");
+      return;
+    }
+    lastRenderSignature = signature;
+
+    if (ddSubEl) {
+      const dashCount = videos.filter((v) => v.source === "dash").length;
+      if (dashCount > 0) ddSubEl.textContent = `DASH · ${dashCount} ${dashCount === 1 ? "quality" : "qualities"}`;
+      else if (videos.some((v) => v.isHLS)) ddSubEl.textContent = "HLS · quality list";
+      else if (videos.length > 0) ddSubEl.textContent = "1-click to MagicDown";
+      else ddSubEl.textContent = sniffDrm || (activeVideo && activeVideo.mediaKeys) ? "DRM protected" : "Unresolved";
+    }
+
     listEl.textContent = "";
 
     if (videos.length === 0) {
       const empty = document.createElement("div");
       empty.className = "md-empty";
-      empty.textContent =
-        "No direct video URL detected. This player streams via blob/MSE (or DRM), so MagicDown has no file URL to hand to the desktop app.";
+      empty.textContent = reason;
       listEl.appendChild(empty);
     }
 
@@ -384,9 +1050,18 @@
       q.className = "md-q-badge";
       q.textContent = v.quality || "Original";
 
-      const metaParts = [v.format || "MP4"];
+      const metaParts = [];
+      if (v.source === "dash") metaParts.push("DASH");
+      else if (v.source === "hls" || v.isHLS) metaParts.push("HLS");
+      metaParts.push(v.format || "MP4");
       if (v.size > 0) metaParts.push(formatSize(v.size));
       else if (v.bandwidth > 0) metaParts.push(formatBandwidth(v.bandwidth));
+      if (v.plan && v.plan.kind === "range") {
+        const parts = v.plan.parts.length;
+        metaParts.push(parts > 1 ? `${parts} ranges` : "1 range");
+      } else if (v.plan && v.plan.kind === "segments") {
+        metaParts.push(`${v.plan.parts.length} segments`);
+      }
 
       const meta = document.createElement("span");
       meta.className = "md-meta";
@@ -404,15 +1079,23 @@
 
       btn.addEventListener("click", async (e) => {
         e.stopPropagation();
-        const ext = v.isHLS ? "ts" : (v.format || "mp4").toLowerCase();
+        let ext = v.isHLS ? "ts" : String(v.format || "mp4").toLowerCase();
+        if (v.plan && v.plan.format) ext = v.plan.format;
         const filename = sanitizeTitleFilename(ext);
         if (isExtensionEnv) {
-          const resp = await chrome.runtime.sendMessage({
+          const payload = {
             type: "download",
             url: v.url,
             filename,
             referrer: window.location.href
-          });
+          };
+          if (v.plan) payload.plan = v.plan;
+          let resp = null;
+          try {
+            resp = await chrome.runtime.sendMessage(payload);
+          } catch {
+            resp = null;
+          }
           if (resp && resp.success) {
             dlPill.textContent = "Sent!";
             dlPill.classList.add("sent");
@@ -442,13 +1125,22 @@
   }
 
   function positionOverlay() {
+    positionFrame = 0;
     if (!overlayEl || !activeVideo || !activeVideo.isConnected || dismissedVideos.has(activeVideo)) {
       if (overlayEl) overlayEl.classList.add("hidden");
       return;
     }
 
     const rect = activeVideo.getBoundingClientRect();
-    if (rect.width < 160 || rect.height < 90 || rect.bottom < 0 || rect.top > window.innerHeight) {
+    const viewportH = window.innerHeight;
+    if (
+      rect.width < 160 ||
+      rect.height < 90 ||
+      rect.bottom <= 0 ||
+      rect.top >= viewportH ||
+      rect.right <= 0 ||
+      rect.left >= window.innerWidth
+    ) {
       overlayEl.classList.add("hidden");
       return;
     }
@@ -460,37 +1152,115 @@
     countBadge.textContent = String(videos.length);
     countBadge.style.display = videos.length > 0 ? "" : "none";
 
-    const top = Math.max(8, rect.top + 10);
+    // Pin inside the active video's own box (top-right). Staying inside the box
+    // is what keeps the tag off a neighbouring feed video's controls.
+    const top = Math.min(Math.max(8, rect.top + 10), Math.max(8, viewportH - 64));
     const right = Math.max(8, window.innerWidth - rect.right + 10);
     overlayEl.style.top = `${top}px`;
     overlayEl.style.right = `${right}px`;
+    overlayEl.style.maxWidth = `${Math.max(200, Math.min(360, rect.width - 20))}px`;
     overlayEl.classList.remove("hidden");
     renderDropdown();
   }
 
+  function schedulePosition() {
+    if (positionFrame) return;
+    positionFrame = requestAnimationFrame(positionOverlay);
+  }
+
+  // A feed can hover/auto-play several players; prefer the hovered one, then a
+  // playing video near the viewport centre so the tag follows what the user is
+  // actually watching instead of the largest box on the page.
   function findPrimaryVideo() {
     const all = collectVideoElements(document);
+    const viewportW = window.innerWidth;
+    const viewportH = window.innerHeight;
+    const visible = [];
+    for (const video of all) {
+      if (dismissedVideos.has(video)) continue;
+      const r = video.getBoundingClientRect();
+      if (r.width < 160 || r.height < 90) continue;
+      if (r.bottom <= 0 || r.top >= viewportH || r.right <= 0 || r.left >= viewportW) continue;
+      visible.push({ video, r });
+    }
+    if (visible.length === 0) {
+      // Fall back to the largest element even if the feed just scrolled it out;
+      // positionOverlay() hides the tag until it is visible again.
+      let best = null;
+      let bestArea = 0;
+      for (const video of all) {
+        if (dismissedVideos.has(video)) continue;
+        const r = video.getBoundingClientRect();
+        const area = r.width * r.height;
+        if (r.width >= 160 && r.height >= 90 && area > bestArea) {
+          best = video;
+          bestArea = area;
+        }
+      }
+      return best;
+    }
+    if (hoveredVideo) {
+      const hit = visible.find((entry) => entry.video === hoveredVideo);
+      if (hit) return hit.video;
+    }
     let best = null;
-    let bestArea = 0;
-    for (const v of all) {
-      if (dismissedVideos.has(v)) continue;
-      const r = v.getBoundingClientRect();
-      const area = r.width * r.height;
-      if (r.width >= 160 && r.height >= 90 && area > bestArea) {
-        best = v;
-        bestArea = area;
+    let bestScore = -Infinity;
+    for (const { video, r } of visible) {
+      const centerX = r.left + r.width / 2;
+      const centerY = r.top + r.height / 2;
+      const distance = Math.hypot(centerX - viewportW / 2, centerY - viewportH / 2);
+      let score = -distance;
+      if (!video.paused && !video.ended) score += 1e6;
+      score += Math.min((r.width * r.height) / 1e6, 4);
+      if (score > bestScore) {
+        bestScore = score;
+        best = video;
       }
     }
     return best;
   }
 
+  function hookVideo(video) {
+    if (!video || hookedVideos.has(video)) return;
+    hookedVideos.add(video);
+    const stamp = () => {
+      videoTiming.set(video, { at: Date.now() });
+      scheduleRefresh();
+    };
+    for (const event of ["play", "loadedmetadata", "loadeddata", "durationchange"]) {
+      video.addEventListener(event, stamp, { passive: true });
+    }
+    video.addEventListener("resize", schedulePosition, { passive: true });
+  }
+
   function refresh() {
     ensureShadowUI();
     ensureHostParent();
+    for (const video of collectVideoElements(document)) hookVideo(video);
     if (!activeVideo || !activeVideo.isConnected || dismissedVideos.has(activeVideo)) {
       activeVideo = findPrimaryVideo();
+    } else {
+      const candidate = findPrimaryVideo();
+      // Hover wins, and a playing video that scrolled to the centre takes over
+      // from a paused one; otherwise keep the current target stable.
+      if (candidate && hoveredVideo && candidate === hoveredVideo) activeVideo = candidate;
+      else if (candidate && !candidate.paused && (activeVideo.paused || !activeVideo.isConnected)) {
+        activeVideo = candidate;
+      }
     }
+    // Position synchronously: requestAnimationFrame is paused while a window
+    // is occluded/minimized, and a page load must not wait for a frame to show
+    // the tag. Scroll bursts still go through the rAF coalescer below.
     positionOverlay();
+  }
+
+  let refreshTimer = 0;
+  function scheduleRefresh() {
+    if (refreshTimer) return;
+    refreshTimer = setTimeout(() => {
+      refreshTimer = 0;
+      refresh();
+    }, 150);
   }
 
   // Hovering a video pins the floating tag to that player
@@ -502,18 +1272,37 @@
         path.find((node) => node && node.tagName === "VIDEO") ||
         (e.target && e.target.closest ? e.target.closest("video") : null);
       if (target && !dismissedVideos.has(target)) {
-        activeVideo = target;
-        refresh();
+        hoveredVideo = target;
+        if (activeVideo !== target) {
+          activeVideo = target;
+          refresh();
+        } else {
+          schedulePosition();
+        }
       }
     },
     true
   );
 
+  // Playback/media events do not bubble, but a capture listener still sees
+  // them on the way down; the 150ms coalescer keeps feed bursts cheap.
+  for (const event of ["play", "loadedmetadata", "playing", "pause", "ended"]) {
+    document.addEventListener(event, scheduleRefresh, { passive: true, capture: true });
+  }
+
   // Nested scroll containers do not bubble scroll events to window, so listen
   // in the capture phase and reposition the tag for every scrolled ancestor.
-  document.addEventListener("scroll", positionOverlay, { passive: true, capture: true });
-  window.addEventListener("scroll", positionOverlay, { passive: true });
-  window.addEventListener("resize", positionOverlay, { passive: true });
+  // Repositioning goes through requestAnimationFrame so the tag tracks the
+  // scrolled video without drifting and without a style write per event.
+  document.addEventListener("scroll", schedulePosition, { passive: true, capture: true });
+  window.addEventListener("scroll", schedulePosition, { passive: true });
+  window.addEventListener("resize", () => {
+    scheduleRefresh();
+    schedulePosition();
+  }, { passive: true });
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) refresh();
+  });
   document.addEventListener(
     "fullscreenchange",
     () => {
@@ -525,14 +1314,7 @@
 
   // Coalesce bursts of DOM mutations: refresh() performs layout reads and a
   // deep <video> walk, which is too costly once per mutated node on busy pages.
-  let refreshTimer = 0;
-  const observer = new MutationObserver(() => {
-    if (refreshTimer) return;
-    refreshTimer = setTimeout(() => {
-      refreshTimer = 0;
-      refresh();
-    }, 150);
-  });
+  const observer = new MutationObserver(scheduleRefresh);
   observer.observe(document.documentElement, { childList: true, subtree: true });
 
   if (isExtensionEnv) {

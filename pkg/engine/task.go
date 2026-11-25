@@ -274,7 +274,8 @@ func (t *Task) Start(parentCtx context.Context, client *http.Client, onUpdate fu
 	t.ErrorMessage = ""
 	t.speedCalc = newSpeedCalculator(atomic.LoadInt64(&t.DownloadedBytes))
 	supportsRanges := t.SupportsRanges
-	isHLS := t.IsHLS || IsHLSURL(t.URL, "")
+	plan := t.Plan
+	isHLS := t.IsHLS || (plan == nil && IsHLSURL(t.URL, ""))
 	totalBytes := t.TotalBytes
 	numSegments := len(t.Segments)
 	savePath := t.SavePath
@@ -285,6 +286,10 @@ func (t *Task) Start(parentCtx context.Context, client *http.Client, onUpdate fu
 	if err := os.MkdirAll(saveDir, 0755); err != nil {
 		t.fail(fmt.Sprintf("failed to create directory: %v", err), onUpdate)
 		return err
+	}
+
+	if plan != nil {
+		return t.runPlanDownload(ctx, client, onUpdate)
 	}
 
 	if isHLS {
@@ -685,6 +690,7 @@ func (t *Task) Clone() *Task {
 		Status:          t.Status,
 		SupportsRanges:  t.SupportsRanges,
 		IsHLS:           t.IsHLS,
+		Plan:            t.Plan.Clone(),
 		ConvertFormat:   t.ConvertFormat,
 		NumSegments:     t.NumSegments,
 		ErrorMessage:    t.ErrorMessage,

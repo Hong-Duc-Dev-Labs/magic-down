@@ -56,6 +56,7 @@ type Task struct {
 	Status          TaskStatus        `json:"status"`
 	SupportsRanges  bool              `json:"supports_ranges"`
 	IsHLS           bool              `json:"is_hls,omitempty"`
+	Plan            *DownloadPlan     `json:"plan,omitempty"`
 	ConvertFormat   string            `json:"convert_format,omitempty"`
 	NumSegments     int               `json:"num_segments"`
 	Segments        []*Segment        `json:"segments"`
