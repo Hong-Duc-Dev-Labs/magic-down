@@ -83,6 +83,7 @@ func (s *Server) Start() error {
 	mux.HandleFunc("/downloads/pause", s.handlePause)
 	mux.HandleFunc("/downloads/resume", s.handleResume)
 	mux.HandleFunc("/downloads/delete", s.handleDelete)
+	mux.HandleFunc("/config", s.handleConfig)
 
 	s.httpServer = &http.Server{
 		Handler:      mux,
@@ -216,6 +217,31 @@ func (s *Server) handleResume(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"success": true})
+}
+
+func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(s.engine.Config())
+	case http.MethodPost:
+		var cfg engine.Config
+		if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
+			http.Error(w, fmt.Sprintf("invalid json: %v", err), http.StatusBadRequest)
+			return
+		}
+		current := s.engine.Config()
+		// The state location is owned by the running process, not by clients.
+		cfg.StateFilePath = current.StateFilePath
+		if cfg.DownloadDir == "" {
+			cfg.DownloadDir = current.DownloadDir
+		}
+		s.engine.UpdateConfig(cfg)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(s.engine.Config())
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
 }
 
 func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {

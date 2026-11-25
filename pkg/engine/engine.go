@@ -29,17 +29,31 @@ type AddTaskRequest struct {
 
 // Engine coordinates download tasks, queues, concurrency, and persistence.
 type Engine struct {
-	mu           sync.RWMutex
-	config       Config
-	tasks        []*Task
-	tasksByID    map[string]*Task
-	httpClient   *http.Client
-	ctx          context.Context
-	cancel       context.CancelFunc
-	subscribers  map[chan *Task]struct{}
-	subMu        sync.RWMutex
-	saveTimer    *time.Timer
-	saveTimerMu  sync.Mutex
+	mu          sync.RWMutex
+	config      Config
+	configPath  string
+	tasks       []*Task
+	tasksByID   map[string]*Task
+	httpClient  *http.Client
+	limiter     *rateLimiter
+	onCompleted func(*Task)
+	ctx         context.Context
+	cancel      context.CancelFunc
+	subscribers map[chan *Task]struct{}
+	subMu       sync.RWMutex
+	saveTimer   *time.Timer
+	saveTimerMu sync.Mutex
+	configMu    sync.Mutex
+}
+
+// persistedConfig stores the settings that survive restarts. Pointers are used
+// so a missing field in an older file does not silently reset a default.
+type persistedConfig struct {
+	MaxConcurrentDownloads *int    `json:"max_concurrent_downloads,omitempty"`
+	DefaultSegments        *int    `json:"default_segments,omitempty"`
+	MaxRetries             *int    `json:"max_retries,omitempty"`
+	SpeedLimitKBps         *int64  `json:"speed_limit_kbps,omitempty"`
+	DownloadDir            *string `json:"download_dir,omitempty"`
 }
 
 // NewEngine initializes a new download engine.
@@ -50,6 +64,12 @@ func NewEngine(cfg Config) (*Engine, error) {
 	if cfg.DefaultSegments <= 0 {
 		cfg.DefaultSegments = 8
 	}
+	if cfg.MaxRetries < 0 {
+		cfg.MaxRetries = DefaultMaxRetries
+	}
+	if cfg.SpeedLimitKBps < 0 {
+		cfg.SpeedLimitKBps = 0
+	}
 	if cfg.DownloadDir == "" {
 		cfg.DownloadDir = defaultDownloadDir()
 	}
@@ -57,18 +77,22 @@ func NewEngine(cfg Config) (*Engine, error) {
 		cfg.StateFilePath = filepath.Join(cfg.DownloadDir, ".magicdown_state.json")
 	}
 
-	_ = os.MkdirAll(cfg.DownloadDir, 0755)
-
 	ctx, cancel := context.WithCancel(context.Background())
 	eng := &Engine{
 		config:      cfg,
+		configPath:  filepath.Join(filepath.Dir(cfg.StateFilePath), "config.json"),
 		tasks:       make([]*Task, 0),
 		tasksByID:   make(map[string]*Task),
 		httpClient:  &http.Client{Timeout: 0}, // No client-level timeout for downloads
+		limiter:     newRateLimiter(cfg.SpeedLimitKBps * 1024),
 		ctx:         ctx,
 		cancel:      cancel,
 		subscribers: make(map[chan *Task]struct{}),
 	}
+
+	// Persisted settings override the defaults, then ensure the final directory.
+	eng.loadConfig()
+	_ = os.MkdirAll(eng.config.DownloadDir, 0755)
 
 	// Load existing persisted state
 	if err := eng.loadState(); err != nil {
@@ -102,14 +126,17 @@ func (e *Engine) AddTask(req AddTaskRequest) (*Task, error) {
 	}
 
 	saveDir := req.SaveDir
+	e.mu.RLock()
+	cfg := e.config
+	e.mu.RUnlock()
 	if saveDir == "" {
-		saveDir = e.config.DownloadDir
+		saveDir = cfg.DownloadDir
 	}
 	_ = os.MkdirAll(saveDir, 0755)
 
 	numSegs := req.NumSegments
 	if numSegs <= 0 {
-		numSegs = e.config.DefaultSegments
+		numSegs = cfg.DefaultSegments
 	}
 
 	filename := ""
@@ -133,6 +160,8 @@ func (e *Engine) AddTask(req AddTaskRequest) (*Task, error) {
 		ConvertFormat: convertFmt,
 		IsHLS:         IsHLSURL(req.URL, ""),
 		CreatedAt:     time.Now(),
+		limiter:       e.limiter,
+		retryLimit:    cfg.MaxRetries,
 	}
 
 	if task.Filename != "" {
@@ -345,22 +374,36 @@ func (e *Engine) processQueue() {
 		return
 	}
 
-	// Mark candidate as probing while holding e.mu so no duplicate worker claims it
+	// Mark candidate as probing while holding e.mu so no duplicate worker claims it.
+	// The cancel func is installed in the same critical section so a pause or
+	// cancel issued right after queueing can interrupt the probe.
 	candidate.SetStatus(StatusProbing)
 	downloadDir := e.config.DownloadDir
+	maxRetries := e.config.MaxRetries
+	runCtx, runCancel := context.WithCancel(e.ctx)
+	candidate.mu.Lock()
+	candidate.retryLimit = maxRetries
+	candidate.cancelFn = runCancel
+	candidate.mu.Unlock()
 	e.mu.Unlock()
 
 	e.notify(candidate.Clone())
 
 	go func(t *Task) {
 		defer func() {
+			runCancel()
 			go e.processQueue()
 		}()
 
 		// Probe if needed
 		snap := t.Clone()
 		if snap.TotalBytes <= 0 || snap.SavePath == "" {
-			if err := t.Probe(e.ctx, e.httpClient, downloadDir); err != nil {
+			if err := t.Probe(runCtx, e.httpClient, downloadDir); err != nil {
+				if runCtx.Err() != nil {
+					// Paused or cancelled while probing; the status is already set.
+					e.notify(t.Clone())
+					return
+				}
 				t.fail(fmt.Sprintf("probe failed: %v", err), e.notify)
 				e.scheduleSave()
 				return
@@ -369,8 +412,10 @@ func (e *Engine) processQueue() {
 		}
 
 		// Run download
-		if err := t.Start(e.ctx, e.httpClient, e.notify); err != nil {
+		if err := t.Start(runCtx, e.httpClient, e.notify); err != nil {
 			// Pause or error handled internally
+		} else if t.GetStatus() == StatusCompleted {
+			e.notifyCompleted(t)
 		}
 		e.scheduleSave()
 	}(candidate)
@@ -465,6 +510,8 @@ func (e *Engine) loadState() error {
 		}
 		t.Speed = 0
 		t.ETA = 0
+		t.limiter = e.limiter
+		t.retryLimit = e.config.MaxRetries
 		e.tasks = append(e.tasks, t)
 		e.tasksByID[t.ID] = t
 	}
@@ -479,12 +526,107 @@ func (e *Engine) Config() Config {
 	return e.config
 }
 
-// UpdateConfig updates the engine config.
+// UpdateConfig updates the engine config, applies the speed limit immediately,
+// re-evaluates the queue, and persists tunable settings for the next launch.
 func (e *Engine) UpdateConfig(cfg Config) {
+	if cfg.MaxConcurrentDownloads <= 0 {
+		cfg.MaxConcurrentDownloads = 3
+	}
+	if cfg.DefaultSegments <= 0 {
+		cfg.DefaultSegments = 8
+	}
+	if cfg.MaxRetries < 0 {
+		cfg.MaxRetries = 0
+	}
+	if cfg.SpeedLimitKBps < 0 {
+		cfg.SpeedLimitKBps = 0
+	}
+
 	e.mu.Lock()
+	cfg.StateFilePath = e.config.StateFilePath
 	e.config = cfg
 	e.mu.Unlock()
+
+	e.limiter.setRate(cfg.SpeedLimitKBps * 1024)
+	_ = os.MkdirAll(cfg.DownloadDir, 0755)
+	_ = e.saveConfig()
 	e.scheduleSave()
+	go e.processQueue()
+}
+
+// SetOnTaskCompleted registers a callback invoked asynchronously whenever a task
+// finishes successfully. It must not block; the engine calls it on its own goroutine.
+func (e *Engine) SetOnTaskCompleted(fn func(*Task)) {
+	e.mu.Lock()
+	e.onCompleted = fn
+	e.mu.Unlock()
+}
+
+func (e *Engine) notifyCompleted(t *Task) {
+	e.mu.RLock()
+	fn := e.onCompleted
+	e.mu.RUnlock()
+	if fn == nil {
+		return
+	}
+	snap := t.Clone()
+	go func() {
+		defer func() { _ = recover() }()
+		fn(snap)
+	}()
+}
+
+// saveConfig persists the tunable settings next to the task state file.
+func (e *Engine) saveConfig() error {
+	e.configMu.Lock()
+	defer e.configMu.Unlock()
+
+	cfg := e.Config()
+	pc := persistedConfig{
+		MaxConcurrentDownloads: &cfg.MaxConcurrentDownloads,
+		DefaultSegments:        &cfg.DefaultSegments,
+		MaxRetries:             &cfg.MaxRetries,
+		SpeedLimitKBps:         &cfg.SpeedLimitKBps,
+		DownloadDir:            &cfg.DownloadDir,
+	}
+	data, err := json.MarshalIndent(pc, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmpPath := e.configPath + ".tmp"
+	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
+		return err
+	}
+	_ = os.Remove(e.configPath)
+	return os.Rename(tmpPath, e.configPath)
+}
+
+// loadConfig applies previously persisted settings over the passed defaults.
+func (e *Engine) loadConfig() {
+	data, err := os.ReadFile(e.configPath)
+	if err != nil {
+		return
+	}
+	var pc persistedConfig
+	if err := json.Unmarshal(data, &pc); err != nil {
+		return
+	}
+	if pc.MaxConcurrentDownloads != nil && *pc.MaxConcurrentDownloads > 0 {
+		e.config.MaxConcurrentDownloads = *pc.MaxConcurrentDownloads
+	}
+	if pc.DefaultSegments != nil && *pc.DefaultSegments > 0 {
+		e.config.DefaultSegments = *pc.DefaultSegments
+	}
+	if pc.MaxRetries != nil && *pc.MaxRetries >= 0 {
+		e.config.MaxRetries = *pc.MaxRetries
+	}
+	if pc.SpeedLimitKBps != nil && *pc.SpeedLimitKBps >= 0 {
+		e.config.SpeedLimitKBps = *pc.SpeedLimitKBps
+	}
+	if pc.DownloadDir != nil && *pc.DownloadDir != "" {
+		e.config.DownloadDir = *pc.DownloadDir
+	}
+	e.limiter.setRate(e.config.SpeedLimitKBps * 1024)
 }
 
 // Close gracefully stops all tasks and flushes state.

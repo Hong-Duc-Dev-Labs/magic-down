@@ -8,9 +8,13 @@ A fast, IDM-inspired desktop download manager built in pure Go with **MyGo Nativ
   - Automatic HTTP/HTTPS range probing (`Accept-Ranges`, `Content-Length`, `Content-Disposition`) with seamless fallback to single-stream download when range requests are unsupported.
   - Configurable concurrent segments (default `8`), real-time speed/ETA/progress tracking, and atomic file completion (`.magicpart` -> final file).
   - Pause, Resume, Cancel, Delete, and persisted JSON state so paused/queued downloads survive app restarts.
+  - Automatic retry with exponential backoff (500ms → 10s) for transient network, 5xx, 408 and 429 failures; retried segments resume from the bytes already written. Configurable `max_retries` (default `3`, `0` disables retries), with a live retry counter per task.
+  - One shared token bucket for a global speed limit (`speed_limit_kbps`, `0` = unlimited) enforced across every segment and HLS fragment; raising or lowering it applies to running downloads within ~250ms.
   - Download queue with configurable max concurrent active downloads (default `3`).
+  - Tunable settings persist to `config.json` next to the state file.
 - **Desktop App (`cmd/magicdown`, `pkg/gui`)**
-  - Pure Go **MyGo Native UI** (`github.com/egoist/mygo` v0.10.0) with IDM-inspired toolbar, status sidebar, download list, Add URL modal, and Settings modal.
+  - Pure Go **MyGo Native UI** (`github.com/egoist/mygo` v0.10.0) with IDM-inspired toolbar, status sidebar, download list, Add URL modal, and Settings modal (concurrency, segments, retries, speed limit).
+  - Windows toast notification when a download completes (no cgo; hidden PowerShell fallback to a tray balloon).
   - Built-in localhost HTTP IPC server (`127.0.0.1:28888`) receiving jobs from the Native Messaging host.
 - **Native Messaging Host (`cmd/magicdown-host`, `pkg/nativemessaging`)**
   - Implements Chrome/Edge 4-byte little-endian length-prefixed JSON stdio protocol and forwards jobs to the desktop app IPC.

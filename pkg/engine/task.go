@@ -62,12 +62,56 @@ func ExtractFilename(rawURL string, respHeader http.Header) string {
 	return "download.bin"
 }
 
-// Probe inspects the remote URL to check content length, range support, and filename.
-func (t *Task) Probe(ctx context.Context, client *http.Client, downloadDir string) error {
-	t.mu.Lock()
-	t.Status = StatusProbing
-	t.mu.Unlock()
+// retryBudget returns how many retry attempts this task may make per operation.
+func (t *Task) retryBudget() int {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	return t.retryLimit
+}
 
+// noteRetry records one retry attempt and keeps the task surface showing
+// Downloading while it backs off.
+func (t *Task) noteRetry(onUpdate func(*Task)) {
+	t.mu.Lock()
+	t.Retries++
+	t.Status = StatusDownloading
+	t.ErrorMessage = ""
+	t.mu.Unlock()
+	if onUpdate != nil {
+		onUpdate(t)
+	}
+}
+
+// Probe inspects the remote URL to check content length, range support, and filename.
+// Transient probe failures are retried with backoff up to the task's retry budget.
+func (t *Task) Probe(ctx context.Context, client *http.Client, downloadDir string) error {
+	maxRetries := t.retryBudget()
+	var lastErr error
+	for attempt := 0; ; attempt++ {
+		t.mu.Lock()
+		t.Status = StatusProbing
+		t.mu.Unlock()
+
+		retryable, err := t.probeOnce(ctx, client, downloadDir)
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if !retryable || attempt >= maxRetries {
+			return lastErr
+		}
+		t.noteRetry(nil)
+		if werr := waitRetry(ctx, attempt+1); werr != nil {
+			return werr
+		}
+	}
+}
+
+// probeOnce performs a single HEAD/GET probe and reports whether the failure is retryable.
+func (t *Task) probeOnce(ctx context.Context, client *http.Client, downloadDir string) (retryable bool, err error) {
 	// Try HEAD first
 	headReq, err := http.NewRequestWithContext(ctx, http.MethodHead, t.URL, nil)
 	if err == nil {
@@ -83,17 +127,20 @@ func (t *Task) Probe(ctx context.Context, client *http.Client, downloadDir strin
 		}
 
 		resp, headErr := client.Do(headReq)
-		if headErr == nil && resp.StatusCode >= 200 && resp.StatusCode < 400 {
-			defer resp.Body.Close()
-			t.processProbeResponse(resp, downloadDir)
-			return nil
+		if headErr == nil {
+			if resp.StatusCode >= 200 && resp.StatusCode < 400 {
+				defer resp.Body.Close()
+				t.processProbeResponse(resp, downloadDir)
+				return false, nil
+			}
+			_ = resp.Body.Close()
 		}
 	}
 
 	// If HEAD failed or returned 405 Method Not Allowed, fallback to ranged GET probe
 	getReq, err := http.NewRequestWithContext(ctx, http.MethodGet, t.URL, nil)
 	if err != nil {
-		return fmt.Errorf("failed to create probe request: %w", err)
+		return false, fmt.Errorf("failed to create probe request: %w", err)
 	}
 	getReq.Header.Set("Range", "bytes=0-0")
 	getReq.Header.Set("User-Agent", "MagicDown/1.0 (Windows NT 10.0; Win64; x64)")
@@ -109,16 +156,19 @@ func (t *Task) Probe(ctx context.Context, client *http.Client, downloadDir strin
 
 	resp, err := client.Do(getReq)
 	if err != nil {
-		return fmt.Errorf("probe GET failed: %w", err)
+		if ctx.Err() != nil {
+			return false, ctx.Err()
+		}
+		return true, fmt.Errorf("probe GET failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
-		return fmt.Errorf("probe returned unexpected HTTP status: %d", resp.StatusCode)
+		return retryableStatus(resp.StatusCode), fmt.Errorf("probe returned unexpected HTTP status: %d", resp.StatusCode)
 	}
 
 	t.processProbeResponse(resp, downloadDir)
-	return nil
+	return false, nil
 }
 
 func (t *Task) processProbeResponse(resp *http.Response, downloadDir string) {
@@ -210,8 +260,14 @@ func (t *Task) Start(parentCtx context.Context, client *http.Client, onUpdate fu
 		t.mu.Unlock()
 		return nil
 	}
+	// A pause or cancel may land between queueing and this call.
+	if t.Status == StatusPaused || t.Status == StatusCancelled {
+		t.mu.Unlock()
+		return nil
+	}
 
 	ctx, cancel := context.WithCancel(parentCtx)
+	defer cancel()
 	t.cancelFn = cancel
 	t.activeCtx = ctx
 	t.Status = StatusDownloading
@@ -271,6 +327,10 @@ func (t *Task) runRangedDownload(ctx context.Context, client *http.Client, onUpd
 		}
 	}
 
+	limiter := t.limiter
+	maxRetries := t.retryBudget()
+	onRetry := func() { t.noteRetry(onUpdate) }
+
 	for _, seg := range t.Segments {
 		wg.Add(1)
 		go func(s *Segment) {
@@ -279,7 +339,7 @@ func (t *Task) runRangedDownload(ctx context.Context, client *http.Client, onUpd
 				s.setStatus("done")
 				return
 			}
-			if err := downloadSegment(ctx, client, t.URL, t.Headers, t.Cookies, t.Referrer, s, partFile, onChunk); err != nil {
+			if err := downloadSegment(ctx, client, t.URL, t.Headers, t.Cookies, t.Referrer, s, partFile, limiter, maxRetries, onChunk, onRetry); err != nil {
 				if !errors.Is(err, context.Canceled) {
 					errChan <- err
 				}
@@ -333,10 +393,34 @@ func (t *Task) runRangedDownload(ctx context.Context, client *http.Client, onUpd
 }
 
 func (t *Task) runSingleStreamDownload(ctx context.Context, client *http.Client, onUpdate func(*Task)) error {
+	maxRetries := t.retryBudget()
+	for attempt := 0; ; attempt++ {
+		retryable, err := t.runSingleStreamAttempt(ctx, client, onUpdate)
+		if err == nil {
+			return nil
+		}
+		if ctx.Err() != nil {
+			t.markPaused(onUpdate)
+			return ctx.Err()
+		}
+		if !retryable || attempt >= maxRetries {
+			t.fail(fmt.Sprintf("download failed: %v", err), onUpdate)
+			return err
+		}
+		t.noteRetry(onUpdate)
+		if werr := waitRetry(ctx, attempt+1); werr != nil {
+			t.markPaused(onUpdate)
+			return werr
+		}
+	}
+}
+
+// runSingleStreamAttempt performs one non-ranged (or whole-file ranged) transfer,
+// resuming from the existing .magicpart size when the server honours Range.
+func (t *Task) runSingleStreamAttempt(ctx context.Context, client *http.Client, onUpdate func(*Task)) (retryable bool, err error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, t.URL, nil)
 	if err != nil {
-		t.fail(fmt.Sprintf("request creation error: %v", err), onUpdate)
-		return err
+		return false, fmt.Errorf("request creation error: %w", err)
 	}
 
 	req.Header.Set("User-Agent", "MagicDown/1.0 (Windows NT 10.0; Win64; x64)")
@@ -352,7 +436,7 @@ func (t *Task) runSingleStreamDownload(ctx context.Context, client *http.Client,
 
 	// Resume single stream if possible
 	var startOffset int64 = 0
-	if fi, err := os.Stat(t.PartPath); err == nil && fi.Size() > 0 {
+	if fi, statErr := os.Stat(t.PartPath); statErr == nil && fi.Size() > 0 {
 		startOffset = fi.Size()
 		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", startOffset))
 	}
@@ -360,22 +444,19 @@ func (t *Task) runSingleStreamDownload(ctx context.Context, client *http.Client,
 	resp, err := client.Do(req)
 	if err != nil {
 		if ctx.Err() != nil {
-			t.mu.Lock()
-			t.Status = StatusPaused
-			t.Speed = 0
-			t.mu.Unlock()
-			if onUpdate != nil {
-				onUpdate(t)
-			}
-			return ctx.Err()
+			return false, ctx.Err()
 		}
-		t.fail(fmt.Sprintf("download request failed: %v", err), onUpdate)
-		return err
+		return true, fmt.Errorf("download request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
+	resuming := resp.StatusCode == http.StatusPartialContent && startOffset > 0
+	if resp.StatusCode != http.StatusPartialContent && resp.StatusCode != http.StatusOK {
+		return retryableStatus(resp.StatusCode), fmt.Errorf("unexpected HTTP status: %d", resp.StatusCode)
+	}
+
 	var file *os.File
-	if resp.StatusCode == http.StatusPartialContent && startOffset > 0 {
+	if resuming {
 		file, err = os.OpenFile(t.PartPath, os.O_APPEND|os.O_WRONLY, 0666)
 		atomic.StoreInt64(&t.DownloadedBytes, startOffset)
 	} else {
@@ -385,15 +466,16 @@ func (t *Task) runSingleStreamDownload(ctx context.Context, client *http.Client,
 		file, err = os.OpenFile(t.PartPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0666)
 	}
 	if err != nil {
-		t.fail(fmt.Sprintf("failed to open file for writing: %v", err), onUpdate)
-		return err
+		return false, fmt.Errorf("failed to open file for writing: %w", err)
 	}
 	defer file.Close()
 
+	var expectedSize int64
 	if resp.ContentLength > 0 {
+		expectedSize = startOffset + resp.ContentLength
 		t.mu.Lock()
 		if t.TotalBytes <= 0 {
-			t.TotalBytes = startOffset + resp.ContentLength
+			t.TotalBytes = expectedSize
 		}
 		t.mu.Unlock()
 	}
@@ -402,26 +484,21 @@ func (t *Task) runSingleStreamDownload(ctx context.Context, client *http.Client,
 	for {
 		select {
 		case <-ctx.Done():
-			file.Sync()
-			t.mu.Lock()
-			if t.Status == StatusDownloading {
-				t.Status = StatusPaused
-			}
-			t.Speed = 0
-			t.ETA = 0
-			t.mu.Unlock()
-			if onUpdate != nil {
-				onUpdate(t)
-			}
-			return ctx.Err()
+			_ = file.Sync()
+			return false, ctx.Err()
 		default:
 		}
 
 		n, readErr := resp.Body.Read(buf)
 		if n > 0 {
+			if t.limiter != nil {
+				if waitErr := t.limiter.wait(ctx, int64(n)); waitErr != nil {
+					_ = file.Sync()
+					return false, waitErr
+				}
+			}
 			if _, writeErr := file.Write(buf[:n]); writeErr != nil {
-				t.fail(fmt.Sprintf("write error: %v", writeErr), onUpdate)
-				return writeErr
+				return false, fmt.Errorf("write error: %w", writeErr)
 			}
 			newTotal := atomic.AddInt64(&t.DownloadedBytes, int64(n))
 			t.mu.RLock()
@@ -442,21 +519,21 @@ func (t *Task) runSingleStreamDownload(ctx context.Context, client *http.Client,
 				break
 			}
 			if ctx.Err() != nil {
-				t.mu.Lock()
-				t.Status = StatusPaused
-				t.Speed = 0
-				t.mu.Unlock()
-				return ctx.Err()
+				return false, ctx.Err()
 			}
-			t.fail(fmt.Sprintf("stream read error: %v", readErr), onUpdate)
-			return readErr
+			return true, fmt.Errorf("stream read error: %w", readErr)
 		}
 	}
 
-	file.Sync()
-	file.Close()
+	_ = file.Sync()
+	if expectedSize > 0 {
+		if fi, statErr := os.Stat(t.PartPath); statErr == nil && fi.Size() < expectedSize {
+			return true, fmt.Errorf("stream truncated at %d of %d bytes", fi.Size(), expectedSize)
+		}
+	}
+	_ = file.Close()
 
-	return t.finalizeFile(onUpdate)
+	return false, t.finalizeFile(onUpdate)
 }
 
 func (t *Task) finalizeFile(onUpdate func(*Task)) error {
@@ -611,6 +688,7 @@ func (t *Task) Clone() *Task {
 		ConvertFormat:   t.ConvertFormat,
 		NumSegments:     t.NumSegments,
 		ErrorMessage:    t.ErrorMessage,
+		Retries:         t.Retries,
 		Referrer:        t.Referrer,
 		Cookies:         t.Cookies,
 		CreatedAt:       t.CreatedAt,

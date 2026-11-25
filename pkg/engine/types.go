@@ -60,6 +60,7 @@ type Task struct {
 	NumSegments     int               `json:"num_segments"`
 	Segments        []*Segment        `json:"segments"`
 	ErrorMessage    string            `json:"error_message,omitempty"`
+	Retries         int               `json:"retries,omitempty"` // retry attempts made so far for this task
 	Referrer        string            `json:"referrer,omitempty"`
 	Cookies         string            `json:"cookies,omitempty"`
 	Headers         map[string]string `json:"headers,omitempty"`
@@ -67,16 +68,24 @@ type Task struct {
 	CompletedAt     *time.Time        `json:"completed_at,omitempty"`
 
 	// Runtime fields (excluded from JSON persistence)
-	mu        sync.RWMutex       `json:"-"`
-	cancelFn  context.CancelFunc `json:"-"`
-	activeCtx context.Context    `json:"-"`
-	speedCalc *speedCalculator   `json:"-"`
+	mu         sync.RWMutex       `json:"-"`
+	cancelFn   context.CancelFunc `json:"-"`
+	activeCtx  context.Context    `json:"-"`
+	speedCalc  *speedCalculator   `json:"-"`
+	limiter    *rateLimiter       `json:"-"`
+	retryLimit int                `json:"-"`
 }
+
+// DefaultMaxRetries is the retry budget used by DefaultConfig. A config value of
+// 0 disables retries entirely.
+const DefaultMaxRetries = 3
 
 // Config holds download engine configuration options.
 type Config struct {
 	MaxConcurrentDownloads int    `json:"max_concurrent_downloads"`
 	DefaultSegments        int    `json:"default_segments"`
+	MaxRetries             int    `json:"max_retries"`
+	SpeedLimitKBps         int64  `json:"speed_limit_kbps"` // 0 = unlimited
 	DownloadDir            string `json:"download_dir"`
 	StateFilePath          string `json:"state_file_path"`
 }
@@ -86,6 +95,7 @@ func DefaultConfig(downloadDir, statePath string) Config {
 	return Config{
 		MaxConcurrentDownloads: 3,
 		DefaultSegments:        8,
+		MaxRetries:             DefaultMaxRetries,
 		DownloadDir:            downloadDir,
 		StateFilePath:          statePath,
 	}

@@ -118,6 +118,7 @@ func TestMyGoNativeUIRendersCleanly(t *testing.T) {
 	eng, err := engine.NewEngine(engine.Config{
 		MaxConcurrentDownloads: 3,
 		DefaultSegments:        8,
+		MaxRetries:             3,
 		DownloadDir:            tempDir,
 		StateFilePath:          stateFile,
 	})

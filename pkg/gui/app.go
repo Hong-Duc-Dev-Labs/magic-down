@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -49,6 +50,8 @@ type App struct {
 	settingDownloadDir   string
 	settingMaxConcurrent int
 	settingSegments      int
+	settingMaxRetries    string
+	settingSpeedLimit    string
 	settingsError        string
 
 	statusMessage string
@@ -68,6 +71,8 @@ func NewApp(eng *engine.Engine, srv *ipc.Server) *App {
 		settingDownloadDir:   cfg.DownloadDir,
 		settingMaxConcurrent: cfg.MaxConcurrentDownloads,
 		settingSegments:      cfg.DefaultSegments,
+		settingMaxRetries:    strconv.Itoa(cfg.MaxRetries),
+		settingSpeedLimit:    strconv.FormatInt(cfg.SpeedLimitKBps, 10),
 	}
 }
 
@@ -275,6 +280,8 @@ func (a *App) openSettingsModal() {
 	a.settingDownloadDir = cfg.DownloadDir
 	a.settingMaxConcurrent = cfg.MaxConcurrentDownloads
 	a.settingSegments = cfg.DefaultSegments
+	a.settingMaxRetries = strconv.Itoa(cfg.MaxRetries)
+	a.settingSpeedLimit = strconv.FormatInt(cfg.SpeedLimitKBps, 10)
 	a.settingsError = ""
 	a.showAddModal = false
 	a.showSettingsModal = true
@@ -592,6 +599,11 @@ func (a *App) renderDownloadCard(c *ui.Context, pal Palette, task *engine.Task) 
 					ui.Box(c).Padding(1, 6).Radius(4).Background(pal.BadgeBg).Shrink(0).Children(func() {
 						ui.Text(c, segLabel).FontSize(10).FontWeight(600).FontFeatures("tnum").TextColor(pal.TextMuted).SingleLine()
 					})
+					if task.Retries > 0 && (task.Status == engine.StatusDownloading || task.Status == engine.StatusProbing) {
+						ui.Box(c).Padding(1, 6).Radius(4).Background(pal.WarningSoft).Shrink(0).Children(func() {
+							ui.Text(c, fmt.Sprintf("retry %d", task.Retries)).FontSize(10).FontWeight(600).FontFeatures("tnum").TextColor(pal.Warning).SingleLine()
+						})
+					}
 					if task.ErrorMessage != "" {
 						ui.Text(c, task.ErrorMessage).FontSize(11).TextColor(pal.Danger).SingleLine().Ellipsis("...")
 					}
@@ -920,6 +932,26 @@ func (a *App) renderSettingsModal(c *ui.Context, pal Palette) {
 				})
 			})
 
+			// Reliability & throughput limits
+			ui.Row(c).Gap(16).Children(func() {
+				ui.Column(c).Gap(6).Grow(1).Children(func() {
+					ui.Text(c, "Max Retries per Download").FontSize(12).FontWeight(600).TextColor(pal.TextSecondary)
+					ui.TextInput(c, &a.settingMaxRetries).
+						Background(pal.InputBg).
+						Border(1, pal.Border).
+						Radius(7)
+					ui.Text(c, "0 = no retry").FontSize(10).TextColor(pal.TextMuted)
+				})
+				ui.Column(c).Gap(6).Grow(1).Children(func() {
+					ui.Text(c, "Speed Limit (KB/s)").FontSize(12).FontWeight(600).TextColor(pal.TextSecondary)
+					ui.TextInput(c, &a.settingSpeedLimit).
+						Background(pal.InputBg).
+						Border(1, pal.Border).
+						Radius(7)
+					ui.Text(c, "0 = unlimited").FontSize(10).TextColor(pal.TextMuted)
+				})
+			})
+
 			// Appearance toggle
 			ui.Column(c).Gap(6).Children(func() {
 				ui.Text(c, "Appearance").FontSize(12).FontWeight(600).TextColor(pal.TextSecondary)
@@ -985,13 +1017,33 @@ func (a *App) saveSettings() {
 	if segs < 1 || segs > 16 {
 		segs = 8
 	}
+	retries, err := strconv.Atoi(strings.TrimSpace(a.settingMaxRetries))
+	if err != nil || retries < 0 {
+		a.settingsError = "Max retries must be a number of 0 or greater (0 = no retry)."
+		return
+	}
+	if retries > 20 {
+		retries = 20
+	}
+	speedKBps, err := strconv.ParseInt(strings.TrimSpace(a.settingSpeedLimit), 10, 64)
+	if err != nil || speedKBps < 0 {
+		a.settingsError = "Speed limit must be 0 (unlimited) or a positive number of KB/s."
+		return
+	}
+	if speedKBps > 1048576 {
+		speedKBps = 1048576
+	}
 
 	cfg := a.engine.Config()
 	cfg.DownloadDir = dir
 	cfg.MaxConcurrentDownloads = maxC
 	cfg.DefaultSegments = segs
+	cfg.MaxRetries = retries
+	cfg.SpeedLimitKBps = speedKBps
 	a.engine.UpdateConfig(cfg)
 
+	a.settingMaxRetries = strconv.Itoa(retries)
+	a.settingSpeedLimit = strconv.FormatInt(speedKBps, 10)
 	a.statusMessage = "Settings saved"
 	a.showSettingsModal = false
 }

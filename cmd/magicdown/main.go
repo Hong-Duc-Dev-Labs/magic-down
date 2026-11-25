@@ -14,6 +14,7 @@ import (
 	"magicdown/pkg/gui"
 	"magicdown/pkg/ipc"
 	"magicdown/pkg/nativemessaging"
+	"magicdown/pkg/notify"
 )
 
 //go:embed icon.png
@@ -59,6 +60,9 @@ func main() {
 		log.Fatalf("failed to initialize download engine: %v", err)
 	}
 	defer eng.Close()
+	eng.SetOnTaskCompleted(func(task *engine.Task) {
+		notify.NotifyDownloadComplete(task.Filename)
+	})
 
 	// Start local IPC server for Browser Extension <-> Native Host <-> Desktop App
 	ipcServer := ipc.NewServer(eng, *ipcPort)
