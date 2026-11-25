@@ -333,6 +333,7 @@ function addDetectedVideo(tabId, item) {
     merged.height = item.height || existing.height || 0;
     merged.bandwidth = item.bandwidth || existing.bandwidth || 0;
     merged.resolution = item.resolution || existing.resolution || "";
+    merged.fbVideoId = item.fbVideoId || existing.fbVideoId || "";
     if (isGenericQuality(item.quality) && !isGenericQuality(existing.quality)) {
       merged.quality = existing.quality;
     }
@@ -573,11 +574,32 @@ function inferQualityFromUrl(rawUrl) {
     }
     const efg = parseFacebookEfg(rawUrl);
     if (efg && typeof efg.vencode_tag === "string") {
-      const efgMatch = efg.vencode_tag.match(/(\d{3,4})p/i);
+      const tag = efg.vencode_tag;
+      const efgMatch = tag.match(/(\d{3,4})p/i);
       if (efgMatch) {
         const height = Number.parseInt(efgMatch[1], 10);
         if (height >= 144 && height <= 4320) return { quality: `${height}p`, height };
       }
+      // Facebook progressive tags: xpv_progressive.FACEBOOK..C3.360.sve_sd
+      const progMatch = tag.match(/\.C\d+\.(\d{3,4})\./i);
+      if (progMatch) {
+        const height = Number.parseInt(progMatch[1], 10);
+        if (height >= 144 && height <= 4320) return { quality: `${height}p`, height };
+      }
+      // Facebook adaptive DASH quality tiers: dash_r2av1-r1gen2vp9-adv_q20..q90
+      const qMatch = tag.match(/_q(\d{2,3})(?:$|_)/i);
+      if (qMatch) {
+        const q = Number.parseInt(qMatch[1], 10);
+        const height =
+          q >= 80 ? 1080 :
+          q >= 60 ? 720 :
+          q >= 50 ? 540 :
+          q >= 40 ? 480 :
+          q >= 30 ? 360 : 240;
+        return { quality: `${height}p`, height };
+      }
+      if (/(?:^|[._-])hd(?:$|[._-])/i.test(tag)) return { quality: "720p", height: 720 };
+      if (/(?:^|[._-])sd(?:$|[._-])/i.test(tag)) return { quality: "360p", height: 360 };
     }
     const generic = rawUrl.match(/(?:^|[_\-/=?&])(2160|1440|1080|720|540|480|360|240)p(?:$|[_\-/.&?])/i);
     if (generic) {
@@ -682,12 +704,28 @@ function classifyMediaResponse(url, headers) {
     return null;
   }
 
+  const fbBandwidth = efg && Number.isFinite(Number(efg.bitrate)) && Number(efg.bitrate) > 0 ? Number(efg.bitrate) : 0;
+  const fbDuration = efg && Number.isFinite(Number(efg.duration_s)) && Number(efg.duration_s) > 0 ? Number(efg.duration_s) : 0;
+  const fbVideoId = efg ? String(efg.video_id || efg.xpv_asset_id || "") : "";
+  const isFbDash = Boolean(efg && typeof efg.vencode_tag === "string" && /^dash_/i.test(efg.vencode_tag));
+
   // A 206 response only reports the chunk length; Content-Range carries the
   // full resource size. When query range params (bytestart/byteend/range) were
   // stripped from a 200 OK chunk response, contentLength is only the chunk size
-  // (e.g. 352 KB), not the full video size.
-  const effectiveSize = (contentRange && contentRange.total) || (strippedRange ? 0 : contentLength);
+  // (e.g. 352 KB), not the full video size. Similarly, Facebook DASH preload
+  // requests without explicit range params can return a partial chunk much
+  // smaller than bitrate * duration_s / 8.
+  let effectiveSize = (contentRange && contentRange.total) || (strippedRange ? 0 : contentLength);
+  if (isFbDash && !contentRange && effectiveSize > 0 && fbBandwidth > 0 && fbDuration > 0) {
+    const estimatedFull = (fbBandwidth * fbDuration) / 8;
+    if (effectiveSize < estimatedFull * 0.5) {
+      effectiveSize = 0;
+    }
+  }
   const quality = inferQualityFromUrl(mediaUrl);
+  const extraMeta = {};
+  if (fbBandwidth > 0) extraMeta.bandwidth = fbBandwidth;
+  if (fbVideoId) extraMeta.fbVideoId = fbVideoId;
   const tiny = !strippedRange && effectiveSize > 0 && effectiveSize < 256 * 1024;
 
   if (lowerPath.endsWith(".m3u8") || contentType.includes("mpegurl") || contentType.includes("x-mpegurl")) {
@@ -716,13 +754,13 @@ function classifyMediaResponse(url, headers) {
     else if (contentType.includes("quicktime") || lowerPath.endsWith(".mov")) format = "MOV";
     else if (contentType.includes("flv") || lowerPath.endsWith(".flv")) format = "FLV";
     if (tiny) return null;
-    return { kind: "direct", url: mediaUrl, format, size: effectiveSize, ...quality };
+    return { kind: "direct", url: mediaUrl, format, size: effectiveSize, ...quality, ...extraMeta };
   }
 
   for (const [ext, format] of formatsByExt) {
     if (lowerPath.endsWith(ext)) {
       if (tiny) return null;
-      return { kind: "direct", url: mediaUrl, format, size: effectiveSize, ...quality };
+      return { kind: "direct", url: mediaUrl, format, size: effectiveSize, ...quality, ...extraMeta };
     }
   }
 
@@ -733,13 +771,13 @@ function classifyMediaResponse(url, headers) {
     if (!isKnownSocialVideoURL(mediaUrl) && !strippedRange) return null;
     if (tiny) return null;
     const format = lowerPath.includes(".flv") ? "FLV" : "MP4";
-    return { kind: "direct", url: mediaUrl, format, size: effectiveSize, ...quality };
+    return { kind: "direct", url: mediaUrl, format, size: effectiveSize, ...quality, ...extraMeta };
   }
 
   if (isKnownSocialVideoURL(mediaUrl)) {
     if (tiny) return null;
     const format = lowerPath.includes(".flv") ? "FLV" : "MP4";
-    return { kind: "direct", url: mediaUrl, format, size: effectiveSize, ...quality };
+    return { kind: "direct", url: mediaUrl, format, size: effectiveSize, ...quality, ...extraMeta };
   }
   return null;
 }
@@ -760,6 +798,8 @@ if (typeof chrome !== "undefined" && chrome.webRequest && chrome.webRequest.onHe
           url: media.url,
           quality: media.quality || "Original",
           height: media.height || 0,
+          bandwidth: media.bandwidth || 0,
+          fbVideoId: media.fbVideoId || "",
           format: media.format,
           size: media.size,
           isHLS: false

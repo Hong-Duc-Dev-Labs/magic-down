@@ -158,3 +158,56 @@ test("Weibo URL quality inference handles mp4_1080p, mp4_720p, mp4_hd, mp4_ld, m
     { quality: "720p", height: 720 }
   );
 });
+
+test("Facebook adaptive q20..q90 and progressive C3 efg tags infer resolutions, bitrate, and fbVideoId", () => {
+  const cases = [
+    { tag: "dash_r2av1-r1gen2vp9-adv_q90", bitrate: 2874817, expectedQ: "1080p", expectedH: 1080 },
+    { tag: "dash_r2av1-r1gen2vp9-adv_q70", bitrate: 1694688, expectedQ: "720p", expectedH: 720 },
+    { tag: "dash_r2av1-r1gen2vp9-adv_q50", bitrate: 903355, expectedQ: "540p", expectedH: 540 },
+    { tag: "dash_r2av1-r1gen2vp9-adv_q40", bitrate: 583077, expectedQ: "480p", expectedH: 480 },
+    { tag: "dash_r2av1-r1gen2vp9-adv_q30", bitrate: 526697, expectedQ: "360p", expectedH: 360 },
+    { tag: "dash_r2av1-r1gen2vp9-adv_q20", bitrate: 342903, expectedQ: "240p", expectedH: 240 },
+    { tag: "xpv_progressive.FACEBOOK..C3.360.sve_sd", bitrate: 0, expectedQ: "360p", expectedH: 360 }
+  ];
+
+  for (const c of cases) {
+    const efg = encodeEfg({
+      vencode_tag: c.tag,
+      video_id: 1810888224374101,
+      xpv_asset_id: 2128231754475728,
+      duration_s: 18,
+      bitrate: c.bitrate
+    });
+    const url = `https://scontent.fhan15-1.fna.fbcdn.net/o1/v/t2/f2/m367/AQTest.mp4?efg=${encodeURIComponent(efg)}&bytestart=0&byteend=327679`;
+    assert.deepEqual(inferQualityFromUrl(url), { quality: c.expectedQ, height: c.expectedH });
+    const media = classifyMediaResponse(url, [
+      { name: "content-type", value: "video/mp4" },
+      { name: "content-length", value: "327680" }
+    ]);
+    assert.ok(media, `expected media for ${c.tag}`);
+    assert.equal(media.quality, c.expectedQ);
+    assert.equal(media.height, c.expectedH);
+    assert.equal(media.fbVideoId, "1810888224374101");
+    if (c.bitrate > 0) assert.equal(media.bandwidth, c.bitrate);
+  }
+});
+
+test("Facebook DASH preload chunk without bytestart suppresses bogus partial content-length", () => {
+  // 2.87 Mbps * 18s / 8 = ~6.46 MB full stream; a 336 KB preload response must not report 336 KB as full size.
+  const efg = encodeEfg({
+    vencode_tag: "dash_r2av1-r1gen2vp9-adv_q90",
+    video_id: 1810888224374101,
+    duration_s: 18,
+    bitrate: 2874817
+  });
+  const url = `https://scontent.fhan15-1.fna.fbcdn.net/o1/v/t2/f2/m367/AQPreload.mp4?efg=${encodeURIComponent(efg)}`;
+  const media = classifyMediaResponse(url, [
+    { name: "content-type", value: "video/mp4" },
+    { name: "content-length", value: String(336896) }
+  ]);
+  assert.ok(media);
+  assert.equal(media.quality, "1080p");
+  assert.equal(media.size, 0, "partial preload chunk size should be suppressed");
+  assert.equal(media.bandwidth, 2874817);
+  assert.equal(media.fbVideoId, "1810888224374101");
+});

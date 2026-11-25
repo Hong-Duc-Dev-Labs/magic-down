@@ -30,8 +30,11 @@
   let latestYtEntry = null;
   let lastHref = location.href;
   const sniffed = new Map(); // url -> { kind, mime, at }
-  const weiboGroups = new Map(); // groupId -> { id, at, variants }
+  const weiboGroups = new Map(); // groupId -> { id, mediaId, at, variants }
   const weiboUrlToGroup = new Map(); // dedupKey -> groupId
+  const weiboMediaIdToGroup = new Map(); // media_id -> groupId
+  const weiboPathToGroup = new Map(); // normalized weibocdn path -> groupId
+  const fbMpdMeta = new Map(); // fbcdn pathname -> { quality, height, width, bandwidth }
   const manifestCache = new Map(); // manifest url -> { at, ok, kind, variants, reason }
   const pendingManifests = new Set();
   const videoTiming = new WeakMap(); // video -> { at }
@@ -66,6 +69,58 @@
     return /\.(mp4|webm|mkv|mov|m4v)$/.test(path);
   }
 
+  function weiboMediaIdFromUrl(rawUrl) {
+    try {
+      const u = new URL(rawUrl, location.href);
+      return u.searchParams.get("media_id") || "";
+    } catch {
+      return "";
+    }
+  }
+
+  function weiboPathKey(rawUrl) {
+    try {
+      const u = new URL(rawUrl, location.href);
+      const host = u.hostname.toLowerCase();
+      if ((host === "weibocdn.com" || host.endsWith(".weibocdn.com") || host.endsWith(".sinaimg.cn")) && u.pathname && u.pathname !== "/") {
+        return `weibo:${u.pathname}`;
+      }
+    } catch {
+      // ignore
+    }
+    return "";
+  }
+
+  function fbcdnPathKey(rawUrl) {
+    try {
+      const u = new URL(rawUrl, location.href);
+      const host = u.hostname.toLowerCase();
+      if ((host === "fbcdn.net" || host.endsWith(".fbcdn.net")) && u.pathname && u.pathname !== "/") {
+        return u.pathname;
+      }
+    } catch {
+      // ignore
+    }
+    return "";
+  }
+
+  function findWeiboGroupForUrl(rawUrl) {
+    if (!rawUrl) return null;
+    const byKey = weiboUrlToGroup.get(mediaDedupKey(rawUrl));
+    if (byKey && weiboGroups.has(byKey)) return weiboGroups.get(byKey);
+    const mid = weiboMediaIdFromUrl(rawUrl);
+    if (mid) {
+      const byMid = weiboMediaIdToGroup.get(mid);
+      if (byMid && weiboGroups.has(byMid)) return weiboGroups.get(byMid);
+    }
+    const pkey = weiboPathKey(rawUrl);
+    if (pkey) {
+      const byPath = weiboPathToGroup.get(pkey);
+      if (byPath && weiboGroups.has(byPath)) return weiboGroups.get(byPath);
+    }
+    return null;
+  }
+
   function ingestSniff(item) {
     if (!item || typeof item !== "object") return;
     const kind = typeof item.k === "string" ? item.k : "";
@@ -81,9 +136,26 @@
       sniffDrm = true;
       return;
     }
+    if (kind === "fb-mpd" && Array.isArray(item.v) && item.v.length > 0) {
+      for (const rep of item.v) {
+        if (!rep || typeof rep.p !== "string" || !rep.p) continue;
+        fbMpdMeta.set(rep.p, {
+          quality: rep.q || "",
+          height: Number(rep.h) || 0,
+          width: Number(rep.w) || 0,
+          bandwidth: Number(rep.bw) || 0
+        });
+        while (fbMpdMeta.size > 200) {
+          fbMpdMeta.delete(fbMpdMeta.keys().next().value);
+        }
+      }
+      scheduleRefresh();
+      return;
+    }
     if (kind === "weibo-group" && Array.isArray(item.v) && item.v.length > 0) {
-      const id = String(item.id || item.v[0].url || at);
-      const variants = item.v
+      const id = String(item.id || item.mid || item.v[0].url || at);
+      const mediaId = String(item.mid || "");
+      const rawVariants = item.v
         .filter((v) => v && typeof v.url === "string" && /^https?:/i.test(v.url))
         .map((v) => ({
           url: v.url,
@@ -91,24 +163,45 @@
           height: Number(v.height) || inferQualityFromUrl(v.url).height || 0,
           size: Number(v.size) || 0,
           bandwidth: Number(v.bandwidth) || 0,
-          format: v.format || "MP4",
-          isHLS: false,
+          format: v.format || (v.isHLS ? "HLS" : "MP4"),
+          isHLS: Boolean(v.isHLS),
           source: "weibo"
         }))
         .sort((a, b) => (b.height || 0) - (a.height || 0) || (b.bandwidth || 0) - (a.bandwidth || 0) || (b.size || 0) - (a.size || 0));
+      // Deduplicate same quality+format within a single Weibo post (keep highest bitrate/size).
+      const seenQ = new Set();
+      const variants = [];
+      for (const v of rawVariants) {
+        const qk = `${v.quality}|${v.format}`;
+        if (seenQ.has(qk)) continue;
+        seenQ.add(qk);
+        variants.push(v);
+      }
       if (variants.length > 0) {
-        weiboGroups.set(id, { id, at, variants });
+        weiboGroups.set(id, { id, mediaId, at, variants });
+        if (mediaId) weiboMediaIdToGroup.set(mediaId, id);
         for (const v of variants) {
           weiboUrlToGroup.set(mediaDedupKey(v.url), id);
+          const vMid = weiboMediaIdFromUrl(v.url);
+          if (vMid) weiboMediaIdToGroup.set(vMid, id);
+          const pkey = weiboPathKey(v.url);
+          if (pkey) weiboPathToGroup.set(pkey, id);
         }
         while (weiboGroups.size > 60) {
           const oldestId = weiboGroups.keys().next().value;
           const oldest = weiboGroups.get(oldestId);
           weiboGroups.delete(oldestId);
           if (oldest) {
+            if (oldest.mediaId && weiboMediaIdToGroup.get(oldest.mediaId) === oldestId) {
+              weiboMediaIdToGroup.delete(oldest.mediaId);
+            }
             for (const v of oldest.variants) {
               if (weiboUrlToGroup.get(mediaDedupKey(v.url)) === oldestId) {
                 weiboUrlToGroup.delete(mediaDedupKey(v.url));
+              }
+              const pkey = weiboPathKey(v.url);
+              if (pkey && weiboPathToGroup.get(pkey) === oldestId) {
+                weiboPathToGroup.delete(pkey);
               }
             }
           }
@@ -885,9 +978,9 @@
       // videos never stack into this player's menu.
       let matchedWeiboGroup = null;
       for (const item of directCandidates) {
-        const gid = weiboUrlToGroup.get(mediaDedupKey(item.url));
-        if (gid && weiboGroups.has(gid)) {
-          matchedWeiboGroup = weiboGroups.get(gid);
+        const group = findWeiboGroupForUrl(item.url);
+        if (group) {
+          matchedWeiboGroup = group;
           break;
         }
       }
@@ -898,6 +991,15 @@
       }
       for (const item of directCandidates) {
         if (planURLs.has(item.url)) continue;
+        // If we already matched the Weibo group for this video, skip adding a
+        // duplicate entry for the same quality/pathname as the active <video>.
+        if (matchedWeiboGroup) {
+          const itemPath = weiboPathKey(item.url);
+          const alreadyInGroup = matchedWeiboGroup.variants.some(
+            (v) => (itemPath && weiboPathKey(v.url) === itemPath) || (v.quality === item.quality && v.format === item.format)
+          );
+          if (alreadyInGroup) continue;
+        }
         const key = mediaDedupKey(item.url);
         const net = networkByKey.get(key);
         const enriched = net
@@ -930,11 +1032,37 @@
         );
         if (near.length > 0) scopedNetwork = near;
       }
-      for (const item of scopedNetwork) {
+      // On Facebook /watch/ and feeds, preloaded next videos arrive with
+      // different fbVideoId values. Scope to the most recently active fbVideoId
+      // and collapse duplicate quality tiers for that video.
+      const fbItems = scopedNetwork.filter((item) => item && item.fbVideoId);
+      if (fbItems.length > 0) {
+        const latestFb = fbItems.reduce((best, cur) => ((cur.detectedAt || 0) > (best.detectedAt || 0) ? cur : best), fbItems[0]);
+        const targetFbId = latestFb.fbVideoId;
+        scopedNetwork = scopedNetwork.filter((item) => !item.fbVideoId || item.fbVideoId === targetFbId);
+      }
+      const seenFbQuality = new Set();
+      for (const rawItem of scopedNetwork) {
+        let item = rawItem;
+        const fbPath = fbcdnPathKey(item.url);
+        if (fbPath && fbMpdMeta.has(fbPath)) {
+          const m = fbMpdMeta.get(fbPath);
+          item = {
+            ...item,
+            quality: m.quality || item.quality,
+            height: m.height || item.height || 0,
+            bandwidth: m.bandwidth || item.bandwidth || 0
+          };
+        }
+        if (item.fbVideoId && item.quality && item.quality !== "Original") {
+          const qKey = `${item.fbVideoId}|${item.quality}|${item.format || "MP4"}`;
+          if (seenFbQuality.has(qKey)) continue;
+          seenFbQuality.add(qKey);
+        }
         const key = mediaDedupKey(item.url);
-        const gid = weiboUrlToGroup.get(key);
-        if (gid && weiboGroups.has(gid)) {
-          for (const variant of weiboGroups.get(gid).variants) {
+        const group = findWeiboGroupForUrl(item.url);
+        if (group) {
+          for (const variant of group.variants) {
             push(mediaDedupKey(variant.url), variant);
           }
         }

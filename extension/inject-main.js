@@ -365,11 +365,40 @@
     return { quality: "Original", height: 0 };
   }
 
+  const WEIBO_SKIP_KEYS = new Set([
+    "pic_infos",
+    "user",
+    "annotations",
+    "title_source",
+    "comment_manage_info",
+    "number_display_strategy",
+    "actionlog",
+    "buttons",
+    "icon_list"
+  ]);
+
+  function extractMediaIdFromUrl(rawUrl) {
+    try {
+      const u = new URL(rawUrl, location.href);
+      return u.searchParams.get("media_id") || "";
+    } catch {
+      return "";
+    }
+  }
+
+  function isWeiboNonVideoEntry(url, mime, label) {
+    const m = String(mime || "").toLowerCase();
+    const l = String(label || "").toLowerCase();
+    if (m.startsWith("image/") || l.includes("scrubber") || l.includes("thumb")) return true;
+    const path = String(url || "").split("?")[0].split("#")[0].toLowerCase();
+    return /\.(?:jpg|jpeg|png|webp|gif|bmp)$/i.test(path);
+  }
+
   function extractWeiboGroups(data) {
     const groups = [];
     const stack = [data];
     let guard = 0;
-    while (stack.length > 0 && guard < 6000) {
+    while (stack.length > 0 && guard < 50000) {
       guard++;
       const node = stack.pop();
       if (!node || typeof node !== "object") continue;
@@ -380,31 +409,41 @@
 
       if (Array.isArray(node.playback_list) && node.playback_list.length > 0) {
         const variants = [];
+        let inferredMediaId = "";
         for (const entry of node.playback_list) {
           const info = entry && entry.play_info;
           const meta = entry && entry.meta;
           const url = info && typeof info.url === "string" ? info.url : "";
           if (!url || !/^https?:/i.test(url)) continue;
           const label = (meta && (meta.quality_label || meta.label)) || "";
+          const mime = String((info && info.mime) || "");
+          if (isWeiboNonVideoEntry(url, mime, label)) continue;
+          if (!inferredMediaId) inferredMediaId = extractMediaIdFromUrl(url);
           const w = Number(info.width) || 0;
           const h = Number(info.height) || 0;
           const q = parseWeiboQuality(label, w, h);
+          const isHLS = /\.m3u8(?:$|[?#])/i.test(url) || /mpegurl|mp2t/i.test(mime);
           variants.push({
             url: url.slice(0, MAX_URL),
             quality: q.quality,
             height: q.height,
             size: Number(info.size || (meta && meta.size)) || 0,
             bandwidth: Number(info.bitrate || (meta && meta.bitrate)) || 0,
-            format: /webm/i.test(String(info.mime || "")) ? "WebM" : "MP4"
+            format: isHLS ? "HLS" : (/webm/i.test(mime) ? "WebM" : "MP4"),
+            isHLS
           });
         }
         if (variants.length > 0) {
-          const id = String(node.media_id || node.media_id_str || node.object_id || variants[0].url);
-          groups.push({ id, variants });
+          const rawObjId = String(node.object_id || "");
+          const objSuffix = rawObjId.includes(":") ? rawObjId.split(":").pop() : "";
+          const mediaId = String(node.media_id || node.media_id_str || inferredMediaId || objSuffix || "");
+          const id = mediaId || rawObjId || variants[0].url;
+          groups.push({ id, mediaId, variants });
         }
       }
 
       for (const key of Object.keys(node)) {
+        if (WEIBO_SKIP_KEYS.has(key)) continue;
         const val = node[key];
         if (val && typeof val === "object") stack.push(val);
       }
@@ -412,23 +451,91 @@
     return groups;
   }
 
+  function emitWeiboGroups(groups) {
+    if (!groups || groups.length === 0) return;
+    const at = Date.now();
+    for (const g of groups.slice(0, 40)) {
+      const entry = { k: "weibo-group", id: g.id, mid: g.mediaId || "", v: g.variants, t: at };
+      items.push(entry);
+      if (items.length > MAX_ITEMS) items.splice(0, items.length - MAX_ITEMS);
+      pending.push(entry);
+      if (pending.length > MAX_ITEMS) pending.splice(0, pending.length - MAX_ITEMS);
+    }
+    scheduleFlush();
+  }
+
+  function inspectWeiboJsonObject(obj) {
+    if (!obj || typeof obj !== "object") return;
+    try {
+      emitWeiboGroups(extractWeiboGroups(obj));
+    } catch {
+      // ignore
+    }
+  }
+
   function inspectWeiboJsonText(text) {
-    if (!text || text.length > 4 * 1024 * 1024 || !text.includes("playback_list")) return;
+    if (!text || text.length > 6 * 1024 * 1024 || !text.includes("playback_list")) return;
     try {
       const parsed = JSON.parse(text);
-      const groups = extractWeiboGroups(parsed);
-      if (groups.length === 0) return;
-      const at = Date.now();
-      for (const g of groups.slice(0, 30)) {
-        const entry = { k: "weibo-group", id: g.id, v: g.variants, t: at };
-        items.push(entry);
-        if (items.length > MAX_ITEMS) items.splice(0, items.length - MAX_ITEMS);
-        pending.push(entry);
-        if (pending.length > MAX_ITEMS) pending.splice(0, pending.length - MAX_ITEMS);
-      }
-      scheduleFlush();
+      emitWeiboGroups(extractWeiboGroups(parsed));
     } catch {
       // ignore non-JSON responses
+    }
+  }
+
+  // --- Facebook inline MPD representation extraction -------------------------
+  // Facebook embeds DASH MPD XML inside GraphQL/page JSON payloads. Extracting
+  // Representation width/height/FBQualityLabel/bandwidth -> BaseURL pathname
+  // lets content.js label adaptive q20..q90 tracks with exact resolutions.
+  const IS_FACEBOOK = /(?:^|\.)(?:facebook\.com|fb\.watch)$/i.test(location.hostname || "");
+
+  function extractFacebookMpdReps(text) {
+    if (!text || !text.includes("FBQualityLabel")) return [];
+    const reps = [];
+    const seen = new Set();
+    // Matches escaped or unescaped XML Representation blocks with BaseURL.
+    const normalized = text.includes("\\u003C") ? text.replace(/\\u003C/g, "<").replace(/\\"/g, '"').replace(/\\\//g, "/") : text;
+    const repRe = /<Representation\b([^>]+)>([\s\S]{0,1600}?)<BaseURL>([^<]+)<\/BaseURL>/gi;
+    let m;
+    while ((m = repRe.exec(normalized)) !== null && reps.length < 40) {
+      const attrs = m[1];
+      const rawUrl = m[3].replace(/&amp;/g, "&").trim();
+      if (!/^https?:\/\/[^/]*fbcdn\.net\//i.test(rawUrl)) continue;
+      let path = "";
+      try {
+        path = new URL(rawUrl).pathname;
+      } catch {
+        continue;
+      }
+      if (!path || seen.has(path)) continue;
+      seen.add(path);
+      const qLabel = (attrs.match(/FBQualityLabel="([^"]+)"/i) || [])[1] || "";
+      const w = Number.parseInt((attrs.match(/\bwidth="(\d+)"/i) || [])[1] || "0", 10) || 0;
+      const h = Number.parseInt((attrs.match(/\bheight="(\d+)"/i) || [])[1] || "0", 10) || 0;
+      const bw = Number.parseInt((attrs.match(/\bbandwidth="(\d+)"/i) || [])[1] || "0", 10) || 0;
+      const minDim = w > 0 && h > 0 ? Math.min(w, h) : h;
+      const qMatch = qLabel.match(/(\d{3,4})p/i);
+      const height = qMatch ? Number.parseInt(qMatch[1], 10) : minDim;
+      const quality = qMatch ? `${height}p` : (height >= 144 && height <= 4320 ? `${height}p` : "");
+      if (!quality && !bw) continue;
+      reps.push({ p: path, q: quality, h: height, w, bw });
+    }
+    return reps;
+  }
+
+  function inspectFacebookText(text) {
+    if (!IS_FACEBOOK || !text || text.length > 6 * 1024 * 1024 || !text.includes("FBQualityLabel")) return;
+    try {
+      const reps = extractFacebookMpdReps(text);
+      if (reps.length === 0) return;
+      const entry = { k: "fb-mpd", v: reps, t: Date.now() };
+      items.push(entry);
+      if (items.length > MAX_ITEMS) items.splice(0, items.length - MAX_ITEMS);
+      pending.push(entry);
+      if (pending.length > MAX_ITEMS) pending.splice(0, pending.length - MAX_ITEMS);
+      scheduleFlush();
+    } catch {
+      // ignore
     }
   }
 
@@ -451,6 +558,17 @@
                 try {
                   if (resp && resp.ok && typeof resp.clone === "function") {
                     resp.clone().text().then(inspectWeiboJsonText).catch(() => {});
+                  }
+                } catch {
+                  // ignore
+                }
+              }).catch(() => {});
+            }
+            if (IS_FACEBOOK && url && /\/api\/graphql/i.test(url) && promise && typeof promise.then === "function") {
+              promise.then((resp) => {
+                try {
+                  if (resp && resp.ok && typeof resp.clone === "function") {
+                    resp.clone().text().then(inspectFacebookText).catch(() => {});
                   }
                 } catch {
                   // ignore
@@ -490,8 +608,22 @@
               this.__mdWeiboHooked = true;
               this.addEventListener("load", () => {
                 try {
-                  if (typeof this.responseText === "string") {
+                  if (this.responseType === "json" && this.response) {
+                    inspectWeiboJsonObject(this.response);
+                  } else if ((!this.responseType || this.responseType === "text") && typeof this.responseText === "string") {
                     inspectWeiboJsonText(this.responseText);
+                  }
+                } catch {
+                  // ignore
+                }
+              });
+            }
+            if (IS_FACEBOOK && safeUrl && /\/api\/graphql/i.test(safeUrl) && !this.__mdFbHooked) {
+              this.__mdFbHooked = true;
+              this.addEventListener("load", () => {
+                try {
+                  if ((!this.responseType || this.responseType === "text") && typeof this.responseText === "string") {
+                    inspectFacebookText(this.responseText);
                   }
                 } catch {
                   // ignore
