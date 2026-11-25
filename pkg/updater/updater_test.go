@@ -92,12 +92,12 @@ func TestCheckDownloadVerifyAndStage(t *testing.T) {
 	var srv *httptest.Server
 	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/repos/hongducdev/MagicDown/releases/latest":
+		case "/repos/Hong-Duc-Dev-Labs/MagicDown/releases/latest":
 			rel := githubRelease{
 				TagName: "v1.2.3",
 				Name:    "MagicDown v1.2.3",
 				Body:    "- Added auto-updater\n- Bug fixes",
-				HTMLURL: "https://github.com/hongducdev/MagicDown/releases/tag/v1.2.3",
+				HTMLURL: "https://github.com/Hong-Duc-Dev-Labs/MagicDown/releases/tag/v1.2.3",
 				Assets: []githubAsset{
 					{
 						Name:               "MagicDown-windows-amd64.zip",
@@ -123,7 +123,7 @@ func TestCheckDownloadVerifyAndStage(t *testing.T) {
 	defer srv.Close()
 
 	u := New(Options{
-		Repo:           "hongducdev/MagicDown",
+		Repo:           "Hong-Duc-Dev-Labs/MagicDown",
 		CurrentVersion: "v0.1.0",
 		APIBaseURL:     srv.URL,
 		HTTPClient:     srv.Client(),

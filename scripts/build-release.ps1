@@ -45,7 +45,7 @@ try {
         if ($LASTEXITCODE -eq 0 -and $remoteUrl -match "github\.com[:/]([^/]+/[^/\s]+?)(?:\.git)?$") {
             $GitHubRepo = $Matches[1]
         } else {
-            $GitHubRepo = "hongducdev/MagicDown"
+            $GitHubRepo = "Hong-Duc-Dev-Labs/MagicDown"
         }
     }
 
