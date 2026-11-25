@@ -37,7 +37,10 @@ const els = {
   domainChips: document.getElementById("domainChips"),
   addDomainInput: document.getElementById("addDomainInput"),
   addDomainBtn: document.getElementById("addDomainBtn"),
-  footerStatus: document.getElementById("footerStatus")
+  footerStatus: document.getElementById("footerStatus"),
+  detectedVideosCard: document.getElementById("detectedVideosCard"),
+  detectedVideoCount: document.getElementById("detectedVideoCount"),
+  detectedVideoList: document.getElementById("detectedVideoList")
 };
 
 let state = {
@@ -276,6 +279,72 @@ async function checkConnection() {
   }
 }
 
+function formatVideoMeta(v) {
+  const parts = [v.format || "MP4"];
+  if (v.size > 0) {
+    const mb = v.size / (1024 * 1024);
+    parts.push(mb >= 1024 ? `${(mb / 1024).toFixed(2)} GB` : `${mb.toFixed(1)} MB`);
+  } else if (v.bandwidth > 0) {
+    parts.push(`${(v.bandwidth / 1000000).toFixed(1)} Mbps`);
+  }
+  return parts.join(" · ");
+}
+
+function renderDetectedVideos(videos) {
+  if (!els.detectedVideosCard || !els.detectedVideoList) return;
+  if (!Array.isArray(videos) || videos.length === 0) {
+    els.detectedVideosCard.classList.add("hidden");
+    return;
+  }
+  els.detectedVideosCard.classList.remove("hidden");
+  els.detectedVideoCount.textContent = String(videos.length);
+  els.detectedVideoList.textContent = "";
+
+  for (const v of videos.slice(0, 5)) {
+    const row = document.createElement("div");
+    row.className = "detected-item";
+
+    const info = document.createElement("div");
+    info.className = "detected-info";
+
+    const q = document.createElement("span");
+    q.className = "detected-quality";
+    q.textContent = v.quality || "Original";
+
+    const meta = document.createElement("span");
+    meta.className = "detected-meta";
+    meta.textContent = formatVideoMeta(v);
+
+    info.appendChild(q);
+    info.appendChild(meta);
+
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "detected-dl-btn";
+    btn.textContent = "Download";
+    btn.addEventListener("click", async () => {
+      if (!isExtensionEnv) {
+        showToast("Preview mode: video queued.", "success");
+        return;
+      }
+      const resp = await chrome.runtime.sendMessage({
+        type: "download",
+        url: v.url
+      });
+      if (resp && resp.success) {
+        showToast("Video sent to MagicDown.", "success");
+        await loadState();
+      } else {
+        showToast(resp?.error || "Desktop app offline.", "error");
+      }
+    });
+
+    row.appendChild(info);
+    row.appendChild(btn);
+    els.detectedVideoList.appendChild(row);
+  }
+}
+
 async function detectActiveTabHost() {
   if (!isExtensionEnv) {
     state.currentHost = "github.com";
@@ -288,6 +357,14 @@ async function detectActiveTabHost() {
       state.currentHost = new URL(tab.url).hostname.toLowerCase();
     } else {
       state.currentHost = "";
+    }
+    if (tab && typeof tab.id === "number") {
+      chrome.runtime.sendMessage({ type: "getDetectedVideos", tabId: tab.id }, (resp) => {
+        if (chrome.runtime.lastError) return;
+        if (resp && Array.isArray(resp.videos)) {
+          renderDetectedVideos(resp.videos);
+        }
+      });
     }
   } catch {
     state.currentHost = "";

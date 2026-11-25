@@ -91,6 +91,15 @@
       <!-- Inline Toast Feedback -->
       <div id="toast" class="toast hidden" role="status"></div>
 
+      <!-- Detected Videos on Active Tab (shown when videos found) -->
+      <section id="detectedVideosCard" class="card detected-card hidden">
+        <div class="panel-header">
+          <span class="section-label">VIDEOS ON THIS PAGE</span>
+          <span id="detectedVideoCount" class="tab-badge">0</span>
+        </div>
+        <div id="detectedVideoList" class="detected-list"></div>
+      </section>
+
       <!-- Segmented Tabs -->
       <div class="tabs" role="tablist">
         <button id="tabActivityBtn" class="tab active" role="tab" aria-selected="true">
