@@ -15,10 +15,20 @@ import (
 	"magicdown/pkg/ipc"
 )
 
+// WindowController abstracts native window caption actions so the UI remains decoupled and testable.
+type WindowController interface {
+	Minimize()
+	ToggleMaximize()
+	IsMaximized() bool
+	Close()
+}
+
 // App holds the UI state for MagicDown's MyGo Native UI desktop application.
 type App struct {
 	engine    *engine.Engine
 	ipcServer *ipc.Server
+	winCtrl   WindowController
+	maximized bool
 
 	darkMode       bool
 	filterStatus   string       // "All", "Downloading", "Completed", "Queued", "Failed"
@@ -59,6 +69,16 @@ func NewApp(eng *engine.Engine, srv *ipc.Server) *App {
 		settingMaxConcurrent: cfg.MaxConcurrentDownloads,
 		settingSegments:      cfg.DefaultSegments,
 	}
+}
+
+// SetWindowController attaches the native MyGo window controller for custom title bar buttons.
+func (a *App) SetWindowController(ctrl WindowController) {
+	a.winCtrl = ctrl
+}
+
+// SetMaximized updates the cached maximize state (wired from Window.OnMaximize/OnUnmaximize).
+func (a *App) SetMaximized(maxed bool) {
+	a.maximized = maxed
 }
 
 func (a *App) palette() Palette {
@@ -128,21 +148,112 @@ func (a *App) View(c *ui.Context) {
 		catCounts[ClassifyFile(t.Filename, t.URL)]++
 	}
 
-	// Root window layout: Left Sidebar + Right Main Column
-	ui.Row(c).Fill().AlignItems(ui.Stretch).Background(pal.Canvas).TextColor(pal.TextPrimary).Children(func() {
-		a.renderSidebar(c, pal, statusCounts, catCounts)
+	// Root window layout: Integrated Custom Title Bar + (Left Sidebar | Right Main Column)
+	ui.Column(c).Fill().Background(pal.Canvas).TextColor(pal.TextPrimary).Children(func() {
+		a.renderTitleBar(c, pal)
 
-		// Main right column: Header + List + Status Bar
-		ui.Column(c).Fill().Grow(1).Children(func() {
-			a.renderHeader(c, pal, selectedTask, completedCount)
-			a.renderDownloadList(c, pal, tasks)
-			a.renderStatusBar(c, pal, statusCounts["Downloading"], statusCounts["Queued"], totalSpeed)
+		ui.Row(c).Fill().Grow(1).AlignItems(ui.Stretch).Children(func() {
+			a.renderSidebar(c, pal, statusCounts, catCounts)
+
+			// Main right column: Header + List + Status Bar
+			ui.Column(c).Fill().Grow(1).Children(func() {
+				a.renderHeader(c, pal, selectedTask, completedCount)
+				a.renderDownloadList(c, pal, tasks)
+				a.renderStatusBar(c, pal, statusCounts["Downloading"], statusCounts["Queued"], totalSpeed)
+			})
 		})
 	})
 
 	// Modals
 	a.renderAddModal(c, pal)
 	a.renderSettingsModal(c, pal)
+}
+
+func (a *App) renderTitleBar(c *ui.Context, pal Palette) {
+	ui.Row(c).
+		Height(38).
+		Shrink(0).
+		Background(pal.Sidebar).
+		BorderWidth(0, 0, 1, 0).
+		BorderColor(pal.Border).
+		AlignItems(ui.Stretch).
+		Children(func() {
+			// Draggable left + center title strip (supports drag & double-click to maximize)
+			ui.Row(c).
+				Grow(1).
+				Padding(0, 14).
+				Gap(8).
+				AlignItems(ui.Center).
+				DragWindow().
+				Children(func() {
+					ui.Row(c).Width(20).Height(20).Radius(5).Background(pal.Accent).Center().Shrink(0).Children(func() {
+						ui.Icon(c, iconBolt).Width(12).Height(12).TextColor(pal.AccentText)
+					})
+					ui.Text(c, "MagicDown").FontSize(13).FontWeight(700).TextColor(pal.TextPrimary).SingleLine()
+					ui.Box(c).Padding(1, 5).Radius(4).Background(pal.BadgeBg).Shrink(0).Children(func() {
+						ui.Text(c, "v1.0").FontSize(10).FontWeight(600).TextColor(pal.TextMuted).SingleLine()
+					})
+					ui.Text(c, "—").FontSize(11).TextColor(pal.BorderStrong).SingleLine()
+					ui.Text(c, "Multi-Segment Download Manager").FontSize(11).TextColor(pal.TextMuted).SingleLine()
+					ui.Spacer(c)
+				})
+
+			// Native-style Minimize, Maximize/Restore (with Windows 11 Snap Layout), and Close buttons
+			ui.Row(c).Shrink(0).AlignItems(ui.Stretch).Children(func() {
+				// Minimize
+				minBtn := ui.Row(c).Width(46).Center().Cursor(ui.CursorPointer).Focusable()
+				minBg := ui.Transparent
+				minFg := pal.TextSecondary
+				if minBtn.Hovered() {
+					minBg = pal.NavHover
+					minFg = pal.TextPrimary
+				}
+				minBtn.Background(minBg).Children(func() {
+					ui.Icon(c, iconWinMin).Width(11).Height(11).TextColor(minFg)
+				})
+				if minBtn.Clicked() && a.winCtrl != nil {
+					a.winCtrl.Minimize()
+				}
+
+				// Maximize / Restore
+				isMax := a.maximized
+				if a.winCtrl != nil {
+					isMax = a.winCtrl.IsMaximized()
+				}
+				maxIcon := iconWinMax
+				if isMax {
+					maxIcon = iconWinRestore
+				}
+				maxBtn := ui.Row(c).Width(46).Center().Cursor(ui.CursorPointer).Focusable().MaximizeButton()
+				maxBg := ui.Transparent
+				maxFg := pal.TextSecondary
+				if maxBtn.Hovered() {
+					maxBg = pal.NavHover
+					maxFg = pal.TextPrimary
+				}
+				maxBtn.Background(maxBg).Children(func() {
+					ui.Icon(c, maxIcon).Width(11).Height(11).TextColor(maxFg)
+				})
+				if maxBtn.Clicked() && a.winCtrl != nil {
+					a.winCtrl.ToggleMaximize()
+				}
+
+				// Close (semantic Windows red hover)
+				closeBtn := ui.Row(c).Width(46).Center().Cursor(ui.CursorPointer).Focusable()
+				closeBg := ui.Transparent
+				closeFg := pal.TextSecondary
+				if closeBtn.Hovered() {
+					closeBg = ui.Hex("#E81123")
+					closeFg = ui.Hex("#FFFFFF")
+				}
+				closeBtn.Background(closeBg).Children(func() {
+					ui.Icon(c, iconWinClose).Width(11).Height(11).TextColor(closeFg)
+				})
+				if closeBtn.Clicked() && a.winCtrl != nil {
+					a.winCtrl.Close()
+				}
+			})
+		})
 }
 
 func (a *App) openAddModal() {
@@ -176,25 +287,9 @@ func (a *App) renderSidebar(c *ui.Context, pal Palette, statusCounts map[string]
 		Background(pal.Sidebar).
 		BorderWidth(0, 1, 0, 0).
 		BorderColor(pal.Border).
-		Padding(16, 12, 12, 12).
+		Padding(14, 12, 12, 12).
 		Gap(14).
 		Children(func() {
-			// Brand header
-			ui.Row(c).Padding(2, 6).Gap(10).AlignItems(ui.Center).Children(func() {
-				ui.Row(c).Width(30).Height(30).Radius(8).Background(pal.Accent).Center().Shrink(0).Children(func() {
-					ui.Icon(c, iconBolt).Width(16).Height(16).TextColor(pal.AccentText)
-				})
-				ui.Column(c).Gap(1).Grow(1).Children(func() {
-					ui.Row(c).Gap(6).AlignItems(ui.Center).Children(func() {
-						ui.Text(c, "MagicDown").FontSize(15).FontWeight(700).TextColor(pal.TextPrimary).SingleLine()
-						ui.Box(c).Padding(1, 5).Radius(4).Background(pal.BadgeBg).Children(func() {
-							ui.Text(c, "v1.0").FontSize(10).FontWeight(600).TextColor(pal.TextMuted).SingleLine()
-						})
-					})
-					ui.Text(c, "Download Manager").FontSize(11).TextColor(pal.TextMuted).SingleLine()
-				})
-			})
-
 			// Status section
 			ui.Column(c).Gap(3).Children(func() {
 				ui.Text(c, "DOWNLOADS").FontSize(10).FontWeight(700).TextColor(pal.TextMuted).Padding(0, 10, 4, 10)

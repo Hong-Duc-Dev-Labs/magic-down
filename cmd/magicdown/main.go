@@ -1,6 +1,7 @@
 package main
 
 import (
+	_ "embed"
 	"flag"
 	"log"
 	"os"
@@ -14,6 +15,9 @@ import (
 	"magicdown/pkg/ipc"
 	"magicdown/pkg/nativemessaging"
 )
+
+//go:embed icon.png
+var appIconPNG []byte
 
 func main() {
 	// Support running as Chrome/Edge Native Messaging host via subcommand:
@@ -66,14 +70,21 @@ func main() {
 	appUI := gui.NewApp(eng, ipcServer)
 
 	mygo.App.WhenReady(func() {
-		mygo.NewWindow(mygo.WindowOptions{
-			Title:     "MagicDown",
-			Width:     1120,
-			Height:    700,
-			MinWidth:  920,
-			MinHeight: 580,
-			Content:   ui.View(appUI.View),
+		w := mygo.NewWindow(mygo.WindowOptions{
+			Title:             "MagicDown",
+			Width:             1120,
+			Height:            700,
+			MinWidth:          920,
+			MinHeight:         580,
+			TitleBarStyle:     mygo.TitleBarHidden,
+			TitleBarHeight:    38,
+			HideWindowButtons: true,
+			Content:           ui.View(appUI.View),
 		})
+		_ = w.SetIcon(appIconPNG)
+		appUI.SetWindowController(w)
+		w.OnMaximize(func() { appUI.SetMaximized(true) })
+		w.OnUnmaximize(func() { appUI.SetMaximized(false) })
 	})
 
 	if err := mygo.App.Run(); err != nil {
