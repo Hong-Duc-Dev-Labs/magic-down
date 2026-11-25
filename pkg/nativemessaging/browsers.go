@@ -22,6 +22,7 @@ type BrowserInfo struct {
 	Name                     string
 	ExeName                  string
 	ExecutablePath           string
+	Version                  string
 	Installed                bool
 	Family                   string
 	NativeMessagingKey       string

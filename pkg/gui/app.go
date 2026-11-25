@@ -72,10 +72,13 @@ type App struct {
 	nativeRegMsg        string
 
 	// Detected Chromium browsers for Welcome Setup & Settings integration
-	detectedBrowsers []nativemessaging.BrowserInfo
-	selectedBrowsers map[string]bool
-	browserResults   map[string]nativemessaging.BrowserInstallResult
-	extensionDir     string
+	detectedBrowsers      []nativemessaging.BrowserInfo
+	selectedBrowsers      map[string]bool
+	browserResults        map[string]nativemessaging.BrowserInstallResult
+	browserConnStates     map[string]nativemessaging.ExtensionConnectionState
+	troubleshootBrowserID string
+	openStoreURLFn        func(nativemessaging.BrowserInfo, string) error
+	extensionDir          string
 
 	darkMode       bool
 	filterStatus   string       // "All", "Downloading", "Completed", "Queued", "Failed"
@@ -164,6 +167,8 @@ func NewApp(eng *engine.Engine, srv *ipc.Server) *App {
 		integrateBrowsersFn:       nativemessaging.IntegrateBrowsers,
 		selectedBrowsers:          make(map[string]bool),
 		browserResults:            make(map[string]nativemessaging.BrowserInstallResult),
+		browserConnStates:         make(map[string]nativemessaging.ExtensionConnectionState),
+		openStoreURLFn:            nativemessaging.OpenStoreURL,
 		extensionDir:              nativemessaging.ResolveExtensionDir(),
 		darkMode:                  true,
 		filterStatus:              "All",
@@ -1529,6 +1534,9 @@ func (a *App) renderSettingsModal(c *ui.Context, pal Palette) {
 				ui.Text(c, a.nativeRegMsg).FontSize(11).TextColor(pal.Accent)
 			}
 
+			// Browser Integration card (Chrome / Edge / Chromium)
+			a.renderBrowserIntegrationSection(c, pal)
+
 			// Software Updates card
 			a.renderUpdateCard(c, pal)
 
@@ -1962,82 +1970,8 @@ func (a *App) renderOnboardingModal(c *ui.Context, pal Palette) {
 				})
 			})
 
-			// Browser Extension & Native Messaging Auto-Integration
-			ui.Column(c).Gap(8).Padding(10, 12).Radius(8).Background(pal.InputBg).Border(1, pal.Border).Children(func() {
-				ui.Row(c).AlignItems(ui.Center).Justify(ui.SpaceBetween).Children(func() {
-					ui.Column(c).Gap(2).Children(func() {
-						ui.Text(c, i18n.T("onboarding.browser_title")).FontSize(12).FontWeight(600).TextColor(pal.TextPrimary)
-						ui.Text(c, i18n.T("onboarding.browser_sub")).FontSize(11).TextColor(pal.TextMuted)
-					})
-					if toolbarButton(c, pal, nil, i18n.T("onboarding.install_selected"), false, false) {
-						a.integrateSelectedBrowsers(true)
-					}
-				})
-
-				installedCount := 0
-				for _, b := range a.detectedBrowsers {
-					if !b.Installed {
-						continue
-					}
-					installedCount++
-					checked := a.selectedBrowsers[b.ID]
-					row := ui.Row(c).
-						Padding(6, 8).
-						Radius(6).
-						Background(pal.Canvas).
-						Border(1, pal.Border).
-						AlignItems(ui.Center).
-						Justify(ui.SpaceBetween).
-						Cursor(ui.CursorPointer).
-						Focusable()
-					row.Children(func() {
-						ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
-							boxBg := pal.InputBg
-							boxBorder := pal.BorderStrong
-							if checked {
-								boxBg = pal.Accent
-								boxBorder = pal.Accent
-							}
-							ui.Row(c).Width(16).Height(16).Radius(4).Background(boxBg).Border(1, boxBorder).Center().Children(func() {
-								if checked {
-									ui.Icon(c, iconCheck).Width(10).Height(10).TextColor(pal.AccentText)
-								}
-							})
-							ui.Text(c, b.Name).FontSize(12).FontWeight(600).TextColor(pal.TextPrimary)
-						})
-
-						statusLabel := i18n.T("onboarding.browser_ready")
-						statusColor := pal.TextMuted
-						if res, hasRes := a.browserResults[b.ID]; hasRes {
-							statusLabel = res.StatusText
-							if res.Err != nil {
-								statusColor = pal.Danger
-							} else {
-								statusColor = pal.Success
-							}
-						} else if b.NativeRegistered {
-							statusLabel = i18n.T("onboarding.browser_registered")
-							statusColor = pal.Success
-						}
-						ui.Text(c, statusLabel).FontSize(11).TextColor(statusColor)
-					})
-					if row.Clicked() {
-						a.selectedBrowsers[b.ID] = !checked
-					}
-				}
-				if installedCount == 0 {
-					ui.Text(c, i18n.T("onboarding.no_browser")).FontSize(11).TextColor(pal.TextMuted)
-				}
-				if a.extensionDir != "" {
-					ui.Row(c).Gap(8).AlignItems(ui.Center).Justify(ui.SpaceBetween).Children(func() {
-						ui.Text(c, i18n.Tf("onboarding.extension_folder", a.extensionDir)).FontSize(10).TextColor(pal.TextMuted).SingleLine()
-						if toolbarButton(c, pal, iconClipboard, i18n.T("onboarding.copy_path"), false, false) {
-							c.WriteClipboard(a.extensionDir)
-							a.nativeRegMsg = i18n.T("onboarding.copied_path")
-						}
-					})
-				}
-			})
+			// Browser Integration (Store-based, real status)
+			a.renderBrowserIntegrationSection(c, pal)
 			if a.nativeRegMsg != "" {
 				ui.Text(c, a.nativeRegMsg).FontSize(11).TextColor(pal.Accent)
 			}

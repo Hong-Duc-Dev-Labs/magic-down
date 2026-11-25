@@ -59,11 +59,14 @@ func DetectInstalledBrowsers() []BrowserInfo {
 	discovered = append(discovered, scanWindowsAppsBrowsers(localAppData)...)
 	browsers = MergeDiscoveredBrowsers(browsers, discovered, fileExists)
 
-	// 4. Check Native Messaging registration for every browser
+	// 4. Populate browser version & check Native Messaging registration for every browser
 	chromeManifestPath, _ := ManifestPathForChannel("chrome")
 	edgeManifestPath, _ := ManifestPathForChannel("edge")
 	for i := range browsers {
 		b := &browsers[i]
+		if b.Installed && b.ExecutablePath != "" && b.Version == "" {
+			b.Version = ReadFileVersion(b.ExecutablePath)
+		}
 		expectedChannelPath := chromeManifestPath
 		if StoreChannelForBrowser(b.ID) == "edge" {
 			expectedChannelPath = edgeManifestPath
