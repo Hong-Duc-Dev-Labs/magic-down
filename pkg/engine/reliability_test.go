@@ -487,7 +487,7 @@ func TestSegmentResumeAfterTruncatedBody(t *testing.T) {
 	defer file.Close()
 
 	seg := &Segment{Index: 0, Start: 0, End: int64(len(payload) - 1), Status: "idle"}
-	if err := downloadSegment(context.Background(), server.Client(), server.URL, nil, "", "", seg, file, nil, 2, nil, nil); err != nil {
+	if err := downloadSegment(context.Background(), server.Client(), server.URL, nil, "", "", seg, file, nil, nil, 2, nil, nil); err != nil {
 		t.Fatalf("downloadSegment failed: %v", err)
 	}
 

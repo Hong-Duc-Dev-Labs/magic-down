@@ -328,13 +328,11 @@ func (t *Task) runHLSDownload(ctx context.Context, client *http.Client, onUpdate
 				for {
 					n, rErr := resp.Body.Read(buf)
 					if n > 0 {
-						if t.limiter != nil {
-							if waitErr := t.limiter.wait(ctx, int64(n)); waitErr != nil {
-								_ = f.Close()
-								_ = resp.Body.Close()
-								_ = os.Remove(tmpSeg)
-								return
-							}
+						if waitErr := t.waitLimiters(ctx, int64(n)); waitErr != nil {
+							_ = f.Close()
+							_ = resp.Body.Close()
+							_ = os.Remove(tmpSeg)
+							return
 						}
 						if _, wErr := f.Write(buf[:n]); wErr != nil {
 							_ = f.Close()

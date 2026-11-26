@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/egoist/mygo/ui"
@@ -17,6 +18,7 @@ import (
 	"magicdown/pkg/i18n"
 	"magicdown/pkg/ipc"
 	"magicdown/pkg/nativemessaging"
+	"magicdown/pkg/power"
 	"magicdown/pkg/updater"
 	"magicdown/pkg/version"
 )
@@ -128,6 +130,26 @@ type App struct {
 	pendingDuplicateTask *engine.Task
 	pendingDuplicateReq  *engine.AddTaskRequest
 
+	// Task Details, Live Segment Visualizer & Checksum modal state
+	detailsTaskID        string
+	detailsSpeedLimit    string
+	detailsSpeedLimitErr string
+	detailsExpectedHash  string
+	checksumMu           sync.Mutex
+	checksumTaskID       string
+	checksumCancel       context.CancelFunc
+	checksumRunning      bool
+	checksumHashes       *engine.FileHashes
+	checksumErr          string
+
+	// Post-Download Actions & 30s cancelable countdown
+	powerCtrl              *power.Controller
+	powerMu                sync.RWMutex
+	postAction             power.Action
+	powerCountdown         *power.Countdown
+	powerCountdownDuration time.Duration
+	sessionCompletedAny    atomic.Bool
+
 	// Add / Download Info Dialog state
 	showAddModal       bool
 	inputFromExtension bool
@@ -166,6 +188,16 @@ type App struct {
 	settingMinimizeToTray   bool
 	settingCloseToTray      bool
 	settingAutoCheckUpdates bool
+	settingProxyMode        string
+	settingProxyHost        string
+	settingProxyPort        string
+	settingProxyUser        string
+	settingProxyPass        string
+	proxyTestMu             sync.Mutex
+	proxyTesting            bool
+	proxyTestMsg            string
+	proxyTestOK             bool
+	testProxyFn             func(context.Context, engine.ProxyConfig) error
 	settingsError           string
 
 	// Auto-updater state (protected by updateMu)
@@ -232,12 +264,26 @@ func NewApp(eng *engine.Engine, srv *ipc.Server) *App {
 		settingMinimizeToTray:     cfg.MinimizeToTray,
 		settingCloseToTray:        cfg.CloseToTray,
 		settingAutoCheckUpdates:   cfg.AutoCheckUpdates,
+		settingProxyMode:          engine.NormalizeProxyMode(cfg.Proxy.Mode),
+		settingProxyHost:          cfg.Proxy.Host,
+		settingProxyPort:          formatProxyPort(cfg.Proxy.Port),
+		settingProxyUser:          cfg.Proxy.Username,
+		settingProxyPass:          cfg.Proxy.Password,
+		testProxyFn:               func(ctx context.Context, pc engine.ProxyConfig) error { return engine.TestProxyConnection(ctx, pc, "") },
+		powerCtrl:                 power.NewController(),
+		postAction:                power.ActionNone,
+		powerCountdownDuration:    power.DefaultCountdownDuration,
 		showOnboardingModal:       !cfg.OnboardingCompleted,
 		onboardingDownloadDir:     cfg.DownloadDir,
 		onboardingAutoCategorize:  cfg.AutoCategorize,
 		onboardingLaunchAtStartup: cfg.LaunchAtStartup,
 		onboardingRunInTray:       cfg.CloseToTray || cfg.MinimizeToTray,
 	}
+	app.powerCountdown = power.NewCountdown(app.invalidateUI, func(act power.Action) {
+		if app.powerCtrl != nil {
+			_ = app.powerCtrl.Execute(act)
+		}
+	})
 	app.refreshNativeStatus()
 	app.refreshDetectedBrowsers()
 	if srv != nil {
@@ -440,11 +486,12 @@ func (a *App) EnqueueIncomingDownload(req ipc.AddDownloadRequest) {
 		a.pendingIncoming = append(a.pendingIncoming, req)
 	}
 	a.pendingMu.Unlock()
+	a.cancelPowerCountdown()
 	a.BringToForeground()
 }
 
 func (a *App) popPendingIncoming() {
-	if a.showAddModal || a.showRefreshModal || a.pendingDeleteTaskID != "" || a.pendingDuplicateTask != nil {
+	if a.showAddModal || a.showRefreshModal || a.detailsTaskID != "" || a.pendingDeleteTaskID != "" || a.pendingDuplicateTask != nil {
 		return
 	}
 	a.pendingMu.Lock()
@@ -556,6 +603,7 @@ func (a *App) openIncomingDownloadDialog(req ipc.AddDownloadRequest) {
 	a.cancelDeleteTask()
 	a.cancelDuplicateModal()
 	a.closeRefreshModal()
+	a.closeTaskDetails()
 	a.showSettingsModal = false
 	a.showOnboardingModal = false
 	a.showAddModal = true
@@ -616,7 +664,15 @@ func (a *App) View(c *ui.Context) {
 	c.SetTheme(pal.UITheme)
 
 	// Global keyboard shortcuts
-	anyModalOpen := a.showAddModal || a.showSettingsModal || a.showOnboardingModal || a.showRefreshModal || a.pendingDeleteTaskID != "" || a.pendingDuplicateTask != nil
+	powerActive := false
+	if a.powerCountdown != nil {
+		powerActive, _, _ = a.powerCountdown.State()
+	}
+	if a.engine != nil && !a.engine.IsIdle() {
+		a.cancelPowerCountdown()
+		powerActive = false
+	}
+	anyModalOpen := a.showAddModal || a.showSettingsModal || a.showOnboardingModal || a.showRefreshModal || a.detailsTaskID != "" || a.pendingDeleteTaskID != "" || a.pendingDuplicateTask != nil || powerActive
 	if c.Shortcut(ui.Cmd, ui.KeyN) && !anyModalOpen {
 		a.openAddModal()
 	}
@@ -630,8 +686,10 @@ func (a *App) View(c *ui.Context) {
 		a.showAddModal = false
 		a.showSettingsModal = false
 		a.closeRefreshModal()
+		a.closeTaskDetails()
 		a.cancelDeleteTask()
 		a.cancelDuplicateModal()
+		a.cancelPowerCountdown()
 	}
 
 	// Open Download Info Dialog for any incoming extension download.
@@ -713,6 +771,8 @@ func (a *App) View(c *ui.Context) {
 	a.renderDeleteConfirmModal(c, pal)
 	a.renderRefreshModal(c, pal)
 	a.renderDuplicateModal(c, pal)
+	a.renderTaskDetailsModal(c, pal)
+	a.renderPowerCountdownModal(c, pal)
 }
 
 func (a *App) renderTitleBar(c *ui.Context, pal Palette) {
@@ -828,9 +888,17 @@ func (a *App) openAddModal() {
 	a.cancelDeleteTask()
 	a.cancelDuplicateModal()
 	a.closeRefreshModal()
+	a.closeTaskDetails()
 	a.showSettingsModal = false
 	a.showOnboardingModal = false
 	a.showAddModal = true
+}
+
+func formatProxyPort(port int) string {
+	if port <= 0 {
+		return ""
+	}
+	return strconv.Itoa(port)
 }
 
 func (a *App) openSettingsModal() {
@@ -845,6 +913,15 @@ func (a *App) openSettingsModal() {
 	a.settingMinimizeToTray = cfg.MinimizeToTray
 	a.settingCloseToTray = cfg.CloseToTray
 	a.settingAutoCheckUpdates = cfg.AutoCheckUpdates
+	a.settingProxyMode = engine.NormalizeProxyMode(cfg.Proxy.Mode)
+	a.settingProxyHost = cfg.Proxy.Host
+	a.settingProxyPort = formatProxyPort(cfg.Proxy.Port)
+	a.settingProxyUser = cfg.Proxy.Username
+	a.settingProxyPass = cfg.Proxy.Password
+	a.proxyTestMu.Lock()
+	a.proxyTestMsg = ""
+	a.proxyTestOK = false
+	a.proxyTestMu.Unlock()
 	a.settingsError = ""
 	a.nativeRegMsg = ""
 	a.activeSettingsTab = settingsTabGeneral
@@ -853,6 +930,7 @@ func (a *App) openSettingsModal() {
 	a.cancelDeleteTask()
 	a.cancelDuplicateModal()
 	a.closeRefreshModal()
+	a.closeTaskDetails()
 	a.showAddModal = false
 	a.showOnboardingModal = false
 	a.showSettingsModal = true
@@ -872,6 +950,7 @@ func (a *App) OpenOnboardingModal() {
 	a.cancelDeleteTask()
 	a.cancelDuplicateModal()
 	a.closeRefreshModal()
+	a.closeTaskDetails()
 	a.showAddModal = false
 	a.showSettingsModal = false
 	a.showOnboardingModal = true
@@ -1233,6 +1312,10 @@ func (a *App) renderDownloadCard(c *ui.Context, pal Palette, task *engine.Task) 
 					}
 				}
 
+				if rowIconButton(c, pal, iconInfo, false) {
+					a.openTaskDetails(task)
+				}
+
 				if task.SavePath != "" {
 					if rowIconButton(c, pal, iconFolder, false) {
 						a.revealTaskInFileManager(task)
@@ -1325,6 +1408,45 @@ func (a *App) renderStatusBar(c *ui.Context, pal Palette, activeCount, queuedCou
 			}
 
 			ui.Spacer(c)
+
+			// Post-download action selector (cycles None -> Sleep -> Shutdown)
+			curAct := a.PostDownloadAction()
+			actLabel := i18n.T("power.none")
+			actColor := pal.TextMuted
+			actBg := ui.Transparent
+			switch curAct {
+			case power.ActionSleep:
+				actLabel = i18n.T("power.sleep")
+				actColor = pal.Warning
+				actBg = pal.WarningSoft
+			case power.ActionShutdown:
+				actLabel = i18n.T("power.shutdown")
+				actColor = pal.Danger
+				actBg = pal.DangerSoft
+			}
+			powerBtn := ui.Row(c).
+				Padding(3, 8).
+				Gap(5).
+				Radius(999).
+				Background(actBg).
+				AlignItems(ui.Center).
+				Shrink(0).
+				Cursor(ui.CursorPointer).
+				Focusable()
+			powerBtn.Children(func() {
+				ui.Icon(c, iconPower).Width(12).Height(12).TextColor(actColor).Shrink(0)
+				ui.Text(c, i18n.T("power.after_done")+" "+actLabel).FontSize(11).FontWeight(600).TextColor(actColor).SingleLine()
+			})
+			if powerBtn.Clicked() {
+				switch curAct {
+				case power.ActionNone:
+					a.SetPostDownloadAction(power.ActionSleep)
+				case power.ActionSleep:
+					a.SetPostDownloadAction(power.ActionShutdown)
+				default:
+					a.SetPostDownloadAction(power.ActionNone)
+				}
+			}
 
 			summary := i18n.Tf("statusbar.summary", activeCount, queuedCount, FormatSpeed(totalSpeed))
 			ui.Text(c, summary).FontSize(11).FontWeight(500).FontFeatures("tnum").TextColor(pal.TextSecondary).SingleLine()
@@ -1533,6 +1655,7 @@ func (a *App) submitAddDownload(autoStart bool) {
 		return
 	}
 
+	a.cancelPowerCountdown()
 	a.selectedTaskID = task.ID
 	a.statusMessage = i18n.Tf("msg.added_download", task.URL)
 	a.showAddModal = false
@@ -1778,6 +1901,146 @@ func (a *App) renderSettingsDownloadsTab(c *ui.Context, pal Palette) {
 				Radius(7)
 			ui.Text(c, i18n.T("settings.speed_limit_hint")).FontSize(10).TextColor(pal.TextMuted)
 		})
+	})
+
+	// Network Proxy Configuration
+	a.renderSettingsProxySection(c, pal)
+}
+
+func (a *App) buildSettingsProxyConfig() (engine.ProxyConfig, error) {
+	mode := engine.NormalizeProxyMode(a.settingProxyMode)
+	pc := engine.ProxyConfig{
+		Mode:     mode,
+		Host:     strings.TrimSpace(a.settingProxyHost),
+		Username: strings.TrimSpace(a.settingProxyUser),
+		Password: a.settingProxyPass,
+	}
+	if mode == engine.ProxyModeHTTP || mode == engine.ProxyModeSOCKS5 {
+		if pc.Host == "" {
+			return pc, fmt.Errorf("%s", i18n.T("settings.err_proxy_host"))
+		}
+		port, err := strconv.Atoi(strings.TrimSpace(a.settingProxyPort))
+		if err != nil || port < 1 || port > 65535 {
+			return pc, fmt.Errorf("%s", i18n.T("settings.err_proxy_port"))
+		}
+		pc.Port = port
+	}
+	return pc, nil
+}
+
+func (a *App) triggerProxyTest() {
+	pc, err := a.buildSettingsProxyConfig()
+	if err != nil {
+		a.proxyTestMu.Lock()
+		a.proxyTestOK = false
+		a.proxyTestMsg = err.Error()
+		a.proxyTestMu.Unlock()
+		return
+	}
+	a.proxyTestMu.Lock()
+	if a.proxyTesting {
+		a.proxyTestMu.Unlock()
+		return
+	}
+	a.proxyTesting = true
+	a.proxyTestMsg = i18n.T("settings.proxy_testing")
+	a.proxyTestOK = false
+	a.proxyTestMu.Unlock()
+	a.invalidateUI()
+
+	testFn := a.testProxyFn
+	if testFn == nil {
+		testFn = func(ctx context.Context, cfg engine.ProxyConfig) error {
+			return engine.TestProxyConnection(ctx, cfg, "")
+		}
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		err := testFn(ctx, pc)
+		a.proxyTestMu.Lock()
+		a.proxyTesting = false
+		if err != nil {
+			a.proxyTestOK = false
+			a.proxyTestMsg = i18n.Tf("settings.proxy_err", err.Error())
+		} else {
+			a.proxyTestOK = true
+			a.proxyTestMsg = i18n.T("settings.proxy_ok")
+		}
+		a.proxyTestMu.Unlock()
+		a.invalidateUI()
+	}()
+}
+
+func (a *App) renderSettingsProxySection(c *ui.Context, pal Palette) {
+	a.proxyTestMu.Lock()
+	testing := a.proxyTesting
+	testMsg := a.proxyTestMsg
+	testOK := a.proxyTestOK
+	a.proxyTestMu.Unlock()
+
+	ui.Column(c).Padding(10, 12).Radius(8).Background(pal.InputBg).Border(1, pal.Border).Gap(10).Children(func() {
+		ui.Row(c).AlignItems(ui.Center).Justify(ui.SpaceBetween).Children(func() {
+			ui.Text(c, i18n.T("settings.proxy_title")).FontSize(12).FontWeight(600).TextColor(pal.TextPrimary)
+			testLabel := i18n.T("settings.proxy_test")
+			if testing {
+				testLabel = i18n.T("settings.proxy_testing")
+			}
+			if toolbarButton(c, pal, iconRefresh, testLabel, testing, false) {
+				a.triggerProxyTest()
+			}
+		})
+
+		ui.Row(c).Gap(6).Children(func() {
+			modes := []struct {
+				mode  string
+				label string
+			}{
+				{engine.ProxyModeSystem, i18n.T("settings.proxy_system")},
+				{engine.ProxyModeNone, i18n.T("settings.proxy_none")},
+				{engine.ProxyModeHTTP, i18n.T("settings.proxy_http")},
+				{engine.ProxyModeSOCKS5, i18n.T("settings.proxy_socks5")},
+			}
+			for _, m := range modes {
+				if segmentOption(c, pal, m.label, engine.NormalizeProxyMode(a.settingProxyMode) == m.mode) {
+					a.settingProxyMode = m.mode
+				}
+			}
+		})
+
+		curMode := engine.NormalizeProxyMode(a.settingProxyMode)
+		if curMode == engine.ProxyModeHTTP || curMode == engine.ProxyModeSOCKS5 {
+			ui.Row(c).Gap(10).Children(func() {
+				ui.Column(c).Gap(4).Grow(1).Children(func() {
+					ui.Text(c, i18n.T("settings.proxy_host")).FontSize(11).FontWeight(600).TextColor(pal.TextSecondary)
+					ui.TextInput(c, &a.settingProxyHost).Placeholder("127.0.0.1").Background(pal.Card).Border(1, pal.Border).Radius(7)
+				})
+				ui.Column(c).Gap(4).Width(100).Children(func() {
+					ui.Text(c, i18n.T("settings.proxy_port")).FontSize(11).FontWeight(600).TextColor(pal.TextSecondary)
+					ui.TextInput(c, &a.settingProxyPort).Placeholder("8080").Background(pal.Card).Border(1, pal.Border).Radius(7)
+				})
+			})
+			ui.Row(c).Gap(10).Children(func() {
+				ui.Column(c).Gap(4).Grow(1).Children(func() {
+					ui.Text(c, i18n.T("settings.proxy_user")).FontSize(11).FontWeight(600).TextColor(pal.TextSecondary)
+					ui.TextInput(c, &a.settingProxyUser).Background(pal.Card).Border(1, pal.Border).Radius(7)
+				})
+				ui.Column(c).Gap(4).Grow(1).Children(func() {
+					ui.Text(c, i18n.T("settings.proxy_pass")).FontSize(11).FontWeight(600).TextColor(pal.TextSecondary)
+					ui.TextInput(c, &a.settingProxyPass).Background(pal.Card).Border(1, pal.Border).Radius(7)
+				})
+			})
+		}
+
+		if testMsg != "" {
+			msgColor := pal.Danger
+			if testing {
+				msgColor = pal.TextSecondary
+			} else if testOK {
+				msgColor = pal.Success
+			}
+			ui.Text(c, testMsg).FontSize(11).TextColor(msgColor)
+		}
 	})
 }
 
@@ -2110,6 +2373,13 @@ func (a *App) saveSettings() {
 		speedKBps = 1048576
 	}
 
+	proxyCfg, err := a.buildSettingsProxyConfig()
+	if err != nil {
+		a.activeSettingsTab = settingsTabDownloads
+		a.settingsError = err.Error()
+		return
+	}
+
 	if a.autostartSetter != nil {
 		if err := a.autostartSetter(a.settingLaunchAtStartup); err != nil {
 			a.activeSettingsTab = settingsTabGeneral
@@ -2130,6 +2400,7 @@ func (a *App) saveSettings() {
 	cfg.CloseToTray = a.settingCloseToTray
 	cfg.AutoCheckUpdates = a.settingAutoCheckUpdates
 	cfg.Language = string(a.language)
+	cfg.Proxy = proxyCfg
 	a.engine.UpdateConfig(cfg)
 
 	a.settingMaxRetries = strconv.Itoa(retries)
@@ -2301,6 +2572,7 @@ func (a *App) requestDeleteTask(task *engine.Task) {
 	}
 	a.cancelDuplicateModal()
 	a.closeRefreshModal()
+	a.closeTaskDetails()
 	a.showAddModal = false
 	a.showSettingsModal = false
 	a.showOnboardingModal = false
@@ -2378,6 +2650,7 @@ func (a *App) openRefreshModal(task *engine.Task) {
 	}
 	a.cancelDeleteTask()
 	a.cancelDuplicateModal()
+	a.closeTaskDetails()
 	a.showAddModal = false
 	a.showSettingsModal = false
 	a.showOnboardingModal = false
@@ -2636,6 +2909,7 @@ func (a *App) openDuplicateModal(existing *engine.Task, req engine.AddTaskReques
 	reqCopy := req
 	a.cancelDeleteTask()
 	a.closeRefreshModal()
+	a.closeTaskDetails()
 	a.showAddModal = false
 	a.showSettingsModal = false
 	a.showOnboardingModal = false

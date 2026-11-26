@@ -75,6 +75,7 @@ type Task struct {
 	TargetFormat    string            `json:"target_format,omitempty"`
 	OutputFormat    string            `json:"output_format,omitempty"`
 	AudioBitrate    string            `json:"audio_bitrate,omitempty"`
+	SpeedLimitKBps  int64             `json:"speed_limit_kbps,omitempty"` // 0 = use global limit only
 	NumSegments     int               `json:"num_segments"`
 	Segments        []*Segment        `json:"segments"`
 	ErrorMessage    string            `json:"error_message,omitempty"`
@@ -91,9 +92,28 @@ type Task struct {
 	activeCtx    context.Context    `json:"-"`
 	workerDone   chan struct{}      `json:"-"`
 	speedCalc    *speedCalculator   `json:"-"`
-	limiter      *rateLimiter       `json:"-"`
+	limiter      *rateLimiter       `json:"-"` // global engine limiter
+	taskLimiter  *rateLimiter       `json:"-"` // per-task limiter
 	retryLimit   int                `json:"-"`
 	onStateDirty func()             `json:"-"`
+}
+
+// Proxy mode constants for Config.Proxy.Mode.
+const (
+	ProxyModeSystem = "system"
+	ProxyModeNone   = "none"
+	ProxyModeHTTP   = "http"
+	ProxyModeSOCKS5 = "socks5"
+)
+
+// ProxyConfig configures outbound HTTP/SOCKS5 proxy routing for downloads.
+// Password is stored locally in user-only config.json and must never be logged.
+type ProxyConfig struct {
+	Mode     string `json:"mode,omitempty"`
+	Host     string `json:"host,omitempty"`
+	Port     int    `json:"port,omitempty"`
+	Username string `json:"username,omitempty"`
+	Password string `json:"password,omitempty"`
 }
 
 // DefaultMaxRetries is the retry budget used by DefaultConfig. A config value of
@@ -102,20 +122,21 @@ const DefaultMaxRetries = 3
 
 // Config holds download engine configuration options.
 type Config struct {
-	MaxConcurrentDownloads int    `json:"max_concurrent_downloads"`
-	DefaultSegments        int    `json:"default_segments"`
-	MaxRetries             int    `json:"max_retries"`
-	SpeedLimitKBps         int64  `json:"speed_limit_kbps"` // 0 = unlimited
-	DownloadDir            string `json:"download_dir"`
-	StateFilePath          string `json:"state_file_path"`
-	AutoCategorize         bool   `json:"auto_categorize"`
-	LaunchAtStartup        bool   `json:"launch_at_startup"`
-	MinimizeToTray         bool   `json:"minimize_to_tray"`
-	CloseToTray            bool   `json:"close_to_tray"`
-	OnboardingCompleted    bool   `json:"onboarding_completed"`
-	AutoCheckUpdates       bool   `json:"auto_check_updates"`
-	UpdateRepo             string `json:"update_repo,omitempty"`
-	Language               string `json:"language,omitempty"`
+	MaxConcurrentDownloads int         `json:"max_concurrent_downloads"`
+	DefaultSegments        int         `json:"default_segments"`
+	MaxRetries             int         `json:"max_retries"`
+	SpeedLimitKBps         int64       `json:"speed_limit_kbps"` // 0 = unlimited
+	DownloadDir            string      `json:"download_dir"`
+	StateFilePath          string      `json:"state_file_path"`
+	AutoCategorize         bool        `json:"auto_categorize"`
+	LaunchAtStartup        bool        `json:"launch_at_startup"`
+	MinimizeToTray         bool        `json:"minimize_to_tray"`
+	CloseToTray            bool        `json:"close_to_tray"`
+	OnboardingCompleted    bool        `json:"onboarding_completed"`
+	AutoCheckUpdates       bool        `json:"auto_check_updates"`
+	UpdateRepo             string      `json:"update_repo,omitempty"`
+	Language               string      `json:"language,omitempty"`
+	Proxy                  ProxyConfig `json:"proxy,omitempty"`
 }
 
 // DefaultConfig returns reasonable default configuration values.
@@ -132,5 +153,6 @@ func DefaultConfig(downloadDir, statePath string) Config {
 		CloseToTray:            true,
 		OnboardingCompleted:    false,
 		AutoCheckUpdates:       true,
+		Proxy:                  ProxyConfig{Mode: ProxyModeSystem},
 	}
 }

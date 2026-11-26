@@ -39,7 +39,54 @@ func (l *rateLimiter) setRate(bytesPerSecond int64) {
 	l.rate.Store(bytesPerSecond)
 }
 
-func (l *rateLimiter) currentRate() int64 { return l.rate.Load() }
+func (l *rateLimiter) currentRate() int64 {
+	if l == nil {
+		return 0
+	}
+	return l.rate.Load()
+}
+
+// waitOrderedLimiters enforces per-task rate limit first, then global rate
+// limit. Both buckets are non-reserving so deadlock is impossible.
+func waitOrderedLimiters(ctx context.Context, n int64, taskLimiter, globalLimiter *rateLimiter) error {
+	if n <= 0 {
+		return nil
+	}
+	if taskLimiter != nil {
+		if err := taskLimiter.wait(ctx, n); err != nil {
+			return err
+		}
+	}
+	if globalLimiter != nil {
+		if err := globalLimiter.wait(ctx, n); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// cappedReadBufferSize returns min(baseSize, effectiveRate/4) when throttled
+// low so reads stay smooth without choppy spikes. Always returns >= 1024.
+func cappedReadBufferSize(baseSize int, taskLimiter, globalLimiter *rateLimiter) int {
+	var effRate int64
+	if r := taskLimiter.currentRate(); r > 0 {
+		effRate = r
+	}
+	if r := globalLimiter.currentRate(); r > 0 && (effRate == 0 || r < effRate) {
+		effRate = r
+	}
+	if effRate <= 0 {
+		return baseSize
+	}
+	capped := int(effRate / 4)
+	if capped < 1024 {
+		capped = 1024
+	}
+	if capped > baseSize {
+		return baseSize
+	}
+	return capped
+}
 
 // wait blocks until n bytes may be transferred at the current rate. It returns
 // ctx.Err() when the transfer is paused or cancelled while waiting.

@@ -528,11 +528,9 @@ func (t *Task) fetchPlanPartOnce(ctx context.Context, client *http.Client, part 
 		}
 		n, readErr := resp.Body.Read(buf[:readSize])
 		if n > 0 {
-			if t.limiter != nil {
-				if waitErr := t.limiter.wait(ctx, int64(n)); waitErr != nil {
-					_ = out.Close()
-					return false, waitErr
-				}
+			if waitErr := t.waitLimiters(ctx, int64(n)); waitErr != nil {
+				_ = out.Close()
+				return false, waitErr
 			}
 			if _, writeErr := out.Write(buf[:n]); writeErr != nil {
 				_ = out.Close()

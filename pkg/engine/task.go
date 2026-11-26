@@ -376,6 +376,7 @@ func (t *Task) runRangedDownload(ctx context.Context, client *http.Client, onUpd
 	}
 
 	limiter := t.limiter
+	taskLimiter := t.taskLimiter
 	maxRetries := t.retryBudget()
 	onRetry := func() { t.noteRetry(onUpdate) }
 
@@ -437,7 +438,7 @@ func (t *Task) runRangedDownload(ctx context.Context, client *http.Client, onUpd
 					seg.setStatus("done")
 					continue
 				}
-				if err := downloadSegment(ctx, client, taskURL, headers, cookies, referrer, seg, partFile, limiter, maxRetries, onChunk, onRetry); err != nil {
+				if err := downloadSegment(ctx, client, taskURL, headers, cookies, referrer, seg, partFile, taskLimiter, limiter, maxRetries, onChunk, onRetry); err != nil {
 					if !errors.Is(err, context.Canceled) {
 						errMu.Lock()
 						if firstErr == nil {
@@ -588,13 +589,12 @@ func (t *Task) runSingleStreamAttempt(ctx context.Context, client *http.Client, 
 		default:
 		}
 
-		n, readErr := resp.Body.Read(buf)
+		maxRead := cappedReadBufferSize(len(buf), t.taskLimiter, t.limiter)
+		n, readErr := resp.Body.Read(buf[:maxRead])
 		if n > 0 {
-			if t.limiter != nil {
-				if waitErr := t.limiter.wait(ctx, int64(n)); waitErr != nil {
-					_ = file.Sync()
-					return false, waitErr
-				}
+			if waitErr := t.waitLimiters(ctx, int64(n)); waitErr != nil {
+				_ = file.Sync()
+				return false, waitErr
 			}
 			if _, writeErr := file.Write(buf[:n]); writeErr != nil {
 				return false, fmt.Errorf("write error: %w", writeErr)
@@ -875,6 +875,11 @@ func probeURLMetadata(
 	return totalSize, supportsRanges, nil
 }
 
+// waitLimiters enforces per-task speed limit first, then global engine limit.
+func (t *Task) waitLimiters(ctx context.Context, n int64) error {
+	return waitOrderedLimiters(ctx, n, t.taskLimiter, t.limiter)
+}
+
 // GetStatus returns the current status safely.
 func (t *Task) GetStatus() TaskStatus {
 	t.mu.RLock()
@@ -919,6 +924,7 @@ func (t *Task) Clone() *Task {
 		TargetFormat:    t.TargetFormat,
 		OutputFormat:    t.OutputFormat,
 		AudioBitrate:    t.AudioBitrate,
+		SpeedLimitKBps:  t.SpeedLimitKBps,
 		NumSegments:     t.NumSegments,
 		ErrorMessage:    t.ErrorMessage,
 		Retries:         t.Retries,

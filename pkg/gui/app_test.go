@@ -17,6 +17,7 @@ import (
 
 	"magicdown/pkg/engine"
 	"magicdown/pkg/ipc"
+	"magicdown/pkg/power"
 )
 
 func TestFormatHelpers(t *testing.T) {
@@ -457,5 +458,189 @@ func TestRefreshDownloadAddressModalAndIPCInterception(t *testing.T) {
 	updated, _ := eng.GetTask(task.ID)
 	if updated.URL != server.URL+"/fresh.bin" {
 		t.Fatalf("expected task URL updated to fresh link, got %q", updated.URL)
+	}
+}
+
+func TestTaskDetailsModalSegmentVisualizerAndChecksum(t *testing.T) {
+	tempDir := t.TempDir()
+	stateFile := filepath.Join(tempDir, "state.json")
+	filePath := filepath.Join(tempDir, "archive.zip")
+	if err := os.WriteFile(filePath, []byte("magicdown-phase2-checksum-test"), 0644); err != nil {
+		t.Fatalf("WriteFile failed: %v", err)
+	}
+
+	seedTasks := []*engine.Task{
+		{
+			ID:              "det-1",
+			URL:             "https://cdn.example.com/archive.zip",
+			Filename:        "archive.zip",
+			SavePath:        filePath,
+			TotalBytes:      30,
+			DownloadedBytes: 30,
+			Status:          engine.StatusCompleted,
+			SupportsRanges:  true,
+			NumSegments:     4,
+			Segments: []*engine.Segment{
+				{Index: 0, Start: 0, End: 7, Downloaded: 8, Status: "done"},
+				{Index: 1, Start: 8, End: 15, Downloaded: 8, Status: "done"},
+				{Index: 2, Start: 16, End: 23, Downloaded: 8, Status: "done"},
+				{Index: 3, Start: 24, End: 29, Downloaded: 6, Status: "done"},
+			},
+			CreatedAt: time.Now(),
+		},
+	}
+	raw, _ := json.MarshalIndent(seedTasks, "", "  ")
+	_ = os.WriteFile(stateFile, raw, 0644)
+
+	eng, err := engine.NewEngine(engine.Config{
+		MaxConcurrentDownloads: 2,
+		DefaultSegments:        4,
+		DownloadDir:            tempDir,
+		StateFilePath:          stateFile,
+		OnboardingCompleted:    true,
+	})
+	if err != nil {
+		t.Fatalf("NewEngine failed: %v", err)
+	}
+	defer eng.Close()
+
+	app := NewApp(eng, nil)
+	tester := ui.NewTester(app.View, 1120, 700)
+	tester.SetScale(1)
+
+	task, _ := eng.GetTask("det-1")
+	app.openTaskDetails(task)
+	tester.Frame()
+	if app.detailsTaskID != "det-1" {
+		t.Fatalf("expected detailsTaskID=det-1, got %q", app.detailsTaskID)
+	}
+
+	// Update per-task speed limit live.
+	app.detailsSpeedLimit = "512"
+	app.applyTaskSpeedLimit()
+	if app.detailsSpeedLimitErr != "" {
+		t.Fatalf("unexpected speed limit error: %q", app.detailsSpeedLimitErr)
+	}
+	updated, _ := eng.GetTask("det-1")
+	if updated.SpeedLimitKBps != 512 {
+		t.Fatalf("expected SpeedLimitKBps=512, got %d", updated.SpeedLimitKBps)
+	}
+
+	// Compute SHA-256 / MD5 asynchronously.
+	app.startChecksumComputation(task.ID, task.SavePath)
+	deadline := time.Now().Add(3 * time.Second)
+	var computed *engine.FileHashes
+	for time.Now().Before(deadline) {
+		app.checksumMu.Lock()
+		if app.checksumHashes != nil {
+			cp := *app.checksumHashes
+			computed = &cp
+		}
+		app.checksumMu.Unlock()
+		if computed != nil {
+			break
+		}
+		time.Sleep(15 * time.Millisecond)
+	}
+	if computed == nil || len(computed.SHA256) != 64 || len(computed.MD5) != 32 {
+		t.Fatalf("expected valid computed hashes, got %+v", computed)
+	}
+
+	// Render with matching and mismatched expected hash badges.
+	app.detailsExpectedHash = computed.SHA256
+	tester.Frame()
+	app.detailsExpectedHash = "00000000000000000000000000000000"
+	tester.Frame()
+
+	app.closeTaskDetails()
+	if app.detailsTaskID != "" {
+		t.Fatalf("expected detailsTaskID cleared on close")
+	}
+}
+
+func TestProxySettingsSaveLoadAndPostDownloadCountdown(t *testing.T) {
+	tempDir := t.TempDir()
+	stateFile := filepath.Join(tempDir, "state.json")
+	eng, err := engine.NewEngine(engine.Config{
+		MaxConcurrentDownloads: 2,
+		DefaultSegments:        4,
+		DownloadDir:            tempDir,
+		StateFilePath:          stateFile,
+		OnboardingCompleted:    true,
+	})
+	if err != nil {
+		t.Fatalf("NewEngine failed: %v", err)
+	}
+	defer eng.Close()
+
+	app := NewApp(eng, nil)
+	app.autostartSetter = func(bool) error { return nil }
+	var slept int
+	app.powerCtrl = &power.Controller{
+		SleepFn: func() error { slept++; return nil },
+	}
+	app.powerCountdownDuration = 200 * time.Millisecond
+
+	tester := ui.NewTester(app.View, 1120, 700)
+	tester.SetScale(1)
+
+	// Exercise proxy settings validation + save.
+	app.openSettingsModal()
+	app.activeSettingsTab = settingsTabDownloads
+	app.settingProxyMode = engine.ProxyModeHTTP
+	app.settingProxyHost = "127.0.0.1"
+	app.settingProxyPort = "99999" // invalid port
+	app.saveSettings()
+	if app.settingsError == "" {
+		t.Fatalf("expected error for invalid proxy port")
+	}
+
+	app.settingProxyPort = "8080"
+	app.settingProxyUser = "alice"
+	app.settingProxyPass = "secret"
+	tester.Frame()
+	app.saveSettings()
+	if app.settingsError != "" || app.showSettingsModal {
+		t.Fatalf("expected proxy settings save to succeed, err=%q open=%v", app.settingsError, app.showSettingsModal)
+	}
+	savedProxy := eng.Config().Proxy
+	if savedProxy.Mode != engine.ProxyModeHTTP || savedProxy.Host != "127.0.0.1" || savedProxy.Port != 8080 || savedProxy.Username != "alice" {
+		t.Fatalf("unexpected persisted proxy config: %+v", savedProxy)
+	}
+
+	// Post-download countdown guard: must NOT trigger while a queued task exists.
+	app.SetPostDownloadAction(power.ActionSleep)
+	queuedTask, err := eng.AddTask(engine.AddTaskRequest{
+		URL:       "https://example.com/queued.bin",
+		Filename:  "queued.bin",
+		AutoStart: false,
+	})
+	if err != nil {
+		t.Fatalf("AddTask failed: %v", err)
+	}
+	app.HandleTaskCompleted(queuedTask)
+	if active, _, _ := app.powerCountdown.State(); active {
+		t.Fatalf("expected countdown NOT to start while queued task exists")
+	}
+
+	// Pause queued task so engine becomes idle, then complete -> countdown starts.
+	_ = eng.PauseTask(queuedTask.ID)
+	app.HandleTaskCompleted(queuedTask)
+	if active, act, _ := app.powerCountdown.State(); !active || act != power.ActionSleep {
+		t.Fatalf("expected active sleep countdown when engine is idle, got active=%v act=%q", active, act)
+	}
+	tester.Frame()
+
+	// Incoming download must automatically cancel countdown.
+	app.EnqueueIncomingDownload(ipc.AddDownloadRequest{
+		URL:      "https://example.com/new-arrival.bin",
+		Filename: "new-arrival.bin",
+	})
+	if active, _, _ := app.powerCountdown.State(); active {
+		t.Fatalf("expected incoming download to cancel active power countdown")
+	}
+	time.Sleep(260 * time.Millisecond)
+	if slept != 0 {
+		t.Fatalf("expected cancelled countdown not to execute sleep, got %d", slept)
 	}
 }

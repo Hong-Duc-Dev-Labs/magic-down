@@ -14,6 +14,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -33,9 +34,10 @@ type AddTaskRequest struct {
 	TargetFormat  string            `json:"target_format,omitempty"`
 	OutputFormat  string            `json:"output_format,omitempty"`
 	AudioBitrate  string            `json:"audio_bitrate,omitempty"`
-	Plan          *DownloadPlan     `json:"plan,omitempty"`
-	AutoStart     bool              `json:"auto_start"`
-	StartPaused   bool              `json:"start_paused,omitempty"`
+	Plan           *DownloadPlan     `json:"plan,omitempty"`
+	SpeedLimitKBps int64             `json:"speed_limit_kbps,omitempty"`
+	AutoStart      bool              `json:"auto_start"`
+	StartPaused    bool              `json:"start_paused,omitempty"`
 }
 
 // RefreshAddressRequest specifies a replacement URL and credentials for a
@@ -54,7 +56,7 @@ type Engine struct {
 	configPath  string
 	tasks       []*Task
 	tasksByID   map[string]*Task
-	httpClient  *http.Client
+	httpClient  atomic.Pointer[http.Client]
 	limiter     *rateLimiter
 	onCompleted func(*Task)
 	ctx         context.Context
@@ -81,8 +83,9 @@ type persistedConfig struct {
 	CloseToTray            *bool   `json:"close_to_tray,omitempty"`
 	OnboardingCompleted    *bool   `json:"onboarding_completed,omitempty"`
 	AutoCheckUpdates       *bool   `json:"auto_check_updates,omitempty"`
-	UpdateRepo             *string `json:"update_repo,omitempty"`
-	Language               *string `json:"language,omitempty"`
+	UpdateRepo             *string      `json:"update_repo,omitempty"`
+	Language               *string      `json:"language,omitempty"`
+	Proxy                  *ProxyConfig `json:"proxy,omitempty"`
 }
 
 // NewEngine initializes a new download engine.
@@ -106,13 +109,16 @@ func NewEngine(cfg Config) (*Engine, error) {
 		cfg.StateFilePath = filepath.Join(cfg.DownloadDir, ".magicdown_state.json")
 	}
 
+	if cfg.Proxy.Mode == "" {
+		cfg.Proxy.Mode = ProxyModeSystem
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	eng := &Engine{
 		config:      cfg,
 		configPath:  filepath.Join(filepath.Dir(cfg.StateFilePath), "config.json"),
 		tasks:       make([]*Task, 0),
 		tasksByID:   make(map[string]*Task),
-		httpClient:  &http.Client{Timeout: 0}, // No client-level timeout for downloads
 		limiter:     newRateLimiter(cfg.SpeedLimitKBps * 1024),
 		ctx:         ctx,
 		cancel:      cancel,
@@ -121,6 +127,7 @@ func NewEngine(cfg Config) (*Engine, error) {
 
 	// Persisted settings override the defaults, then ensure the final directory.
 	eng.loadConfig()
+	eng.swapHTTPClient(eng.config.Proxy)
 	_ = os.MkdirAll(eng.config.DownloadDir, 0755)
 
 	// Load existing persisted state
@@ -314,28 +321,35 @@ func (e *Engine) prepareTask(req AddTaskRequest) (*Task, string, error) {
 		}
 	}
 
+	speedLimit := req.SpeedLimitKBps
+	if speedLimit < 0 {
+		speedLimit = 0
+	}
+
 	task := &Task{
-		ID:            generateID(),
-		URL:           req.URL,
-		AudioURL:      req.AudioURL,
-		Category:      category,
-		Filename:      filename,
-		TotalBytes:    req.TotalBytes,
-		Status:        initialStatus,
-		NumSegments:   numSegs,
-		Referrer:      req.Referrer,
-		Cookies:       req.Cookies,
-		Headers:       headersCopy,
-		ConvertFormat: convertFmt,
-		TargetFormat:  targetFmt,
-		OutputFormat:  outputFmt,
-		AudioBitrate:  audioBitrate,
-		Plan:          plan,
-		IsHLS:         plan == nil && req.AudioURL == "" && IsHLSURL(req.URL, ""),
-		CreatedAt:     time.Now(),
-		limiter:       e.limiter,
-		retryLimit:    cfg.MaxRetries,
-		onStateDirty:  e.scheduleSave,
+		ID:             generateID(),
+		URL:            req.URL,
+		AudioURL:       req.AudioURL,
+		Category:       category,
+		Filename:       filename,
+		TotalBytes:     req.TotalBytes,
+		Status:         initialStatus,
+		NumSegments:    numSegs,
+		SpeedLimitKBps: speedLimit,
+		Referrer:       req.Referrer,
+		Cookies:        req.Cookies,
+		Headers:        headersCopy,
+		ConvertFormat:  convertFmt,
+		TargetFormat:   targetFmt,
+		OutputFormat:   outputFmt,
+		AudioBitrate:   audioBitrate,
+		Plan:           plan,
+		IsHLS:          plan == nil && req.AudioURL == "" && IsHLSURL(req.URL, ""),
+		CreatedAt:      time.Now(),
+		limiter:        e.limiter,
+		taskLimiter:    newRateLimiter(speedLimit * 1024),
+		retryLimit:     cfg.MaxRetries,
+		onStateDirty:   e.scheduleSave,
 	}
 	return task, saveDir, nil
 }
@@ -565,7 +579,7 @@ func (e *Engine) processQueue() {
 			} else {
 				probeDir = ResolveSaveDir(downloadDir, snap.Category, e.Config().AutoCategorize)
 			}
-			if err := t.Probe(runCtx, e.httpClient, probeDir); err != nil {
+			if err := t.Probe(runCtx, e.getHTTPClient(), probeDir); err != nil {
 				if runCtx.Err() != nil {
 					// Paused or cancelled while probing; the status is already set.
 					e.notify(t.Clone())
@@ -579,7 +593,7 @@ func (e *Engine) processQueue() {
 		}
 
 		// Run download
-		if err := t.Start(runCtx, e.httpClient, e.notify); err != nil {
+		if err := t.Start(runCtx, e.getHTTPClient(), e.notify); err != nil {
 			// Pause or error handled internally
 		} else if t.GetStatus() == StatusCompleted {
 			e.notifyCompleted(t)
@@ -714,6 +728,7 @@ func (e *Engine) loadState() error {
 		t.Speed = 0
 		t.ETA = 0
 		t.limiter = e.limiter
+		t.taskLimiter = newRateLimiter(t.SpeedLimitKBps * 1024)
 		t.retryLimit = e.config.MaxRetries
 		t.onStateDirty = e.scheduleSave
 		e.tasks = append(e.tasks, t)
@@ -746,12 +761,15 @@ func (e *Engine) UpdateConfig(cfg Config) {
 		cfg.SpeedLimitKBps = 0
 	}
 
+	cfg.Proxy.Mode = NormalizeProxyMode(cfg.Proxy.Mode)
+
 	e.mu.Lock()
 	cfg.StateFilePath = e.config.StateFilePath
 	e.config = cfg
 	e.mu.Unlock()
 
 	e.limiter.setRate(cfg.SpeedLimitKBps * 1024)
+	e.swapHTTPClient(cfg.Proxy)
 	_ = os.MkdirAll(cfg.DownloadDir, 0755)
 	_ = e.saveConfig()
 	e.scheduleSave()
@@ -800,6 +818,7 @@ func (e *Engine) saveConfig() error {
 		AutoCheckUpdates:       &cfg.AutoCheckUpdates,
 		UpdateRepo:             &cfg.UpdateRepo,
 		Language:               &cfg.Language,
+		Proxy:                  &cfg.Proxy,
 	}
 	data, err := json.MarshalIndent(pc, "", "  ")
 	if err != nil {
@@ -862,7 +881,72 @@ func (e *Engine) loadConfig() {
 	if pc.Language != nil {
 		e.config.Language = *pc.Language
 	}
+	if pc.Proxy != nil {
+		e.config.Proxy = *pc.Proxy
+		e.config.Proxy.Mode = NormalizeProxyMode(e.config.Proxy.Mode)
+	}
 	e.limiter.setRate(e.config.SpeedLimitKBps * 1024)
+}
+
+func (e *Engine) getHTTPClient() *http.Client {
+	if c := e.httpClient.Load(); c != nil {
+		return c
+	}
+	c := &http.Client{Timeout: 0}
+	e.httpClient.Store(c)
+	return c
+}
+
+func (e *Engine) swapHTTPClient(proxyCfg ProxyConfig) {
+	newClient, err := BuildHTTPClient(proxyCfg)
+	if err != nil {
+		// Fall back to direct transport if explicit proxy config is incomplete.
+		newClient = &http.Client{Timeout: 0}
+	}
+	if old := e.httpClient.Swap(newClient); old != nil {
+		old.CloseIdleConnections()
+	}
+}
+
+// SetTaskSpeedLimit updates a single task's bandwidth ceiling in KB/s (0 = use
+// global limit only). Takes effect immediately on active downloads.
+func (e *Engine) SetTaskSpeedLimit(id string, kbps int64) error {
+	if kbps < 0 {
+		kbps = 0
+	}
+	e.mu.RLock()
+	task, exists := e.tasksByID[id]
+	e.mu.RUnlock()
+	if !exists {
+		return fmt.Errorf("task not found: %s", id)
+	}
+
+	task.mu.Lock()
+	task.SpeedLimitKBps = kbps
+	if task.taskLimiter == nil {
+		task.taskLimiter = newRateLimiter(kbps * 1024)
+	} else {
+		task.taskLimiter.setRate(kbps * 1024)
+	}
+	task.mu.Unlock()
+
+	e.notify(task.Clone())
+	e.scheduleSave()
+	return nil
+}
+
+// IsIdle reports whether no tasks are active (Downloading/Probing/Muxing) or
+// waiting in the queue (StatusQueued), checked atomically under e.mu.RLock().
+func (e *Engine) IsIdle() bool {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	for _, t := range e.tasks {
+		st := t.GetStatus()
+		if st == StatusDownloading || st == StatusProbing || st == StatusMuxing || st == StatusQueued {
+			return false
+		}
+	}
+	return true
 }
 
 // RefreshTaskAddress replaces the URL (and optionally cookies, headers,
@@ -932,7 +1016,7 @@ func (e *Engine) RefreshTaskAddress(id string, req RefreshAddressRequest) error 
 
 	probedTotal, probedRanges, err := probeURLMetadata(
 		probeCtx,
-		e.httpClient,
+		e.getHTTPClient(),
 		newURL,
 		effectiveHeaders,
 		effectiveCookies,

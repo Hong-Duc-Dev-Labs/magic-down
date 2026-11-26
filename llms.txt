@@ -2,7 +2,7 @@
 
 > Fast, IDM-inspired Windows desktop download manager in pure Go (MyGo GPU Native UI, zero webview) paired with a Manifest V3 Chromium browser extension over authenticated local Native Messaging.
 
-MagicDown accelerates HTTP/HTTPS downloads with dynamic work-stealing multi-segment range probing, expired-link recovery (Refresh Download Address), explicit duplicate download detection, YouTube MP4/MP3 and social/streaming media (X/Twitter, Facebook, Weibo, Bilibili, Douyin, HLS, DASH), page-wide batch downloading, and a bilingual English/Vietnamese UI.
+MagicDown accelerates HTTP/HTTPS downloads with dynamic work-stealing multi-segment range probing, live segment visualization, per-task speed limits, System/HTTP/SOCKS5 proxy support, expired-link recovery (Refresh Download Address), explicit duplicate download detection, SHA-256/MD5 checksum verification, post-download Sleep/Shutdown countdowns, YouTube MP4/MP3 and social/streaming media (X/Twitter, Facebook, Weibo, Bilibili, Douyin, HLS, DASH), page-wide batch downloading, and a bilingual English/Vietnamese UI.
 
 ## Core Documentation
 - [README (English)](README.md): Overview, features, Windows installation, extension setup, privacy/security model, and build/test commands.

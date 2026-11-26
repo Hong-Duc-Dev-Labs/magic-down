@@ -133,7 +133,8 @@ func downloadSegment(
 	referrer string,
 	seg *Segment,
 	writer io.WriterAt,
-	limiter *rateLimiter,
+	taskLimiter *rateLimiter,
+	globalLimiter *rateLimiter,
 	maxRetries int,
 	onChunkDownloaded func(delta int64),
 	onRetry func(),
@@ -142,7 +143,7 @@ func downloadSegment(
 
 	var lastErr error
 	for attempt := 0; ; attempt++ {
-		retryable, err := downloadSegmentAttempt(ctx, client, taskURL, headers, cookies, referrer, seg, writer, limiter, onChunkDownloaded)
+		retryable, err := downloadSegmentAttempt(ctx, client, taskURL, headers, cookies, referrer, seg, writer, taskLimiter, globalLimiter, onChunkDownloaded)
 		if err == nil {
 			seg.setStatus("done")
 			return nil
@@ -181,7 +182,8 @@ func downloadSegmentAttempt(
 	referrer string,
 	seg *Segment,
 	writer io.WriterAt,
-	limiter *rateLimiter,
+	taskLimiter *rateLimiter,
+	globalLimiter *rateLimiter,
 	onChunkDownloaded func(delta int64),
 ) (retryable bool, err error) {
 	rangeStart := seg.Start + atomic.LoadInt64(&seg.Downloaded)
@@ -241,17 +243,16 @@ func downloadSegmentAttempt(
 		if remaining <= 0 {
 			break
 		}
-		readBuf := buf
+		maxRead := cappedReadBufferSize(len(buf), taskLimiter, globalLimiter)
+		readBuf := buf[:maxRead]
 		if int64(len(readBuf)) > remaining {
 			readBuf = readBuf[:remaining]
 		}
 
 		n, readErr := resp.Body.Read(readBuf)
 		if n > 0 {
-			if limiter != nil {
-				if waitErr := limiter.wait(ctx, int64(n)); waitErr != nil {
-					return false, waitErr
-				}
+			if waitErr := waitOrderedLimiters(ctx, int64(n), taskLimiter, globalLimiter); waitErr != nil {
+				return false, waitErr
 			}
 
 			downloaded = atomic.LoadInt64(&seg.Downloaded)

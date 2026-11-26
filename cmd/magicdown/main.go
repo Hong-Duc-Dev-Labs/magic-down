@@ -69,9 +69,6 @@ func main() {
 		log.Fatalf("failed to initialize download engine: %v", err)
 	}
 	defer eng.Close()
-	eng.SetOnTaskCompleted(func(task *engine.Task) {
-		notify.NotifyDownloadComplete(task.Filename)
-	})
 
 	// Start local IPC server for Browser Extension <-> Native Host <-> Desktop App
 	ipcServer := ipc.NewServer(eng, *ipcPort)
@@ -82,6 +79,10 @@ func main() {
 
 	appUI := gui.NewApp(eng, ipcServer)
 	ipcServer.SetOnIncomingDownload(appUI.EnqueueIncomingDownload)
+	eng.SetOnTaskCompleted(func(task *engine.Task) {
+		notify.NotifyDownloadComplete(task.Filename)
+		appUI.HandleTaskCompleted(task)
+	})
 
 	// Keep the process alive in the system tray when windows are hidden/closed.
 	mygo.App.OnWindowAllClosed(func() {})
