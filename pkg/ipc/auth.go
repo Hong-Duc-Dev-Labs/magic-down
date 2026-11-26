@@ -19,8 +19,12 @@ const (
 	MaxBodyBytes int64 = 10 * 1024 * 1024
 )
 
-// DefaultTokenPath returns %LOCALAPPDATA%\MagicDown\ipc.token (or user config dir fallback).
+// DefaultTokenPath returns MAGICDOWN_IPC_TOKEN_PATH if set, otherwise
+// %LOCALAPPDATA%\MagicDown\ipc.token (or user config dir fallback).
 func DefaultTokenPath() string {
+	if custom := strings.TrimSpace(os.Getenv("MAGICDOWN_IPC_TOKEN_PATH")); custom != "" {
+		return custom
+	}
 	if localAppData := os.Getenv("LOCALAPPDATA"); localAppData != "" {
 		return filepath.Join(localAppData, "MagicDown", "ipc.token")
 	}

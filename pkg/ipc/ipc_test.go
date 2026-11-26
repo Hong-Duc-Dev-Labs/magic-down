@@ -14,6 +14,7 @@ import (
 
 func TestIPCServerAndClient(t *testing.T) {
 	tempDir := t.TempDir()
+	t.Setenv("MAGICDOWN_IPC_TOKEN_PATH", filepath.Join(tempDir, "ipc.token"))
 	eng, err := engine.NewEngine(engine.Config{
 		MaxConcurrentDownloads: 2,
 		DefaultSegments:        4,
@@ -92,6 +93,7 @@ func TestIPCServerAndClient(t *testing.T) {
 
 func TestConfigEndpointAppliesSettings(t *testing.T) {
 	tempDir := t.TempDir()
+	t.Setenv("MAGICDOWN_IPC_TOKEN_PATH", filepath.Join(tempDir, "ipc.token"))
 	eng, err := engine.NewEngine(engine.Config{
 		MaxConcurrentDownloads: 2,
 		DefaultSegments:        4,
@@ -158,6 +160,7 @@ func TestConfigEndpointAppliesSettings(t *testing.T) {
 
 func TestServer_IncomingDownloadDialogHookAndAudioURL(t *testing.T) {
 	tempDir := t.TempDir()
+	t.Setenv("MAGICDOWN_IPC_TOKEN_PATH", filepath.Join(tempDir, "ipc.token"))
 	eng, err := engine.NewEngine(engine.DefaultConfig(tempDir, filepath.Join(tempDir, "state.json")))
 	if err != nil {
 		t.Fatalf("failed to create engine: %v", err)
@@ -201,6 +204,7 @@ func TestServer_IncomingDownloadDialogHookAndAudioURL(t *testing.T) {
 
 func TestIPCAddDownload_MP3OutputFormatAndBitrate(t *testing.T) {
 	tempDir := t.TempDir()
+	t.Setenv("MAGICDOWN_IPC_TOKEN_PATH", filepath.Join(tempDir, "ipc.token"))
 	cfg := engine.DefaultConfig(tempDir, filepath.Join(tempDir, "state.json"))
 	cfg.AutoCategorize = true
 	eng, err := engine.NewEngine(cfg)

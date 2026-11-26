@@ -16,7 +16,10 @@ import (
 	"magicdown/pkg/version"
 )
 
-const DefaultPort = 28888
+const (
+	DefaultPort   = 28888
+	MaxBatchItems = 2000
+)
 
 // AddDownloadRequest is the JSON payload for adding a download over IPC.
 type AddDownloadRequest struct {
@@ -143,6 +146,14 @@ func NewServer(eng *engine.Engine, port int) *Server {
 		handshakeTTL: 150 * time.Second,
 		handshakes:   make(map[string]HandshakeRecord),
 	}
+}
+
+// SetTokenPath overrides the file path where the IPC auth token is persisted.
+// Passing an empty string disables writing the token to disk.
+func (s *Server) SetTokenPath(path string) {
+	s.mu.Lock()
+	s.tokenPath = strings.TrimSpace(path)
+	s.mu.Unlock()
 }
 
 // AuthToken returns the active session IPC auth token.
@@ -540,15 +551,37 @@ func (s *Server) handleAddBatchDownload(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "missing items", http.StatusBadRequest)
 		return
 	}
+	if len(req.Items) > MaxBatchItems {
+		http.Error(w, fmt.Sprintf("too many batch items: max %d", MaxBatchItems), http.StatusBadRequest)
+		return
+	}
 
+	baseDir := s.engine.Config().DownloadDir
 	resp := BatchDownloadResponse{
 		Success: true,
 	}
 
 	for _, item := range req.Items {
-		if strings.TrimSpace(item.URL) == "" {
+		if err := ValidateHTTPURL(item.URL); err != nil {
 			resp.Failed++
-			resp.Errors = append(resp.Errors, "missing url")
+			resp.Errors = append(resp.Errors, err.Error())
+			continue
+		}
+		if strings.TrimSpace(item.AudioURL) != "" {
+			if err := ValidateHTTPURL(item.AudioURL); err != nil {
+				resp.Failed++
+				resp.Errors = append(resp.Errors, "invalid audio_url: "+err.Error())
+				continue
+			}
+		}
+		if err := ValidateFilename(item.Filename); err != nil {
+			resp.Failed++
+			resp.Errors = append(resp.Errors, err.Error())
+			continue
+		}
+		if err := ValidateSaveDir(baseDir, item.SaveDir); err != nil {
+			resp.Failed++
+			resp.Errors = append(resp.Errors, err.Error())
 			continue
 		}
 

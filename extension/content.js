@@ -1341,7 +1341,7 @@
     hostEl.style.cssText = "position:fixed;inset:0;pointer-events:none;z-index:2147483647;";
     document.documentElement.appendChild(hostEl);
 
-    shadow = hostEl.attachShadow({ mode: "open" });
+    shadow = hostEl.attachShadow({ mode: "closed" });
 
     const style = document.createElement("style");
     style.textContent = `

@@ -36,6 +36,7 @@ func TestNativeMessagingFramingRoundtrip(t *testing.T) {
 
 func TestNativeMessagingIPCForwarding(t *testing.T) {
 	tempDir := t.TempDir()
+	t.Setenv("MAGICDOWN_IPC_TOKEN_PATH", filepath.Join(tempDir, "ipc.token"))
 	eng, err := engine.NewEngine(engine.Config{
 		MaxConcurrentDownloads: 2,
 		DefaultSegments:        2,

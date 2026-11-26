@@ -30,6 +30,9 @@ const DEFAULT_SETTINGS = {
 const tabVideos = new Map();
 // Per-tab detected Facebook audio-only DASH tracks: Map<tabId, Map<fbVideoId, AudioItem>>
 const tabFbAudios = new Map();
+// Per-tab URLs genuinely observed by chrome.webRequest: Map<tabId, Set<string>>
+const tabObservedUrls = new Map();
+const MAX_OBSERVED_URLS_PER_TAB = 300;
 // Recent batch scan snapshots: Map<scanId, { tabId, pageTitle, pageUrl, items, createdAt }>
 const batchScanResults = new Map();
 const MAX_BATCH_SCANS = 10;
@@ -409,14 +412,138 @@ function sanitizeDownloadPlan(plan) {
   return safe;
 }
 
-// Manifest text fetch stays in the worker: it has host permissions and the
-// cookies permission, so DASH/HLS manifests behind CORS or login still parse.
-async function fetchManifestText(url) {
-  if (typeof url !== "string" || !/^https?:/i.test(url)) {
+function recordObservedTabUrl(tabId, rawUrl) {
+  if (typeof tabId !== "number" || tabId < 0 || typeof rawUrl !== "string" || !rawUrl) return;
+  let set = tabObservedUrls.get(tabId);
+  if (!set) {
+    set = new Set();
+    tabObservedUrls.set(tabId, set);
+  }
+  set.add(rawUrl);
+  while (set.size > MAX_OBSERVED_URLS_PER_TAB) {
+    set.delete(set.values().next().value);
+  }
+}
+
+function isPrivateOrLocalHost(hostname) {
+  const raw = String(hostname || "").trim().toLowerCase().replace(/^\[|\]$/g, "");
+  if (!raw) return true;
+  if (
+    raw === "localhost" ||
+    raw.endsWith(".localhost") ||
+    raw.endsWith(".local") ||
+    raw.endsWith(".internal") ||
+    raw === "0.0.0.0" ||
+    raw === "::" ||
+    raw === "::1"
+  ) {
+    return true;
+  }
+  // Single-label hostnames (e.g. "intranet", "metadata") have no dot.
+  if (!raw.includes(".") && !raw.includes(":")) {
+    return true;
+  }
+  // IPv4-mapped IPv6 (e.g. ::ffff:127.0.0.1 or ::ffff:7f00:1)
+  if (raw.startsWith("::ffff:")) {
+    const mapped = raw.slice(7);
+    if (mapped.includes(".")) return isPrivateOrLocalHost(mapped);
+    return true;
+  }
+  // IPv6 private/link-local/loopback ranges (fc00::/7, fe80::/10, ::1)
+  if (raw.includes(":")) {
+    if (/^(?:fc|fd|fe[89ab])/i.test(raw) || /^0*:0*:0*:0*:0*:0*:0*:0*1?$/.test(raw)) {
+      return true;
+    }
+    return false;
+  }
+  // Dotted IPv4
+  const ipv4 = raw.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (ipv4) {
+    const [a, b, c, d] = ipv4.slice(1).map((n) => Number.parseInt(n, 10));
+    if (a > 255 || b > 255 || c > 255 || d > 255) return true;
+    if (a === 0 || a === 10 || a === 127) return true;
+    if (a === 169 && b === 254) return true;
+    if (a === 172 && b >= 16 && b <= 31) return true;
+    if (a === 192 && b === 168) return true;
+    if (a === 100 && b >= 64 && b <= 127) return true;
+    return false;
+  }
+  return false;
+}
+
+function getRegistrableSite(hostname) {
+  const parts = String(hostname || "").toLowerCase().replace(/\.$/, "").split(".").filter(Boolean);
+  if (parts.length <= 2) return parts.join(".");
+  const multiPartTlds = new Set(["co.uk", "org.uk", "ac.uk", "com.cn", "net.cn", "org.cn", "com.vn", "co.jp", "com.au", "com.br", "co.kr"]);
+  const lastTwo = parts.slice(-2).join(".");
+  if (multiPartTlds.has(lastTwo) && parts.length >= 3) {
+    return parts.slice(-3).join(".");
+  }
+  return lastTwo;
+}
+
+function isAllowedManifestFetch(rawUrl, sender) {
+  if (typeof rawUrl !== "string" || !/^https?:/i.test(rawUrl)) {
     return { ok: false, error: "unsupported manifest URL" };
   }
+  let target;
   try {
-    const resp = await fetch(url, { credentials: "include", cache: "no-store" });
+    target = new URL(rawUrl);
+  } catch {
+    return { ok: false, error: "invalid manifest URL" };
+  }
+  if ((target.protocol !== "http:" && target.protocol !== "https:") || !target.hostname) {
+    return { ok: false, error: "unsupported manifest URL" };
+  }
+  if (!sender || !sender.tab || typeof sender.tab.id !== "number" || sender.tab.id < 0) {
+    return { ok: false, error: "missing sender tab" };
+  }
+
+  let page = null;
+  const senderUrl = (typeof sender.url === "string" && sender.url) || (typeof sender.tab.url === "string" && sender.tab.url) || "";
+  if (senderUrl) {
+    try {
+      page = new URL(senderUrl);
+    } catch {
+      page = null;
+    }
+  }
+
+  const sameOrigin = Boolean(page && target.origin === page.origin);
+  if (!sameOrigin && isPrivateOrLocalHost(target.hostname)) {
+    return { ok: false, error: "blocked private or local manifest host" };
+  }
+
+  const observedSet = tabObservedUrls.get(sender.tab.id);
+  const isObserved = Boolean(observedSet && observedSet.has(rawUrl));
+  const sameSite = Boolean(page && getRegistrableSite(target.hostname) === getRegistrableSite(page.hostname));
+  const isYouTubeManifest = Boolean(
+    page &&
+    /(?:^|\.)(?:youtube\.com|youtube-nocookie\.com)$/i.test(page.hostname) &&
+    /(?:^|\.)(?:googlevideo\.com|youtube\.com)$/i.test(target.hostname)
+  );
+
+  if (!isObserved && !sameSite && !isYouTubeManifest) {
+    return { ok: false, error: "manifest URL not authorized for this tab" };
+  }
+
+  return {
+    ok: true,
+    credentials: sameOrigin || sameSite || isObserved ? "include" : "omit"
+  };
+}
+
+// Manifest text fetch stays in the worker: it has host permissions and the
+// cookies permission, so DASH/HLS manifests behind CORS or login still parse,
+// while restricting requests to webRequest-observed or same-site public URLs
+// so forged page postMessages cannot trigger cross-origin SSRF/CSRF.
+async function fetchManifestText(url, sender) {
+  const check = isAllowedManifestFetch(url, sender);
+  if (!check.ok) {
+    return { ok: false, error: check.error };
+  }
+  try {
+    const resp = await fetch(url, { credentials: check.credentials, cache: "no-store" });
     if (!resp.ok) {
       return { ok: false, error: `HTTP ${resp.status}` };
     }
@@ -1035,6 +1162,7 @@ if (typeof chrome !== "undefined" && chrome.webRequest && chrome.webRequest.onHe
       if (details.tabId < 0 || details.statusCode < 200 || details.statusCode >= 300) {
         return;
       }
+      recordObservedTabUrl(details.tabId, details.url);
       const media = classifyMediaResponse(details.url, details.responseHeaders);
       if (!media) {
         const fbAudio = classifyFacebookAudioTrack(details.url, details.responseHeaders);
@@ -1069,12 +1197,14 @@ if (typeof chrome !== "undefined" && chrome.tabs) {
   chrome.tabs.onRemoved.addListener((tabId) => {
     tabVideos.delete(tabId);
     tabFbAudios.delete(tabId);
+    tabObservedUrls.delete(tabId);
   });
 
   chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
     if (changeInfo.status === "loading" && changeInfo.url) {
       tabVideos.delete(tabId);
       tabFbAudios.delete(tabId);
+      tabObservedUrls.delete(tabId);
       updateTabBadge(tabId);
     }
   });
@@ -1541,13 +1671,14 @@ if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.onMessage)
       if (tabId >= 0) {
         tabVideos.delete(tabId);
         tabFbAudios.delete(tabId);
+        tabObservedUrls.delete(tabId);
         updateTabBadge(tabId);
       }
       sendResponse({ ok: true });
       return false;
     }
     if (message.type === "fetchManifestText") {
-      fetchManifestText(message.url).then(sendResponse);
+      fetchManifestText(message.url, sender).then(sendResponse);
       return true;
     }
     if (message.type === "getDetectedVideos") {
@@ -1829,6 +1960,11 @@ if (typeof module !== "undefined" && module.exports) {
     fallbackDownloadIds,
     pendingDownloads,
     tabVideos,
-    tabFbAudios
+    tabFbAudios,
+    tabObservedUrls,
+    recordObservedTabUrl,
+    isPrivateOrLocalHost,
+    isAllowedManifestFetch,
+    fetchManifestText
   };
 }

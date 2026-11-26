@@ -17,9 +17,10 @@ import (
 type rateLimiter struct {
 	rate atomic.Int64 // bytes per second; 0 = unlimited
 
-	mu     sync.Mutex
-	tokens float64
-	last   time.Time
+	mu       sync.Mutex
+	tokens   float64
+	maxBurst float64
+	last     time.Time
 }
 
 const rateCheckInterval = 250 * time.Millisecond
@@ -61,9 +62,15 @@ func (l *rateLimiter) wait(ctx context.Context, n int64) error {
 			l.tokens += elapsed * float64(rate)
 		}
 		l.last = now
-		// Small burst window so a single chunk larger than the per-interval
-		// budget can still pass once enough tokens accumulate.
+		// Ensure burst is large enough to satisfy the largest active read chunk
+		// (e.g. 64 KB) even when rate < 256 KB/s, so waiters never livelock.
+		if float64(n) > l.maxBurst {
+			l.maxBurst = float64(n)
+		}
 		burst := float64(rate) / 4
+		if burst < l.maxBurst {
+			burst = l.maxBurst
+		}
 		if burst < 1 {
 			burst = 1
 		}

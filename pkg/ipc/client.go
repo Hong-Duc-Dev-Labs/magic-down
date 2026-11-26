@@ -42,6 +42,11 @@ func (c *Client) SetAuthToken(token string) {
 	c.authToken = strings.TrimSpace(token)
 }
 
+// SetTokenPath overrides the file path from which the IPC auth token is read.
+func (c *Client) SetTokenPath(path string) {
+	c.tokenPath = strings.TrimSpace(path)
+}
+
 func (c *Client) resolveToken() string {
 	if c.authToken != "" {
 		return c.authToken

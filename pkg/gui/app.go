@@ -42,6 +42,10 @@ type nativeHandleProvider interface {
 	NativeHandle() uintptr
 }
 
+type uiThreadDispatcher interface {
+	Update(fn func())
+}
+
 // FrameScheduleMode describes how the MyGo render loop should schedule the next frame.
 type FrameScheduleMode int
 
@@ -67,6 +71,7 @@ const (
 type App struct {
 	engine    *engine.Engine
 	ipcServer *ipc.Server
+	winMu     sync.RWMutex
 	winCtrl   WindowController
 	maximized bool
 
@@ -327,30 +332,32 @@ func (a *App) HideToTray() {
 	a.trayMu.Lock()
 	a.inTray = true
 	a.trayMu.Unlock()
-	if a.winCtrl != nil {
-		a.winCtrl.Hide()
-	}
+	a.dispatchWindowAction(func(ctrl WindowController) {
+		ctrl.Hide()
+	})
 }
 
 // BringToForeground wakes the app if hidden in tray, restores it if minimized,
 // raises it above background windows (such as browsers), and invalidates the UI.
+// Window API calls are marshalled onto the UI thread when supported.
 func (a *App) BringToForeground() {
 	a.trayMu.Lock()
 	a.inTray = false
 	a.trayMu.Unlock()
-	if a.winCtrl != nil {
-		a.winCtrl.Show()
-		a.winCtrl.Restore()
-		a.winCtrl.Focus()
-		if a.bringToForegroundFn != nil {
+	fgFn := a.bringToForegroundFn
+	a.dispatchWindowAction(func(ctrl WindowController) {
+		ctrl.Show()
+		ctrl.Restore()
+		ctrl.Focus()
+		if fgFn != nil {
 			var hwnd uintptr
-			if hp, ok := a.winCtrl.(nativeHandleProvider); ok {
+			if hp, ok := ctrl.(nativeHandleProvider); ok {
 				hwnd = hp.NativeHandle()
 			}
-			a.bringToForegroundFn(hwnd)
+			fgFn(hwnd)
 		}
-		a.winCtrl.Invalidate()
-	}
+		ctrl.Invalidate()
+	})
 }
 
 // WakeFromTray restores and focuses the main window and resumes UI rendering.
@@ -374,8 +381,8 @@ func (a *App) HandleMinimizeRequest() {
 		a.HideToTray()
 		return
 	}
-	if a.winCtrl != nil {
-		a.winCtrl.Minimize()
+	if ctrl := a.windowController(); ctrl != nil {
+		ctrl.Minimize()
 	}
 }
 
@@ -480,7 +487,32 @@ func (a *App) openIncomingDownloadDialog(req ipc.AddDownloadRequest) {
 
 // SetWindowController attaches the native MyGo window controller for custom title bar buttons.
 func (a *App) SetWindowController(ctrl WindowController) {
+	a.winMu.Lock()
 	a.winCtrl = ctrl
+	a.winMu.Unlock()
+}
+
+func (a *App) windowController() WindowController {
+	a.winMu.RLock()
+	ctrl := a.winCtrl
+	a.winMu.RUnlock()
+	return ctrl
+}
+
+// dispatchWindowAction invokes fn on the MyGo main UI thread when the attached
+// WindowController supports Update(func()), avoiding off-UI-thread Win32 calls.
+func (a *App) dispatchWindowAction(fn func(WindowController)) {
+	ctrl := a.windowController()
+	if ctrl == nil {
+		return
+	}
+	if dispatcher, ok := ctrl.(uiThreadDispatcher); ok {
+		dispatcher.Update(func() {
+			fn(ctrl)
+		})
+		return
+	}
+	fn(ctrl)
 }
 
 // SetMaximized updates the cached maximize state (wired from Window.OnMaximize/OnUnmaximize).
@@ -635,9 +667,10 @@ func (a *App) renderTitleBar(c *ui.Context, pal Palette) {
 				}
 
 				// Maximize / Restore
+				ctrl := a.windowController()
 				isMax := a.maximized
-				if a.winCtrl != nil {
-					isMax = a.winCtrl.IsMaximized()
+				if ctrl != nil {
+					isMax = ctrl.IsMaximized()
 				}
 				maxIcon := iconWinMax
 				if isMax {
@@ -653,8 +686,8 @@ func (a *App) renderTitleBar(c *ui.Context, pal Palette) {
 				maxBtn.Background(maxBg).Children(func() {
 					ui.Icon(c, maxIcon).Width(11).Height(11).TextColor(maxFg)
 				})
-				if maxBtn.Clicked() && a.winCtrl != nil {
-					a.winCtrl.ToggleMaximize()
+				if maxBtn.Clicked() && ctrl != nil {
+					ctrl.ToggleMaximize()
 				}
 
 				// Close (semantic Windows red hover)
@@ -669,8 +702,8 @@ func (a *App) renderTitleBar(c *ui.Context, pal Palette) {
 					ui.Icon(c, iconWinClose).Width(11).Height(11).TextColor(closeFg)
 				})
 				if closeBtn.Clicked() {
-					if !a.HandleCloseRequest() && a.winCtrl != nil {
-						a.winCtrl.Close()
+					if !a.HandleCloseRequest() && ctrl != nil {
+						ctrl.Close()
 					}
 				}
 			})
@@ -1709,9 +1742,9 @@ func (a *App) StartAutoUpdateCheck() {
 }
 
 func (a *App) invalidateUI() {
-	if a.winCtrl != nil {
-		a.winCtrl.Invalidate()
-	}
+	a.dispatchWindowAction(func(ctrl WindowController) {
+		ctrl.Invalidate()
+	})
 }
 
 func (a *App) newUpdater() *updater.Updater {

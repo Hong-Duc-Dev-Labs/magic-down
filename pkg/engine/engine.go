@@ -538,12 +538,24 @@ func (e *Engine) Unsubscribe(ch chan *Task) {
 }
 
 func (e *Engine) notify(t *Task) {
+	if t == nil {
+		return
+	}
+	e.subMu.RLock()
+	hasSubs := len(e.subscribers) > 0
+	e.subMu.RUnlock()
+	if !hasSubs {
+		return
+	}
+
+	snap := t.Clone()
+
 	e.subMu.RLock()
 	defer e.subMu.RUnlock()
 
 	for ch := range e.subscribers {
 		select {
-		case ch <- t:
+		case ch <- snap:
 		default:
 			// Non-blocking drop if channel is full to prevent lag
 		}

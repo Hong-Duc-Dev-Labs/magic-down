@@ -3,7 +3,9 @@
 package nativemessaging
 
 import (
+	"encoding/binary"
 	"fmt"
+	"runtime"
 	"strings"
 	"syscall"
 	"unsafe"
@@ -73,14 +75,35 @@ func ReadFileVersion(exePath string) string {
 		uintptr(unsafe.Pointer(&infoPtr)),
 		uintptr(unsafe.Pointer(&infoLen)),
 	)
-	if r1 == 0 || infoPtr == 0 || infoLen < uint32(unsafe.Sizeof(vsFixedFileInfo{})) {
+	basePtr := uintptr(unsafe.Pointer(&buf[0]))
+	structSize := unsafe.Sizeof(vsFixedFileInfo{})
+	if r1 == 0 || infoPtr == 0 || infoLen < uint32(structSize) || infoPtr < basePtr {
+		runtime.KeepAlive(buf)
+		runtime.KeepAlive(rootPtr)
+		runtime.KeepAlive(pathPtr)
 		return ""
 	}
-	info := (*vsFixedFileInfo)(unsafe.Pointer(infoPtr))
-	major := (info.FileVersionMS >> 16) & 0xffff
-	minor := info.FileVersionMS & 0xffff
-	build := (info.FileVersionLS >> 16) & 0xffff
-	rev := info.FileVersionLS & 0xffff
+	offset := infoPtr - basePtr
+	if offset > uintptr(len(buf)) || structSize > uintptr(len(buf))-offset {
+		runtime.KeepAlive(buf)
+		runtime.KeepAlive(rootPtr)
+		runtime.KeepAlive(pathPtr)
+		return ""
+	}
+	// VS_FIXEDFILEINFO layout:
+	//   0..4:  dwSignature
+	//   4..8:  dwStrucVersion
+	//   8..12: dwFileVersionMS
+	//  12..16: dwFileVersionLS
+	fileVerMS := binary.LittleEndian.Uint32(buf[offset+8 : offset+12])
+	fileVerLS := binary.LittleEndian.Uint32(buf[offset+12 : offset+16])
+	runtime.KeepAlive(buf)
+	runtime.KeepAlive(rootPtr)
+	runtime.KeepAlive(pathPtr)
+	major := (fileVerMS >> 16) & 0xffff
+	minor := fileVerMS & 0xffff
+	build := (fileVerLS >> 16) & 0xffff
+	rev := fileVerLS & 0xffff
 	if major == 0 && minor == 0 && build == 0 && rev == 0 {
 		return ""
 	}

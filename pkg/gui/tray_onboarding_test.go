@@ -2,6 +2,8 @@ package gui
 
 import (
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/egoist/mygo/ui"
@@ -241,5 +243,102 @@ func TestIncomingDownloadDialogBringsWindowToForegroundFromBackgroundOrTray(t *t
 	if app.IsInTray() || !win.visible || !app.showAddModal {
 		t.Fatalf("expected openIncomingDownloadDialog to wake from tray and open modal, inTray=%v visible=%v modal=%v",
 			app.IsInTray(), win.visible, app.showAddModal)
+	}
+}
+
+type mockDispatchWindowController struct {
+	mu           sync.Mutex
+	hwnd         uintptr
+	updateCalls  atomic.Int32
+	shown        atomic.Int32
+	restored     atomic.Int32
+	focused      atomic.Int32
+	invalidated  atomic.Int32
+	queue        []func()
+}
+
+func (m *mockDispatchWindowController) Minimize()             {}
+func (m *mockDispatchWindowController) ToggleMaximize()       {}
+func (m *mockDispatchWindowController) IsMaximized() bool     { return false }
+func (m *mockDispatchWindowController) Close()                {}
+func (m *mockDispatchWindowController) Hide()                 {}
+func (m *mockDispatchWindowController) Show()                 { m.shown.Add(1) }
+func (m *mockDispatchWindowController) Restore()              { m.restored.Add(1) }
+func (m *mockDispatchWindowController) Focus()                { m.focused.Add(1) }
+func (m *mockDispatchWindowController) IsVisible() bool       { return true }
+func (m *mockDispatchWindowController) Invalidate()           { m.invalidated.Add(1) }
+func (m *mockDispatchWindowController) NativeHandle() uintptr { return m.hwnd }
+func (m *mockDispatchWindowController) Update(fn func()) {
+	m.updateCalls.Add(1)
+	m.mu.Lock()
+	m.queue = append(m.queue, fn)
+	m.mu.Unlock()
+}
+func (m *mockDispatchWindowController) drainOnUIThread() {
+	m.mu.Lock()
+	items := m.queue
+	m.queue = nil
+	m.mu.Unlock()
+	for _, fn := range items {
+		fn()
+	}
+}
+
+func TestBringToForegroundAndInvalidateDispatchToUIThreadAndRaceFree(t *testing.T) {
+	tempDir := t.TempDir()
+	eng, err := engine.NewEngine(engine.DefaultConfig(tempDir, filepath.Join(tempDir, "state.json")))
+	if err != nil {
+		t.Fatalf("failed to init engine: %v", err)
+	}
+	defer eng.Close()
+
+	app := NewApp(eng, nil)
+	win := &mockDispatchWindowController{hwnd: 0xCAFE}
+	app.SetWindowController(win)
+
+	var fgCount atomic.Int32
+	app.bringToForegroundFn = func(hwnd uintptr) bool {
+		if hwnd == 0xCAFE {
+			fgCount.Add(1)
+		}
+		return true
+	}
+
+	// Off-UI-thread EnqueueIncomingDownload must marshal through Update() rather than
+	// directly calling Show/Restore/Focus/bringToForegroundFn on the caller goroutine.
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 10; i++ {
+			app.EnqueueIncomingDownload(ipc.AddDownloadRequest{
+				URL:      "https://example.com/file.zip",
+				Filename: "file.zip",
+			})
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 10; i++ {
+			app.SetWindowController(win)
+			app.invalidateUI()
+		}
+	}()
+	wg.Wait()
+
+	if win.shown.Load() != 0 || fgCount.Load() != 0 {
+		t.Fatalf("expected window calls to be deferred to Update(), got shown=%d fg=%d", win.shown.Load(), fgCount.Load())
+	}
+	if win.updateCalls.Load() < 20 {
+		t.Fatalf("expected Update() to be called for enqueues and invalidations, got %d", win.updateCalls.Load())
+	}
+
+	win.drainOnUIThread()
+	if win.shown.Load() != 10 || win.restored.Load() != 10 || win.focused.Load() != 10 || fgCount.Load() != 10 {
+		t.Fatalf("expected 10 foreground activations on UI thread, got shown=%d restored=%d focused=%d fg=%d",
+			win.shown.Load(), win.restored.Load(), win.focused.Load(), fgCount.Load())
+	}
+	if win.invalidated.Load() < 20 {
+		t.Fatalf("expected at least 20 invalidations on UI thread, got %d", win.invalidated.Load())
 	}
 }

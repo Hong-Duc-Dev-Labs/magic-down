@@ -59,6 +59,7 @@ func savePNG(t *testing.T, tester *ui.Tester, path string) {
 
 func TestMyGoNativeUIRendersCleanly(t *testing.T) {
 	tempDir := t.TempDir()
+	t.Setenv("MAGICDOWN_IPC_TOKEN_PATH", filepath.Join(tempDir, "ipc.token"))
 	stateFile := filepath.Join(tempDir, "state.json")
 
 	// Seed realistic persisted sample downloads for rendering & visual verification

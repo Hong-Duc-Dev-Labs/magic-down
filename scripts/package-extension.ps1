@@ -82,6 +82,7 @@ $RuntimeFiles = @(
 $RuntimeDirs = @("icons")
 
 $AllowedPermissions = @(
+    "alarms",
     "downloads",
     "nativeMessaging",
     "storage",

@@ -35,6 +35,7 @@ func TestWindowsIntegrationScenarioMatrix(t *testing.T) {
 
 	// 2. Real Desktop IPC + Native Messaging Host HELLO/WELCOME handshake
 	tmpDir := t.TempDir()
+	t.Setenv("MAGICDOWN_IPC_TOKEN_PATH", filepath.Join(tmpDir, "ipc.token"))
 	eng, err := engine.NewEngine(engine.DefaultConfig(tmpDir, filepath.Join(tmpDir, "state.json")))
 	if err != nil {
 		t.Fatalf("init engine: %v", err)

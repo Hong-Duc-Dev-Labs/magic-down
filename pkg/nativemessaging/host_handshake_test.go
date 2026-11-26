@@ -43,6 +43,7 @@ func TestMatchBrowserIDFromProcess(t *testing.T) {
 
 func TestRunStdioHostOneShotHelloRemainsConnectedAfterEOF(t *testing.T) {
 	tmpDir := t.TempDir()
+	t.Setenv("MAGICDOWN_IPC_TOKEN_PATH", filepath.Join(tmpDir, "ipc.token"))
 	eng, err := engine.NewEngine(engine.DefaultConfig(tmpDir, filepath.Join(tmpDir, "state.json")))
 	if err != nil {
 		t.Fatalf("init engine: %v", err)
@@ -94,6 +95,7 @@ func TestRunStdioHostOneShotHelloRemainsConnectedAfterEOF(t *testing.T) {
 
 func TestHandlerPrefersParentProcessBrowserAndSupportsExplicitDisconnect(t *testing.T) {
 	tmpDir := t.TempDir()
+	t.Setenv("MAGICDOWN_IPC_TOKEN_PATH", filepath.Join(tmpDir, "ipc.token"))
 	eng, err := engine.NewEngine(engine.DefaultConfig(tmpDir, filepath.Join(tmpDir, "state.json")))
 	if err != nil {
 		t.Fatalf("init engine: %v", err)

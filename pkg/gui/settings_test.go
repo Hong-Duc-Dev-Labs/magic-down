@@ -187,6 +187,7 @@ func (f *fakeInvalidateWinCtrl) Invalidate()       { f.invalidations++ }
 
 func TestBrowserIntegrationInvalidatesUIAndShowsConnectedForChromeEdgeDia(t *testing.T) {
 	tempDir := t.TempDir()
+	t.Setenv("MAGICDOWN_IPC_TOKEN_PATH", filepath.Join(tempDir, "ipc.token"))
 	eng, err := engine.NewEngine(engine.DefaultConfig(tempDir, filepath.Join(tempDir, "state.json")))
 	if err != nil {
 		t.Fatalf("failed to init engine: %v", err)

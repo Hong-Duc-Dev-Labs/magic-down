@@ -307,3 +307,89 @@ test("buildDownloadPayload forwards target_format, output_format, and audio_bitr
   assert.equal(mp3Payload.audio_bitrate, "320k");
   assert.equal(mp3Payload.filename, "song.mp3");
 });
+
+test("fetchManifestText blocks forged SSRF/CSRF targets and private/local hosts", async () => {
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const {
+    isPrivateOrLocalHost,
+    isAllowedManifestFetch,
+    recordObservedTabUrl,
+    fetchManifestText,
+    tabObservedUrls
+  } = require("./background.js");
+
+  tabObservedUrls.clear();
+  const evilSender = {
+    url: "https://evil.example/page.html",
+    tab: { id: 91, url: "https://evil.example/page.html" }
+  };
+
+  // Private, loopback, metadata, and internal hosts must be rejected.
+  const blockedHosts = [
+    "localhost",
+    "sub.localhost",
+    "127.0.0.1",
+    "10.0.0.1",
+    "172.16.0.1",
+    "192.168.1.1",
+    "169.254.169.254",
+    "0.0.0.0",
+    "::1",
+    "[::1]",
+    "::ffff:127.0.0.1",
+    "fc00::1",
+    "fe80::1",
+    "intranet",
+    "api.internal",
+    "printer.local"
+  ];
+  for (const h of blockedHosts) {
+    assert.equal(isPrivateOrLocalHost(h), true, `expected ${h} to be classified as private/local`);
+  }
+
+  const ssrfUrls = [
+    "http://127.0.0.1:28888/health",
+    "http://localhost:8080/secret.m3u8",
+    "http://169.254.169.254/latest/meta-data/",
+    "http://10.0.0.5/internal.mpd",
+    "http://192.168.1.1/router.m3u8",
+    "https://bank.example/account/private.m3u8",
+    "file:///C:/Windows/win.ini",
+    "javascript:alert(1)"
+  ];
+  for (const u of ssrfUrls) {
+    const res = await fetchManifestText(u, evilSender);
+    assert.equal(res.ok, false, `expected fetchManifestText to block ${u}`);
+  }
+
+  // Missing sender.tab must be rejected.
+  assert.equal(isAllowedManifestFetch("https://evil.example/stream.m3u8", null).ok, false);
+  assert.equal(isAllowedManifestFetch("https://evil.example/stream.m3u8", {}).ok, false);
+
+  // Same-site public manifest is allowed.
+  assert.equal(isAllowedManifestFetch("https://cdn.evil.example/live.m3u8", evilSender).ok, true);
+
+  // Cross-origin CDN manifest genuinely observed by chrome.webRequest on that tab is allowed.
+  const cdnUrl = "https://edge-cdn.mediahost.net/hls/master.m3u8";
+  assert.equal(isAllowedManifestFetch(cdnUrl, evilSender).ok, false, "unobserved cross-origin URL must be blocked");
+  recordObservedTabUrl(91, cdnUrl);
+  assert.equal(isAllowedManifestFetch(cdnUrl, evilSender).ok, true, "webRequest-observed URL should be allowed");
+
+  // YouTube HLS manifest from googlevideo.com on a youtube.com tab is allowed.
+  const ytSender = {
+    url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+    tab: { id: 92, url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ" }
+  };
+  assert.equal(
+    isAllowedManifestFetch("https://manifest.googlevideo.com/api/manifest/hls_variant/test.m3u8", ytSender).ok,
+    true
+  );
+
+  // Verify content.js uses closed Shadow DOM so page scripts cannot inspect overlay data.
+  const contentSrc = fs.readFileSync(path.join(__dirname, "content.js"), "utf8");
+  assert.ok(contentSrc.includes('attachShadow({ mode: "closed" })'), "content.js must use closed Shadow DOM");
+  assert.ok(!contentSrc.includes('attachShadow({ mode: "open" })'), "content.js must not use open Shadow DOM");
+
+  tabObservedUrls.clear();
+});

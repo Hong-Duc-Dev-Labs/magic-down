@@ -82,7 +82,7 @@ if (Test-Path $verGo) {
 }
 
 # 4. Verify Chrome & Edge Extension ZIPs
-$AllowedPerms = @("downloads", "nativeMessaging", "storage", "contextMenus", "cookies", "activeTab", "webRequest")
+$AllowedPerms = @("alarms", "downloads", "nativeMessaging", "storage", "contextMenus", "cookies", "activeTab", "webRequest")
 foreach ($browser in @("chrome", "edge")) {
     $zipPath = Join-Path $DistDir "MagicDown-extension-$browser.zip"
     $zip = [System.IO.Compression.ZipFile]::OpenRead($zipPath)

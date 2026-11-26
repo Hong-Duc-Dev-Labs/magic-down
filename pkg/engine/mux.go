@@ -231,16 +231,19 @@ func (t *Task) runMuxedDownload(ctx context.Context, client *http.Client, onUpda
 	videoTmp := partPath + ".video"
 	audioTmp := partPath + ".audio"
 
-	var totalKnown int64
+	var (
+		videoKnown atomic.Int64
+		audioKnown atomic.Int64
+		videoDown  atomic.Int64
+		audioDown  atomic.Int64
+	)
 	atomic.StoreInt64(&t.DownloadedBytes, 0)
 
-	onChunk := func(delta int64) {
-		if delta <= 0 {
-			return
-		}
-		newTotal := atomic.AddInt64(&t.DownloadedBytes, delta)
-		est := atomic.LoadInt64(&totalKnown)
-		speed, eta := t.speedCalc.Record(newTotal, est)
+	updateProgress := func() {
+		downloaded := videoDown.Load() + audioDown.Load()
+		est := videoKnown.Load() + audioKnown.Load()
+		atomic.StoreInt64(&t.DownloadedBytes, downloaded)
+		speed, eta := t.speedCalc.Record(downloaded, est)
 		t.mu.Lock()
 		if est > 0 {
 			t.TotalBytes = est
@@ -252,14 +255,28 @@ func (t *Task) runMuxedDownload(ctx context.Context, client *http.Client, onUpda
 			onUpdate(t)
 		}
 	}
-	onKnown := func(size int64) {
-		if size > 0 {
-			est := atomic.AddInt64(&totalKnown, size)
-			t.mu.Lock()
-			t.TotalBytes = est
-			t.mu.Unlock()
+	makeTrackCallbacks := func(knownSlot, downSlot *atomic.Int64) (func(int64), func(int64)) {
+		onKnown := func(size int64) {
+			if size > 0 {
+				knownSlot.Store(size)
+				est := videoKnown.Load() + audioKnown.Load()
+				t.mu.Lock()
+				t.TotalBytes = est
+				t.mu.Unlock()
+			}
 		}
+		onProgress := func(downloaded int64) {
+			if downloaded < 0 {
+				downloaded = 0
+			}
+			downSlot.Store(downloaded)
+			updateProgress()
+		}
+		return onKnown, onProgress
 	}
+
+	videoOnKnown, videoOnProgress := makeTrackCallbacks(&videoKnown, &videoDown)
+	audioOnKnown, audioOnProgress := makeTrackCallbacks(&audioKnown, &audioDown)
 
 	var wg sync.WaitGroup
 	errCh := make(chan error, 2)
@@ -267,13 +284,13 @@ func (t *Task) runMuxedDownload(ctx context.Context, client *http.Client, onUpda
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		if err := t.downloadTrackToFile(ctx, client, videoURL, videoTmp, onKnown, onChunk, onUpdate); err != nil {
+		if err := t.downloadTrackToFile(ctx, client, videoURL, videoTmp, videoOnKnown, videoOnProgress, onUpdate); err != nil {
 			errCh <- fmt.Errorf("video track: %w", err)
 		}
 	}()
 	go func() {
 		defer wg.Done()
-		if err := t.downloadTrackToFile(ctx, client, audioURL, audioTmp, onKnown, onChunk, onUpdate); err != nil {
+		if err := t.downloadTrackToFile(ctx, client, audioURL, audioTmp, audioOnKnown, audioOnProgress, onUpdate); err != nil {
 			errCh <- fmt.Errorf("audio track: %w", err)
 		}
 	}()
@@ -389,6 +406,7 @@ func (t *Task) downloadTrackOnce(
 	defer resp.Body.Close()
 
 	flags := os.O_CREATE | os.O_WRONLY
+	written := startOffset
 	switch resp.StatusCode {
 	case http.StatusPartialContent:
 		flags |= os.O_APPEND
@@ -396,16 +414,26 @@ func (t *Task) downloadTrackOnce(
 			onKnown(startOffset + resp.ContentLength)
 		}
 		if startOffset > 0 && onChunk != nil {
-			onChunk(startOffset)
+			onChunk(written)
 		}
 	case http.StatusOK:
 		startOffset = 0
+		written = 0
 		flags |= os.O_TRUNC
 		if resp.ContentLength > 0 && onKnown != nil {
 			onKnown(resp.ContentLength)
 		}
+		if onChunk != nil {
+			onChunk(0)
+		}
 	case http.StatusRequestedRangeNotSatisfiable:
 		if startOffset > 0 {
+			if onKnown != nil {
+				onKnown(startOffset)
+			}
+			if onChunk != nil {
+				onChunk(startOffset)
+			}
 			return false, nil
 		}
 		return false, fmt.Errorf("HTTP 416")
@@ -431,8 +459,9 @@ func (t *Task) downloadTrackOnce(
 				_ = out.Close()
 				return false, werr
 			}
+			written += int64(n)
 			if onChunk != nil {
-				onChunk(int64(n))
+				onChunk(written)
 			}
 		}
 		if readErr != nil {
