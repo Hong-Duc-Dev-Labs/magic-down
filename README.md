@@ -14,9 +14,9 @@ A fast, IDM-inspired desktop download manager for Windows built in pure Go with 
 ## Features
 
 - **Multi-Segment Download Engine**
-  - Automatic HTTP/HTTPS range probing (`Accept-Ranges`, `Content-Length`, `Content-Disposition`) with seamless single-stream fallback.
-  - Configurable concurrent segments (default `8`), real-time speed/ETA/progress tracking, atomic `.magicpart` completion, and global speed limit (`speed_limit_kbps`).
-  - **Pause, Resume, Cancel, Delete**, persistent queue with configurable max concurrent downloads (default `3`), and automatic exponential-backoff retries.
+  - Automatic HTTP/HTTPS range probing (`Accept-Ranges`, `Content-Length`, `Content-Disposition`) with seamless single-stream fallback and **dynamic work-stealing segmentation** that splits stalled/slow segments automatically to sustain max speed until 100%.
+  - Configurable concurrent segments (default `8`), real-time speed/ETA/progress tracking, atomic `.magicpart` completion, crash-safe atomic state persistence, and global speed limit (`speed_limit_kbps`).
+  - **Pause, Resume, Cancel, Delete**, **Refresh Download Address** (recover expired `403`/`410` signed links from the browser or manual URL paste without losing downloaded progress), **Duplicate Download Detection** (Focus/Open Existing, Download as Copy, or Overwrite), persistent queue with configurable max concurrent downloads (default `3`), and automatic exponential-backoff retries.
 - **YouTube MP4 & MP3 Downloads**
   - Floating video detector with quality selector for **MP4** (H.264/avc1 preferred, automatic video+audio muxing via FFmpeg) and **MP3** audio extraction at **320 / 192 / 128 kbps**.
 - **Social & Streaming Video Support**

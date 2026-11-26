@@ -8,8 +8,10 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -36,6 +38,15 @@ type AddTaskRequest struct {
 	StartPaused   bool              `json:"start_paused,omitempty"`
 }
 
+// RefreshAddressRequest specifies a replacement URL and credentials for a
+// paused or failed download whose signed link expired (e.g. 403/410).
+type RefreshAddressRequest struct {
+	URL      string            `json:"url"`
+	Referrer string            `json:"referrer,omitempty"`
+	Cookies  string            `json:"cookies,omitempty"`
+	Headers  map[string]string `json:"headers,omitempty"`
+}
+
 // Engine coordinates download tasks, queues, concurrency, and persistence.
 type Engine struct {
 	mu          sync.RWMutex
@@ -52,6 +63,7 @@ type Engine struct {
 	subMu       sync.RWMutex
 	saveTimer   *time.Timer
 	saveTimerMu sync.Mutex
+	saveMu      sync.Mutex
 	configMu    sync.Mutex
 }
 
@@ -138,11 +150,78 @@ func generateID() string {
 
 // AddTask creates, stores, and optionally starts a new download job.
 func (e *Engine) AddTask(req AddTaskRequest) (*Task, error) {
+	task, saveDir, err := e.prepareTask(req)
+	if err != nil {
+		return nil, err
+	}
+
+	e.mu.Lock()
+	if task.Filename != "" {
+		task.SavePath = UniqueFilePath(saveDir, task.Filename)
+		task.Filename = filepath.Base(task.SavePath)
+		task.PartPath = task.SavePath + ".magicpart"
+	}
+	e.tasks = append(e.tasks, task)
+	e.tasksByID[task.ID] = task
+	e.mu.Unlock()
+
+	snap := task.Clone()
+	e.notify(snap)
+	e.scheduleSave()
+
+	if req.AutoStart && !req.StartPaused {
+		go e.processQueue()
+	}
+
+	return snap, nil
+}
+
+// AddTaskOrFindDuplicate atomically checks for an existing duplicate task
+// (by normalized URL or target save path) under e.mu.Lock() before adding.
+// If a duplicate exists, it returns (nil, duplicateSnapshot, nil) without
+// modifying engine state.
+func (e *Engine) AddTaskOrFindDuplicate(req AddTaskRequest) (*Task, *Task, error) {
+	task, saveDir, err := e.prepareTask(req)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	candidateSavePath := ""
+	if task.Filename != "" {
+		candidateSavePath = filepath.Join(saveDir, task.Filename)
+	}
+
+	e.mu.Lock()
+	if dup := e.findDuplicateLocked(task.URL, candidateSavePath); dup != nil {
+		e.mu.Unlock()
+		return nil, dup, nil
+	}
+	if task.Filename != "" {
+		task.SavePath = UniqueFilePath(saveDir, task.Filename)
+		task.Filename = filepath.Base(task.SavePath)
+		task.PartPath = task.SavePath + ".magicpart"
+	}
+	e.tasks = append(e.tasks, task)
+	e.tasksByID[task.ID] = task
+	e.mu.Unlock()
+
+	snap := task.Clone()
+	e.notify(snap)
+	e.scheduleSave()
+
+	if req.AutoStart && !req.StartPaused {
+		go e.processQueue()
+	}
+
+	return snap, nil, nil
+}
+
+func (e *Engine) prepareTask(req AddTaskRequest) (*Task, string, error) {
 	var plan *DownloadPlan
 	if req.Plan != nil {
 		normalized, err := req.Plan.Normalize(req.URL)
 		if err != nil {
-			return nil, err
+			return nil, "", err
 		}
 		plan = normalized
 		if req.URL == "" {
@@ -150,7 +229,7 @@ func (e *Engine) AddTask(req AddTaskRequest) (*Task, error) {
 		}
 	}
 	if req.URL == "" {
-		return nil, errors.New("empty URL")
+		return nil, "", errors.New("empty URL")
 	}
 
 	saveDir := req.SaveDir
@@ -227,6 +306,14 @@ func (e *Engine) AddTask(req AddTaskRequest) (*Task, error) {
 		initialStatus = StatusPaused
 	}
 
+	var headersCopy map[string]string
+	if len(req.Headers) > 0 {
+		headersCopy = make(map[string]string, len(req.Headers))
+		for k, v := range req.Headers {
+			headersCopy[k] = v
+		}
+	}
+
 	task := &Task{
 		ID:            generateID(),
 		URL:           req.URL,
@@ -238,7 +325,7 @@ func (e *Engine) AddTask(req AddTaskRequest) (*Task, error) {
 		NumSegments:   numSegs,
 		Referrer:      req.Referrer,
 		Cookies:       req.Cookies,
-		Headers:       req.Headers,
+		Headers:       headersCopy,
 		ConvertFormat: convertFmt,
 		TargetFormat:  targetFmt,
 		OutputFormat:  outputFmt,
@@ -248,28 +335,9 @@ func (e *Engine) AddTask(req AddTaskRequest) (*Task, error) {
 		CreatedAt:     time.Now(),
 		limiter:       e.limiter,
 		retryLimit:    cfg.MaxRetries,
+		onStateDirty:  e.scheduleSave,
 	}
-
-	if task.Filename != "" {
-		task.SavePath = UniqueFilePath(saveDir, task.Filename)
-		task.Filename = filepath.Base(task.SavePath)
-		task.PartPath = task.SavePath + ".magicpart"
-	}
-
-	e.mu.Lock()
-	e.tasks = append(e.tasks, task)
-	e.tasksByID[task.ID] = task
-	e.mu.Unlock()
-
-	snap := task.Clone()
-	e.notify(snap)
-	e.scheduleSave()
-
-	if req.AutoStart && !req.StartPaused {
-		go e.processQueue()
-	}
-
-	return snap, nil
+	return task, saveDir, nil
 }
 
 // StartTask starts or resumes a specific task by ID.
@@ -470,9 +538,11 @@ func (e *Engine) processQueue() {
 	downloadDir := e.config.DownloadDir
 	maxRetries := e.config.MaxRetries
 	runCtx, runCancel := context.WithCancel(e.ctx)
+	done := make(chan struct{})
 	candidate.mu.Lock()
 	candidate.retryLimit = maxRetries
 	candidate.cancelFn = runCancel
+	candidate.workerDone = done
 	candidate.mu.Unlock()
 	e.mu.Unlock()
 
@@ -480,6 +550,7 @@ func (e *Engine) processQueue() {
 
 	go func(t *Task) {
 		defer func() {
+			close(done)
 			runCancel()
 			go e.processQueue()
 		}()
@@ -575,6 +646,9 @@ func (e *Engine) scheduleSave() {
 }
 
 func (e *Engine) saveState() error {
+	e.saveMu.Lock()
+	defer e.saveMu.Unlock()
+
 	e.mu.RLock()
 	tasksCopy := make([]*Task, len(e.tasks))
 	for i, t := range e.tasks {
@@ -588,13 +662,34 @@ func (e *Engine) saveState() error {
 		return err
 	}
 
-	_ = os.MkdirAll(filepath.Dir(statePath), 0755)
-	tmpPath := statePath + ".tmp"
-	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
+	dir := filepath.Dir(statePath)
+	_ = os.MkdirAll(dir, 0755)
+	tmpFile, err := os.CreateTemp(dir, "state-*.tmp")
+	if err != nil {
 		return err
 	}
+	tmpPath := tmpFile.Name()
+	if _, err := tmpFile.Write(data); err != nil {
+		_ = tmpFile.Close()
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	if err := tmpFile.Sync(); err != nil {
+		_ = tmpFile.Close()
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	if err := tmpFile.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+
 	_ = os.Remove(statePath)
-	return os.Rename(tmpPath, statePath)
+	if err := os.Rename(tmpPath, statePath); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	return nil
 }
 
 func (e *Engine) loadState() error {
@@ -620,6 +715,7 @@ func (e *Engine) loadState() error {
 		t.ETA = 0
 		t.limiter = e.limiter
 		t.retryLimit = e.config.MaxRetries
+		t.onStateDirty = e.scheduleSave
 		e.tasks = append(e.tasks, t)
 		e.tasksByID[t.ID] = t
 	}
@@ -767,6 +863,221 @@ func (e *Engine) loadConfig() {
 		e.config.Language = *pc.Language
 	}
 	e.limiter.setRate(e.config.SpeedLimitKBps * 1024)
+}
+
+// RefreshTaskAddress replaces the URL (and optionally cookies, headers,
+// referrer) of a Paused or Failed task after verifying the new link's content
+// length and byte-range compatibility, then resumes downloading from existing
+// segments / .magicpart without losing progress.
+func (e *Engine) RefreshTaskAddress(id string, req RefreshAddressRequest) error {
+	newURL := strings.TrimSpace(req.URL)
+	if newURL == "" || (!strings.HasPrefix(newURL, "http://") && !strings.HasPrefix(newURL, "https://")) {
+		return errors.New("invalid refresh URL: must start with http:// or https://")
+	}
+	if _, err := url.ParseRequestURI(newURL); err != nil {
+		return fmt.Errorf("invalid refresh URL: %w", err)
+	}
+
+	e.mu.RLock()
+	task, exists := e.tasksByID[id]
+	e.mu.RUnlock()
+	if !exists {
+		return fmt.Errorf("task not found: %s", id)
+	}
+
+	st := task.GetStatus()
+	if st != StatusPaused && st != StatusFailed {
+		return fmt.Errorf("can only refresh address for paused or failed tasks (current status: %s)", st)
+	}
+
+	// Wait for any prior worker goroutine to exit before mutating URL/Headers/Cookies.
+	if err := task.waitWorkerDone(e.ctx); err != nil {
+		return err
+	}
+
+	task.mu.RLock()
+	st = task.Status
+	expectedTotal := task.TotalBytes
+	hadRanges := task.SupportsRanges
+	hasSegments := len(task.Segments) > 0
+	effectiveReferrer := task.Referrer
+	effectiveCookies := task.Cookies
+	var effectiveHeaders map[string]string
+	if len(req.Headers) > 0 {
+		effectiveHeaders = make(map[string]string, len(req.Headers))
+		for k, v := range req.Headers {
+			effectiveHeaders[k] = v
+		}
+	} else if len(task.Headers) > 0 {
+		effectiveHeaders = make(map[string]string, len(task.Headers))
+		for k, v := range task.Headers {
+			effectiveHeaders[k] = v
+		}
+	}
+	task.mu.RUnlock()
+
+	if st != StatusPaused && st != StatusFailed {
+		return fmt.Errorf("can only refresh address for paused or failed tasks (current status: %s)", st)
+	}
+	if strings.TrimSpace(req.Referrer) != "" {
+		effectiveReferrer = strings.TrimSpace(req.Referrer)
+	}
+	if req.Cookies != "" {
+		effectiveCookies = req.Cookies
+	}
+
+	// Probe outside e.mu and task.mu.
+	probeCtx, cancel := context.WithTimeout(e.ctx, 30*time.Second)
+	defer cancel()
+
+	probedTotal, probedRanges, err := probeURLMetadata(
+		probeCtx,
+		e.httpClient,
+		newURL,
+		effectiveHeaders,
+		effectiveCookies,
+		effectiveReferrer,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to verify new download address: %w", err)
+	}
+
+	if expectedTotal > 0 && probedTotal > 0 && probedTotal != expectedTotal {
+		return fmt.Errorf("file size mismatch: expected %d bytes, new URL returned %d bytes", expectedTotal, probedTotal)
+	}
+	if hasSegments && hadRanges && !probedRanges {
+		return errors.New("new URL does not support byte ranges required to resume existing segments")
+	}
+
+	task.mu.Lock()
+	if task.Status != StatusPaused && task.Status != StatusFailed {
+		curStatus := task.Status
+		task.mu.Unlock()
+		return fmt.Errorf("task status changed during refresh (current status: %s)", curStatus)
+	}
+	task.URL = newURL
+	task.Referrer = effectiveReferrer
+	task.Cookies = effectiveCookies
+	task.Headers = effectiveHeaders
+	task.ErrorMessage = ""
+	if task.TotalBytes <= 0 && probedTotal > 0 {
+		task.TotalBytes = probedTotal
+		task.SupportsRanges = probedRanges
+	}
+	task.Status = StatusQueued
+	task.mu.Unlock()
+
+	e.notify(task.Clone())
+	e.scheduleSave()
+	go e.processQueue()
+	return nil
+}
+
+// FindDuplicate searches existing non-cancelled tasks for a match by normalized
+// URL or identical target save path, returning a thread-safe snapshot if found.
+func (e *Engine) FindDuplicate(rawURL, savePath string) *Task {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.findDuplicateLocked(rawURL, savePath)
+}
+
+func (e *Engine) findDuplicateLocked(rawURL, savePath string) *Task {
+	targetExact, targetStripped, targetHasFile := normalizeDuplicateURL(rawURL)
+	targetPath := cleanComparePath(savePath)
+
+	for _, t := range e.tasks {
+		st := t.GetStatus()
+		if st == StatusCancelled {
+			continue
+		}
+		t.mu.RLock()
+		tURL := t.URL
+		tSavePath := t.SavePath
+		t.mu.RUnlock()
+
+		if targetExact != "" {
+			ex, stp, hasFile := normalizeDuplicateURL(tURL)
+			if ex != "" && ex == targetExact {
+				return t.Clone()
+			}
+			if targetHasFile && hasFile && targetStripped != "" && targetStripped == stp {
+				return t.Clone()
+			}
+		}
+
+		if targetPath != "" {
+			if existingPath := cleanComparePath(tSavePath); existingPath != "" && sameFilePath(targetPath, existingPath) {
+				return t.Clone()
+			}
+		}
+	}
+	return nil
+}
+
+// NormalizeDuplicateURL returns a canonical comparison key for URL deduplication.
+// Exported for reuse in GUI pending-queue deduplication.
+func NormalizeDuplicateURL(rawURL string) string {
+	exact, stripped, hasFile := normalizeDuplicateURL(rawURL)
+	if hasFile && stripped != "" {
+		return stripped
+	}
+	return exact
+}
+
+func normalizeDuplicateURL(rawURL string) (exact string, stripped string, hasFilename bool) {
+	trimmed := strings.TrimSpace(rawURL)
+	if trimmed == "" {
+		return "", "", false
+	}
+	u, err := url.Parse(trimmed)
+	if err != nil || u.Host == "" {
+		return trimmed, "", false
+	}
+	u.Scheme = strings.ToLower(u.Scheme)
+	u.Host = strings.ToLower(u.Host)
+	u.Fragment = ""
+	exact = u.String()
+
+	base := filepath.Base(u.Path)
+	hasFilename = base != "" && base != "." && base != "/"
+
+	q := u.Query()
+	for k := range q {
+		if isEphemeralQueryParam(k) {
+			q.Del(k)
+		}
+	}
+	u.RawQuery = q.Encode()
+	stripped = u.String()
+	return exact, stripped, hasFilename
+}
+
+func isEphemeralQueryParam(key string) bool {
+	k := strings.ToLower(strings.TrimSpace(key))
+	if strings.HasPrefix(k, "x-amz-") || strings.HasPrefix(k, "x-goog-") || strings.HasPrefix(k, "utm_") {
+		return true
+	}
+	switch k {
+	case "token", "sig", "signature", "expires", "exp", "auth", "hdnts",
+		"e", "h", "oe", "oh", "nonce", "ts", "timestamp", "_t", "fbclid", "gclid":
+		return true
+	}
+	return false
+}
+
+func cleanComparePath(p string) string {
+	trimmed := strings.TrimSpace(p)
+	if trimmed == "" {
+		return ""
+	}
+	return filepath.Clean(trimmed)
+}
+
+func sameFilePath(a, b string) bool {
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(a, b)
+	}
+	return a == b
 }
 
 // Close gracefully stops all tasks and flushes state.

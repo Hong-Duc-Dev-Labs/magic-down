@@ -428,3 +428,316 @@ func TestQueueConcurrencyLimits(t *testing.T) {
 		t.Fatalf("concurrency limit breached! max allowed: %d, observed: %d", maxConcurrent, observed)
 	}
 }
+
+// TestRefreshTaskAddressResumesExpiredLink serves 403 on URL A after ~50% is
+// downloaded, refreshes to URL B with the same payload, resumes to 100%, and
+// verifies exact SHA-256.
+func TestRefreshTaskAddressResumesExpiredLink(t *testing.T) {
+	const dataSize = 1024 * 1024 * 2 // 2 MiB
+	payload, expectedHash := generateTestPayload(dataSize)
+	serveRange := func(w http.ResponseWriter, r *http.Request, expireSecondHalf bool) {
+		w.Header().Set("Accept-Ranges", "bytes")
+		w.Header().Set("Content-Type", "application/octet-stream")
+		rangeHeader := r.Header.Get("Range")
+		if rangeHeader == "" {
+			w.Header().Set("Content-Length", strconv.Itoa(dataSize))
+			if r.Method == http.MethodHead {
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(payload)
+			return
+		}
+		rangeSpec := strings.TrimPrefix(rangeHeader, "bytes=")
+		parts := strings.Split(rangeSpec, "-")
+		start, _ := strconv.Atoi(parts[0])
+		end := dataSize - 1
+		if parts[1] != "" {
+			end, _ = strconv.Atoi(parts[1])
+		}
+		if expireSecondHalf && start >= dataSize/2 {
+			http.Error(w, "link expired", http.StatusForbidden)
+			return
+		}
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, dataSize))
+		w.Header().Set("Content-Length", strconv.Itoa(end-start+1))
+		w.WriteHeader(http.StatusPartialContent)
+		_, _ = w.Write(payload[start : end+1])
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/expired.bin":
+			serveRange(w, r, true)
+		case "/refreshed.bin":
+			if r.Header.Get("X-Refresh-Token") != "fresh-123" {
+				http.Error(w, "missing token", http.StatusForbidden)
+				return
+			}
+			serveRange(w, r, false)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	tempDir := t.TempDir()
+	eng, err := NewEngine(Config{
+		MaxConcurrentDownloads: 2,
+		DefaultSegments:        4,
+		MaxRetries:             1,
+		DownloadDir:            tempDir,
+		StateFilePath:          filepath.Join(tempDir, "state.json"),
+	})
+	if err != nil {
+		t.Fatalf("failed to init engine: %v", err)
+	}
+	defer eng.Close()
+
+	task, err := eng.AddTask(AddTaskRequest{
+		URL:         server.URL + "/expired.bin",
+		Filename:    "video.bin",
+		NumSegments: 4,
+		AutoStart:   true,
+	})
+	if err != nil {
+		t.Fatalf("AddTask failed: %v", err)
+	}
+
+	// Wait for task to fail after link expires at ~50%.
+	deadline := time.Now().Add(10 * time.Second)
+	var failedSnap *Task
+	for time.Now().Before(deadline) {
+		failedSnap, _ = eng.GetTask(task.ID)
+		if failedSnap.Status == StatusFailed {
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	if failedSnap == nil || failedSnap.Status != StatusFailed {
+		t.Fatalf("expected task to fail after 403 expiration, got %v", failedSnap)
+	}
+	if failedSnap.DownloadedBytes <= 0 {
+		t.Fatalf("expected partial progress before failure, got %d bytes", failedSnap.DownloadedBytes)
+	}
+
+	// Refresh to URL B with fresh header token.
+	err = eng.RefreshTaskAddress(task.ID, RefreshAddressRequest{
+		URL:     server.URL + "/refreshed.bin",
+		Headers: map[string]string{"X-Refresh-Token": "fresh-123"},
+	})
+	if err != nil {
+		t.Fatalf("RefreshTaskAddress failed: %v", err)
+	}
+
+	// Wait for completion.
+	deadline = time.Now().Add(10 * time.Second)
+	var doneSnap *Task
+	for time.Now().Before(deadline) {
+		doneSnap, _ = eng.GetTask(task.ID)
+		if doneSnap.Status == StatusCompleted {
+			break
+		}
+		if doneSnap.Status == StatusFailed {
+			t.Fatalf("task failed after refresh: %s", doneSnap.ErrorMessage)
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	if doneSnap == nil || doneSnap.Status != StatusCompleted {
+		t.Fatalf("task did not complete after refresh: %v", doneSnap)
+	}
+	if doneSnap.URL != server.URL+"/refreshed.bin" {
+		t.Errorf("expected updated URL, got %q", doneSnap.URL)
+	}
+
+	actualHash, err := computeFileSHA256(doneSnap.SavePath)
+	if err != nil {
+		t.Fatalf("failed to hash refreshed file: %v", err)
+	}
+	if actualHash != expectedHash {
+		t.Fatalf("SHA-256 mismatch after refresh: want %s, got %s", expectedHash, actualHash)
+	}
+}
+
+// TestRefreshTaskAddressRejectsSizeMismatch verifies that refreshing with a URL
+// serving a different Content-Length fails safely without modifying .magicpart.
+func TestRefreshTaskAddressRejectsSizeMismatch(t *testing.T) {
+	wrongPayload, _ := generateTestPayload(512 * 1024)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Accept-Ranges", "bytes")
+		w.Header().Set("Content-Length", strconv.Itoa(len(wrongPayload)))
+		if r.Method == http.MethodHead {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes 0-0/%d", len(wrongPayload)))
+		w.WriteHeader(http.StatusPartialContent)
+		_, _ = w.Write(wrongPayload[:1])
+	}))
+	defer server.Close()
+
+	tempDir := t.TempDir()
+	eng, err := NewEngine(Config{
+		MaxConcurrentDownloads: 2,
+		DefaultSegments:        4,
+		DownloadDir:            tempDir,
+		StateFilePath:          filepath.Join(tempDir, "state.json"),
+	})
+	if err != nil {
+		t.Fatalf("failed to init engine: %v", err)
+	}
+	defer eng.Close()
+
+	task, err := eng.AddTask(AddTaskRequest{
+		URL:         "https://example.com/original.bin",
+		Filename:    "original.bin",
+		TotalBytes:  1024 * 1024, // 1 MiB expected
+		StartPaused: true,
+	})
+	if err != nil {
+		t.Fatalf("AddTask failed: %v", err)
+	}
+
+	sentinel := []byte("partial-data-must-stay-intact")
+	if err := os.WriteFile(task.PartPath, sentinel, 0644); err != nil {
+		t.Fatalf("failed to write .magicpart: %v", err)
+	}
+
+	err = eng.RefreshTaskAddress(task.ID, RefreshAddressRequest{
+		URL: server.URL + "/wrong-size.bin",
+	})
+	if err == nil || !strings.Contains(err.Error(), "size mismatch") {
+		t.Fatalf("expected size mismatch error, got: %v", err)
+	}
+
+	// Verify task URL and .magicpart were not modified.
+	snap, _ := eng.GetTask(task.ID)
+	if snap.URL != "https://example.com/original.bin" {
+		t.Errorf("task URL should remain unchanged, got %q", snap.URL)
+	}
+	if snap.Status != StatusPaused {
+		t.Errorf("task status should remain Paused, got %s", snap.Status)
+	}
+	partBytes, err := os.ReadFile(task.PartPath)
+	if err != nil || string(partBytes) != string(sentinel) {
+		t.Fatalf(".magicpart was unexpectedly modified: err=%v content=%q", err, string(partBytes))
+	}
+}
+
+// TestDuplicateDetectionAndAtomicDeduplication verifies FindDuplicate matching
+// (exact URL, ephemeral query params, and SavePath) plus concurrent arrival
+// atomicity under e.mu.Lock().
+func TestDuplicateDetectionAndAtomicDeduplication(t *testing.T) {
+	tempDir := t.TempDir()
+	eng, err := NewEngine(Config{
+		MaxConcurrentDownloads: 2,
+		DefaultSegments:        4,
+		DownloadDir:            tempDir,
+		StateFilePath:          filepath.Join(tempDir, "state.json"),
+	})
+	if err != nil {
+		t.Fatalf("failed to init engine: %v", err)
+	}
+	defer eng.Close()
+
+	first, dup, err := eng.AddTaskOrFindDuplicate(AddTaskRequest{
+		URL:         "https://cdn.example.com/files/archive.zip?token=abc123&expires=111",
+		Filename:    "archive.zip",
+		SaveDir:     tempDir,
+		StartPaused: true,
+	})
+	if err != nil || dup != nil || first == nil {
+		t.Fatalf("expected first task to be added cleanly, got task=%v dup=%v err=%v", first, dup, err)
+	}
+
+	// 1. Exact URL match
+	if got := eng.FindDuplicate("https://cdn.example.com/files/archive.zip?token=abc123&expires=111", ""); got == nil || got.ID != first.ID {
+		t.Fatalf("expected exact URL duplicate match, got %v", got)
+	}
+
+	// 2. Ephemeral query params ignored when host + path + filename match
+	if got := eng.FindDuplicate("https://cdn.example.com/files/archive.zip?token=xyz999&expires=222", ""); got == nil || got.ID != first.ID {
+		t.Fatalf("expected ephemeral-param URL duplicate match, got %v", got)
+	}
+
+	// 3. Same SavePath match even with different URL
+	if got := eng.FindDuplicate("https://mirror.example.org/other.bin", first.SavePath); got == nil || got.ID != first.ID {
+		t.Fatalf("expected SavePath duplicate match, got %v", got)
+	}
+
+	// 4. Non-ephemeral query param difference should NOT match
+	if got := eng.FindDuplicate("https://cdn.example.com/files/archive.zip?version=2", ""); got != nil {
+		t.Fatalf("expected non-ephemeral query diff not to match, got %v", got)
+	}
+
+	// 5. Concurrent AddTaskOrFindDuplicate arrivals for the same URL: exactly 1 succeeds.
+	const workers = 12
+	var addedCount atomic.Int32
+	var dupCount atomic.Int32
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			tAdded, tDup, addErr := eng.AddTaskOrFindDuplicate(AddTaskRequest{
+				URL:         "https://cdn.example.com/files/concurrent.iso?sig=1",
+				Filename:    "concurrent.iso",
+				SaveDir:     tempDir,
+				StartPaused: true,
+			})
+			if addErr != nil {
+				t.Errorf("unexpected error: %v", addErr)
+				return
+			}
+			if tAdded != nil {
+				addedCount.Add(1)
+			}
+			if tDup != nil {
+				dupCount.Add(1)
+			}
+		}()
+	}
+	wg.Wait()
+
+	if addedCount.Load() != 1 || dupCount.Load() != workers-1 {
+		t.Fatalf("expected exactly 1 added and %d duplicates, got added=%d dup=%d", workers-1, addedCount.Load(), dupCount.Load())
+	}
+}
+
+// TestConcurrentSaveStateStress exercises Engine.saveState() concurrently from
+// many goroutines to verify saveMu + atomic temp-file rename prevent collisions.
+func TestConcurrentSaveStateStress(t *testing.T) {
+	tempDir := t.TempDir()
+	eng, err := NewEngine(Config{
+		MaxConcurrentDownloads: 2,
+		DefaultSegments:        4,
+		DownloadDir:            tempDir,
+		StateFilePath:          filepath.Join(tempDir, "state.json"),
+	})
+	if err != nil {
+		t.Fatalf("failed to init engine: %v", err)
+	}
+	defer eng.Close()
+
+	_, _ = eng.AddTask(AddTaskRequest{
+		URL:         "https://example.com/stress.bin",
+		Filename:    "stress.bin",
+		StartPaused: true,
+	})
+
+	var wg sync.WaitGroup
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 10; j++ {
+				if err := eng.saveState(); err != nil {
+					t.Errorf("concurrent saveState failed: %v", err)
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+}

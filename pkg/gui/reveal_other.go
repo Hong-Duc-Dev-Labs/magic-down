@@ -25,3 +25,15 @@ func revealInFileManager(target revealTarget) error {
 		return exec.Command("xdg-open", target.Path).Start()
 	}
 }
+
+func openExternalURL(rawURL string) error {
+	if rawURL == "" {
+		return nil
+	}
+	switch runtime.GOOS {
+	case "darwin":
+		return exec.Command("open", rawURL).Start()
+	default:
+		return exec.Command("xdg-open", rawURL).Start()
+	}
+}

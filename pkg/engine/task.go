@@ -331,8 +331,27 @@ func (t *Task) Start(parentCtx context.Context, client *http.Client, onUpdate fu
 }
 
 func (t *Task) runRangedDownload(ctx context.Context, client *http.Client, onUpdate func(*Task)) error {
+	t.mu.RLock()
+	partPath := t.PartPath
+	totalBytes := t.TotalBytes
+	taskURL := t.URL
+	cookies := t.Cookies
+	referrer := t.Referrer
+	numSegments := t.NumSegments
+	onStateDirty := t.onStateDirty
+	var headers map[string]string
+	if len(t.Headers) > 0 {
+		headers = make(map[string]string, len(t.Headers))
+		for k, v := range t.Headers {
+			headers[k] = v
+		}
+	}
+	initialSegs := make([]*Segment, len(t.Segments))
+	copy(initialSegs, t.Segments)
+	t.mu.RUnlock()
+
 	// Open or create .part file
-	partFile, err := os.OpenFile(t.PartPath, os.O_CREATE|os.O_RDWR, 0666)
+	partFile, err := os.OpenFile(partPath, os.O_CREATE|os.O_RDWR, 0666)
 	if err != nil {
 		t.fail(fmt.Sprintf("failed to open part file: %v", err), onUpdate)
 		return err
@@ -340,16 +359,13 @@ func (t *Task) runRangedDownload(ctx context.Context, client *http.Client, onUpd
 	defer partFile.Close()
 
 	// Pre-allocate / truncate file to expected size
-	if err := partFile.Truncate(t.TotalBytes); err != nil {
+	if err := partFile.Truncate(totalBytes); err != nil {
 		// Non-fatal if filesystem doesn't support preallocation, but log
 	}
 
-	var wg sync.WaitGroup
-	errChan := make(chan error, len(t.Segments))
-
 	onChunk := func(delta int64) {
 		newTotal := atomic.AddInt64(&t.DownloadedBytes, delta)
-		speed, eta := t.speedCalc.Record(newTotal, t.TotalBytes)
+		speed, eta := t.speedCalc.Record(newTotal, totalBytes)
 		t.mu.Lock()
 		t.Speed = speed
 		t.ETA = eta
@@ -363,24 +379,79 @@ func (t *Task) runRangedDownload(ctx context.Context, client *http.Client, onUpd
 	maxRetries := t.retryBudget()
 	onRetry := func() { t.noteRetry(onUpdate) }
 
-	for _, seg := range t.Segments {
+	pending := make([]*Segment, 0, len(initialSegs))
+	for _, seg := range initialSegs {
+		if atomic.LoadInt64(&seg.Downloaded) >= seg.getEnd()-seg.Start+1 {
+			seg.setStatus("done")
+			continue
+		}
+		pending = append(pending, seg)
+	}
+
+	pendingCh := make(chan *Segment, len(pending))
+	for _, seg := range pending {
+		pendingCh <- seg
+	}
+
+	coord := newSegmentCoordinator(t, defaultMinStealRemaining, func() {
+		if onStateDirty != nil {
+			onStateDirty()
+		}
+		if onUpdate != nil {
+			onUpdate(t)
+		}
+	})
+
+	numWorkers := numSegments
+	if numWorkers <= 0 {
+		numWorkers = len(initialSegs)
+	}
+	if numWorkers < 1 {
+		numWorkers = 1
+	}
+
+	var (
+		wg       sync.WaitGroup
+		errMu    sync.Mutex
+		firstErr error
+	)
+
+	for i := 0; i < numWorkers; i++ {
 		wg.Add(1)
-		go func(s *Segment) {
+		go func() {
 			defer wg.Done()
-			if atomic.LoadInt64(&s.Downloaded) >= (s.End - s.Start + 1) {
-				s.setStatus("done")
-				return
-			}
-			if err := downloadSegment(ctx, client, t.URL, t.Headers, t.Cookies, t.Referrer, s, partFile, limiter, maxRetries, onChunk, onRetry); err != nil {
-				if !errors.Is(err, context.Canceled) {
-					errChan <- err
+			for {
+				if ctx.Err() != nil {
+					return
+				}
+				var seg *Segment
+				select {
+				case seg = <-pendingCh:
+				default:
+					seg = coord.stealSegment()
+				}
+				if seg == nil {
+					return
+				}
+				if atomic.LoadInt64(&seg.Downloaded) >= seg.getEnd()-seg.Start+1 {
+					seg.setStatus("done")
+					continue
+				}
+				if err := downloadSegment(ctx, client, taskURL, headers, cookies, referrer, seg, partFile, limiter, maxRetries, onChunk, onRetry); err != nil {
+					if !errors.Is(err, context.Canceled) {
+						errMu.Lock()
+						if firstErr == nil {
+							firstErr = err
+						}
+						errMu.Unlock()
+					}
+					return
 				}
 			}
-		}(seg)
+		}()
 	}
 
 	wg.Wait()
-	close(errChan)
 
 	// Check if context was cancelled (pause or cancel)
 	if ctx.Err() != nil {
@@ -399,22 +470,18 @@ func (t *Task) runRangedDownload(ctx context.Context, client *http.Client, onUpd
 	}
 
 	// Check segment errors
-	if len(errChan) > 0 {
-		var firstErr error
-		for e := range errChan {
-			if firstErr == nil {
-				firstErr = e
-			}
-		}
+	if firstErr != nil {
 		t.fail(fmt.Sprintf("segment error: %v", firstErr), onUpdate)
 		return firstErr
 	}
 
 	// Verify all segments completed
 	var actualDownloaded int64
+	t.mu.RLock()
 	for _, seg := range t.Segments {
 		actualDownloaded += atomic.LoadInt64(&seg.Downloaded)
 	}
+	t.mu.RUnlock()
 	atomic.StoreInt64(&t.DownloadedBytes, actualDownloaded)
 
 	partFile.Sync()
@@ -715,6 +782,99 @@ func (t *Task) ProgressPercentage() float64 {
 	return pct
 }
 
+// waitWorkerDone blocks until the task's most recent worker goroutine has
+// exited, or until ctx is cancelled.
+func (t *Task) waitWorkerDone(ctx context.Context) error {
+	t.mu.RLock()
+	done := t.workerDone
+	t.mu.RUnlock()
+	if done == nil {
+		return nil
+	}
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// probeURLMetadata inspects a remote URL via HEAD (with ranged GET fallback)
+// without mutating any Task fields. Used by RefreshTaskAddress to validate a
+// replacement link before resuming.
+func probeURLMetadata(
+	ctx context.Context,
+	client *http.Client,
+	rawURL string,
+	headers map[string]string,
+	cookies string,
+	referrer string,
+) (totalSize int64, supportsRanges bool, err error) {
+	applyHeaders := func(req *http.Request) {
+		req.Header.Set("User-Agent", "MagicDown/1.0 (Windows NT 10.0; Win64; x64)")
+		if referrer != "" {
+			req.Header.Set("Referer", referrer)
+		}
+		if cookies != "" {
+			req.Header.Set("Cookie", cookies)
+		}
+		for k, v := range headers {
+			req.Header.Set(k, v)
+		}
+	}
+
+	// Try HEAD first
+	if headReq, reqErr := http.NewRequestWithContext(ctx, http.MethodHead, rawURL, nil); reqErr == nil {
+		applyHeaders(headReq)
+		if resp, headErr := client.Do(headReq); headErr == nil {
+			_ = resp.Body.Close()
+			if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+				if resp.ContentLength > 0 && strings.EqualFold(resp.Header.Get("Accept-Ranges"), "bytes") {
+					return resp.ContentLength, true, nil
+				}
+			}
+		}
+	}
+
+	// Fallback to ranged GET probe (bytes=0-0)
+	getReq, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return -1, false, fmt.Errorf("failed to create probe request: %w", err)
+	}
+	getReq.Header.Set("Range", "bytes=0-0")
+	applyHeaders(getReq)
+
+	resp, err := client.Do(getReq)
+	if err != nil {
+		return -1, false, fmt.Errorf("probe GET failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
+		return -1, false, fmt.Errorf("probe returned unexpected HTTP status: %d", resp.StatusCode)
+	}
+
+	totalSize = int64(-1)
+	if resp.ContentLength > 0 {
+		totalSize = resp.ContentLength
+	}
+	contentRange := resp.Header.Get("Content-Range")
+	if resp.StatusCode == http.StatusPartialContent && contentRange != "" {
+		supportsRanges = true
+		parts := strings.Split(contentRange, "/")
+		if len(parts) == 2 {
+			var parsedTotal int64
+			if _, scanErr := fmt.Sscanf(parts[1], "%d", &parsedTotal); scanErr == nil && parsedTotal > 0 {
+				totalSize = parsedTotal
+			}
+		}
+	} else if strings.EqualFold(resp.Header.Get("Accept-Ranges"), "bytes") && totalSize > 0 {
+		supportsRanges = true
+	}
+
+	return totalSize, supportsRanges, nil
+}
+
 // GetStatus returns the current status safely.
 func (t *Task) GetStatus() TaskStatus {
 	t.mu.RLock()
@@ -782,7 +942,7 @@ func (t *Task) Clone() *Task {
 			cp.Segments[i] = &Segment{
 				Index:      seg.Index,
 				Start:      seg.Start,
-				End:        seg.End,
+				End:        seg.getEnd(),
 				Downloaded: atomic.LoadInt64(&seg.Downloaded),
 				Status:     seg.getStatus(),
 			}

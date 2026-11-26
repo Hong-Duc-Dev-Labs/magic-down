@@ -97,6 +97,7 @@ type App struct {
 	installGuideBrowserID string
 	openStoreURLFn        func(nativemessaging.BrowserInfo, string) error
 	openExtensionsPageFn  func(nativemessaging.BrowserInfo) error
+	openURLFn             func(string) error
 	extensionDir          string
 
 	darkMode            bool
@@ -107,6 +108,25 @@ type App struct {
 	selectedTaskID      string
 	pendingDeleteTaskID string
 	pendingDeleteName   string
+
+	// Refresh Download Address state
+	refreshTargetTaskID       string
+	refreshTargetFilename     string
+	refreshTargetOriginalHost string
+	showRefreshModal          bool
+	refreshModalTaskID        string
+	refreshModalFilename      string
+	refreshModalSourceURL     string
+	refreshInputURL           string
+	refreshInputReferrer      string
+	refreshInputCookies       string
+	refreshInputHeaders       map[string]string
+	refreshHostWarning        string
+	refreshError              string
+
+	// Duplicate Download Detection modal state
+	pendingDuplicateTask *engine.Task
+	pendingDuplicateReq  *engine.AddTaskRequest
 
 	// Add / Download Info Dialog state
 	showAddModal       bool
@@ -194,6 +214,7 @@ func NewApp(eng *engine.Engine, srv *ipc.Server) *App {
 		browserConnStates:         make(map[string]nativemessaging.ExtensionConnectionState),
 		openStoreURLFn:            nativemessaging.OpenStoreURL,
 		openExtensionsPageFn:      nativemessaging.OpenExtensionsPage,
+		openURLFn:                 openExternalURL,
 		extensionDir:              nativemessaging.ResolveExtensionDir(),
 		darkMode:                  true,
 		filterStatus:              "All",
@@ -402,15 +423,28 @@ func (a *App) FrameScheduleMode() FrameScheduleMode {
 // EnqueueIncomingDownload queues a download received over IPC so the UI opens
 // the Download Info Dialog on the next frame, waking and raising the window to
 // the foreground whether it is hidden in tray, minimized, or behind another app.
+// Concurrent near-simultaneous arrivals for the same URL are deduplicated.
 func (a *App) EnqueueIncomingDownload(req ipc.AddDownloadRequest) {
 	a.pendingMu.Lock()
-	a.pendingIncoming = append(a.pendingIncoming, req)
+	key := engine.NormalizeDuplicateURL(req.URL)
+	duplicateQueued := false
+	if key != "" {
+		for _, existing := range a.pendingIncoming {
+			if engine.NormalizeDuplicateURL(existing.URL) == key {
+				duplicateQueued = true
+				break
+			}
+		}
+	}
+	if !duplicateQueued {
+		a.pendingIncoming = append(a.pendingIncoming, req)
+	}
 	a.pendingMu.Unlock()
 	a.BringToForeground()
 }
 
 func (a *App) popPendingIncoming() {
-	if a.showAddModal || a.pendingDeleteTaskID != "" {
+	if a.showAddModal || a.showRefreshModal || a.pendingDeleteTaskID != "" || a.pendingDuplicateTask != nil {
 		return
 	}
 	a.pendingMu.Lock()
@@ -422,14 +456,88 @@ func (a *App) popPendingIncoming() {
 	a.pendingIncoming = a.pendingIncoming[1:]
 	a.pendingMu.Unlock()
 
+	if a.refreshTargetTaskID != "" {
+		a.handleCapturedRefreshRequest(req)
+		return
+	}
 	a.openIncomingDownloadDialog(req)
 }
 
 func (a *App) openIncomingDownloadDialog(req ipc.AddDownloadRequest) {
 	cfg := a.engine.Config()
+	rawURL := strings.TrimSpace(req.URL)
+	audioURL := strings.TrimSpace(req.AudioURL)
+	estimatedSize := req.TotalBytes
+	var parsedPlan *engine.DownloadPlan
+	if len(req.Plan) > 0 {
+		if parsed, err := engine.ParseDownloadPlan(req.Plan, req.URL); err == nil {
+			parsedPlan = parsed
+			if estimatedSize <= 0 {
+				estimatedSize = parsed.KnownSize()
+			}
+		}
+	}
+
+	filename := strings.TrimSpace(req.Filename)
+	if filename == "" {
+		filename = engine.ExtractFilename(rawURL, nil)
+		if audioURL != "" {
+			filename = engine.ReplaceExtension(filename, "mp4")
+		}
+	}
+
+	cat := req.Category
+	if cat == "" {
+		if audioURL != "" {
+			cat = engine.CategoryVideo
+		} else {
+			cat = engine.CategoryForFilename(filename, rawURL)
+		}
+	}
+	saveDir := strings.TrimSpace(req.SaveDir)
+	if saveDir == "" {
+		saveDir = engine.ResolveSaveDir(cfg.DownloadDir, cat, cfg.AutoCategorize)
+	}
+	segs := req.NumSegments
+	if segs != 4 && segs != 8 && segs != 16 {
+		segs = cfg.DefaultSegments
+		if segs != 4 && segs != 8 && segs != 16 {
+			segs = 8
+		}
+	}
+
+	candidateSavePath := ""
+	if filename != "" {
+		candidateSavePath = filepath.Join(saveDir, engine.SanitizeFilename(filename))
+	}
+	if dup := a.engine.FindDuplicate(rawURL, candidateSavePath); dup != nil {
+		autoStart := req.AutoStart || !req.StartPaused
+		a.openDuplicateModal(dup, engine.AddTaskRequest{
+			URL:           rawURL,
+			AudioURL:      audioURL,
+			Category:      cat,
+			Filename:      filename,
+			SaveDir:       saveDir,
+			NumSegments:   segs,
+			TotalBytes:    estimatedSize,
+			Referrer:      req.Referrer,
+			Cookies:       req.Cookies,
+			Headers:       req.Headers,
+			ConvertFormat: req.ConvertFormat,
+			TargetFormat:  req.TargetFormat,
+			OutputFormat:  req.OutputFormat,
+			AudioBitrate:  req.AudioBitrate,
+			Plan:          parsedPlan,
+			AutoStart:     autoStart,
+			StartPaused:   !autoStart,
+		})
+		a.BringToForeground()
+		return
+	}
+
 	a.inputFromExtension = true
-	a.inputURL = strings.TrimSpace(req.URL)
-	a.inputAudioURL = strings.TrimSpace(req.AudioURL)
+	a.inputURL = rawURL
+	a.inputAudioURL = audioURL
 	a.inputReferrer = req.Referrer
 	a.inputCookies = req.Cookies
 	a.inputHeaders = req.Headers
@@ -437,50 +545,17 @@ func (a *App) openIncomingDownloadDialog(req ipc.AddDownloadRequest) {
 	a.inputTargetFormat = req.TargetFormat
 	a.inputOutputFormat = req.OutputFormat
 	a.inputAudioBitrate = req.AudioBitrate
-	a.inputEstimatedSize = req.TotalBytes
-	a.inputPlan = nil
-	if len(req.Plan) > 0 {
-		if parsed, err := engine.ParseDownloadPlan(req.Plan, req.URL); err == nil {
-			a.inputPlan = parsed
-			if a.inputEstimatedSize <= 0 {
-				a.inputEstimatedSize = parsed.KnownSize()
-			}
-		}
-	}
-
-	filename := strings.TrimSpace(req.Filename)
-	if filename == "" {
-		filename = engine.ExtractFilename(a.inputURL, nil)
-		if a.inputAudioURL != "" {
-			filename = engine.ReplaceExtension(filename, "mp4")
-		}
-	}
+	a.inputEstimatedSize = estimatedSize
+	a.inputPlan = parsedPlan
 	a.inputFilename = filename
-
-	cat := req.Category
-	if cat == "" {
-		if a.inputAudioURL != "" {
-			cat = engine.CategoryVideo
-		} else {
-			cat = engine.CategoryForFilename(a.inputFilename, a.inputURL)
-		}
-	}
 	a.inputCategory = cat
-	if strings.TrimSpace(req.SaveDir) != "" {
-		a.inputSaveDir = strings.TrimSpace(req.SaveDir)
-	} else {
-		a.inputSaveDir = engine.ResolveSaveDir(cfg.DownloadDir, cat, cfg.AutoCategorize)
-	}
-	a.inputSegments = req.NumSegments
-	if a.inputSegments != 4 && a.inputSegments != 8 && a.inputSegments != 16 {
-		a.inputSegments = cfg.DefaultSegments
-		if a.inputSegments != 4 && a.inputSegments != 8 && a.inputSegments != 16 {
-			a.inputSegments = 8
-		}
-	}
+	a.inputSaveDir = saveDir
+	a.inputSegments = segs
 	a.lastAutoTarget = a.inputFilename + "|" + a.inputURL
 	a.addError = ""
 	a.cancelDeleteTask()
+	a.cancelDuplicateModal()
+	a.closeRefreshModal()
 	a.showSettingsModal = false
 	a.showOnboardingModal = false
 	a.showAddModal = true
@@ -541,7 +616,7 @@ func (a *App) View(c *ui.Context) {
 	c.SetTheme(pal.UITheme)
 
 	// Global keyboard shortcuts
-	anyModalOpen := a.showAddModal || a.showSettingsModal || a.showOnboardingModal || a.pendingDeleteTaskID != ""
+	anyModalOpen := a.showAddModal || a.showSettingsModal || a.showOnboardingModal || a.showRefreshModal || a.pendingDeleteTaskID != "" || a.pendingDuplicateTask != nil
 	if c.Shortcut(ui.Cmd, ui.KeyN) && !anyModalOpen {
 		a.openAddModal()
 	}
@@ -554,7 +629,9 @@ func (a *App) View(c *ui.Context) {
 	if c.Shortcut(0, ui.KeyEscape) {
 		a.showAddModal = false
 		a.showSettingsModal = false
+		a.closeRefreshModal()
 		a.cancelDeleteTask()
+		a.cancelDuplicateModal()
 	}
 
 	// Open Download Info Dialog for any incoming extension download.
@@ -619,9 +696,10 @@ func (a *App) View(c *ui.Context) {
 		ui.Row(c).Fill().Grow(1).AlignItems(ui.Stretch).Children(func() {
 			a.renderSidebar(c, pal, statusCounts, catCounts)
 
-			// Main right column: Header + List + Status Bar
+			// Main right column: Header + Optional Refresh Banner + List + Status Bar
 			ui.Column(c).Fill().Grow(1).Children(func() {
 				a.renderHeader(c, pal, selectedTask, completedCount)
+				a.renderRefreshWaitingBanner(c, pal)
 				a.renderDownloadList(c, pal, tasks)
 				a.renderStatusBar(c, pal, statusCounts["Downloading"], statusCounts["Queued"], totalSpeed)
 			})
@@ -633,6 +711,8 @@ func (a *App) View(c *ui.Context) {
 	a.renderSettingsModal(c, pal)
 	a.renderOnboardingModal(c, pal)
 	a.renderDeleteConfirmModal(c, pal)
+	a.renderRefreshModal(c, pal)
+	a.renderDuplicateModal(c, pal)
 }
 
 func (a *App) renderTitleBar(c *ui.Context, pal Palette) {
@@ -746,6 +826,8 @@ func (a *App) openAddModal() {
 	a.lastAutoTarget = ""
 	a.addError = ""
 	a.cancelDeleteTask()
+	a.cancelDuplicateModal()
+	a.closeRefreshModal()
 	a.showSettingsModal = false
 	a.showOnboardingModal = false
 	a.showAddModal = true
@@ -769,6 +851,8 @@ func (a *App) openSettingsModal() {
 	a.refreshNativeStatus()
 	a.refreshDetectedBrowsers()
 	a.cancelDeleteTask()
+	a.cancelDuplicateModal()
+	a.closeRefreshModal()
 	a.showAddModal = false
 	a.showOnboardingModal = false
 	a.showSettingsModal = true
@@ -786,6 +870,8 @@ func (a *App) OpenOnboardingModal() {
 	a.refreshNativeStatus()
 	a.refreshDetectedBrowsers()
 	a.cancelDeleteTask()
+	a.cancelDuplicateModal()
+	a.closeRefreshModal()
 	a.showAddModal = false
 	a.showSettingsModal = false
 	a.showOnboardingModal = true
@@ -1130,10 +1216,20 @@ func (a *App) renderDownloadCard(c *ui.Context, pal Palette, task *engine.Task) 
 						_ = a.engine.ResumeTask(task.ID)
 						a.statusMessage = i18n.Tf("msg.resumed", name)
 					}
+					if task.Status == engine.StatusPaused {
+						if rowIconButton(c, pal, iconLink, false) {
+							a.openRefreshModal(task)
+						}
+					}
 				case engine.StatusFailed, engine.StatusCancelled:
 					if rowIconButton(c, pal, iconRefresh, false) {
 						_ = a.engine.ResumeTask(task.ID)
 						a.statusMessage = i18n.Tf("msg.retrying", name)
+					}
+					if task.Status == engine.StatusFailed {
+						if rowIconButton(c, pal, iconLink, false) {
+							a.openRefreshModal(task)
+						}
 					}
 				}
 
@@ -1406,7 +1502,7 @@ func (a *App) submitAddDownload(autoStart bool) {
 		segs = a.engine.Config().DefaultSegments
 	}
 
-	task, err := a.engine.AddTask(engine.AddTaskRequest{
+	addReq := engine.AddTaskRequest{
 		URL:           rawURL,
 		AudioURL:      strings.TrimSpace(a.inputAudioURL),
 		Category:      a.inputCategory,
@@ -1424,9 +1520,16 @@ func (a *App) submitAddDownload(autoStart bool) {
 		Plan:          a.inputPlan,
 		AutoStart:     autoStart,
 		StartPaused:   !autoStart,
-	})
+	}
+
+	task, dup, err := a.engine.AddTaskOrFindDuplicate(addReq)
 	if err != nil {
 		a.addError = err.Error()
+		return
+	}
+	if dup != nil {
+		a.showAddModal = false
+		a.openDuplicateModal(dup, addReq)
 		return
 	}
 
@@ -2196,6 +2299,11 @@ func (a *App) requestDeleteTask(task *engine.Task) {
 	if name == "" {
 		name = task.URL
 	}
+	a.cancelDuplicateModal()
+	a.closeRefreshModal()
+	a.showAddModal = false
+	a.showSettingsModal = false
+	a.showOnboardingModal = false
 	a.pendingDeleteTaskID = task.ID
 	a.pendingDeleteName = name
 }
@@ -2251,5 +2359,407 @@ func (a *App) renderDeleteConfirmModal(c *ui.Context, pal Palette) {
 	})
 	if !open {
 		a.cancelDeleteTask()
+	}
+}
+
+// --- Refresh Download Address ---
+
+func (a *App) openRefreshModal(task *engine.Task) {
+	if task == nil {
+		return
+	}
+	name := task.Filename
+	if name == "" {
+		name = extractHost(task.URL)
+	}
+	sourceURL := strings.TrimSpace(task.Referrer)
+	if sourceURL == "" {
+		sourceURL = task.URL
+	}
+	a.cancelDeleteTask()
+	a.cancelDuplicateModal()
+	a.showAddModal = false
+	a.showSettingsModal = false
+	a.showOnboardingModal = false
+	a.refreshModalTaskID = task.ID
+	a.refreshModalFilename = name
+	a.refreshModalSourceURL = sourceURL
+	a.refreshInputURL = ""
+	a.refreshInputReferrer = ""
+	a.refreshInputCookies = ""
+	a.refreshInputHeaders = nil
+	a.refreshHostWarning = ""
+	a.refreshError = ""
+	a.showRefreshModal = true
+}
+
+func (a *App) closeRefreshModal() {
+	a.showRefreshModal = false
+	a.refreshError = ""
+	a.refreshHostWarning = ""
+}
+
+func (a *App) startBrowserRefreshCapture() {
+	if a.refreshModalTaskID == "" {
+		return
+	}
+	task, err := a.engine.GetTask(a.refreshModalTaskID)
+	if err != nil || task == nil {
+		a.refreshError = i18n.T("refresh.err_invalid_url")
+		return
+	}
+	name := task.Filename
+	if name == "" {
+		name = extractHost(task.URL)
+	}
+	sourceURL := strings.TrimSpace(task.Referrer)
+	if sourceURL == "" {
+		sourceURL = task.URL
+	}
+	a.refreshTargetTaskID = task.ID
+	a.refreshTargetFilename = name
+	a.refreshTargetOriginalHost = extractHost(task.URL)
+	a.showRefreshModal = false
+	a.statusMessage = i18n.Tf("msg.refresh_waiting", name)
+
+	if a.openURLFn != nil && sourceURL != "" {
+		go func(u string) {
+			_ = a.openURLFn(u)
+		}(sourceURL)
+	}
+}
+
+func (a *App) cancelRefreshCapture() {
+	a.refreshTargetTaskID = ""
+	a.refreshTargetFilename = ""
+	a.refreshTargetOriginalHost = ""
+}
+
+func (a *App) handleCapturedRefreshRequest(req ipc.AddDownloadRequest) {
+	targetID := a.refreshTargetTaskID
+	task, err := a.engine.GetTask(targetID)
+	if err != nil || task == nil {
+		a.cancelRefreshCapture()
+		a.openIncomingDownloadDialog(req)
+		return
+	}
+
+	newURL := strings.TrimSpace(req.URL)
+	origHost := a.refreshTargetOriginalHost
+	newHost := extractHost(newURL)
+
+	if origHost != "" && newHost != "" && !strings.EqualFold(origHost, newHost) {
+		a.openRefreshModal(task)
+		a.refreshInputURL = newURL
+		a.refreshInputReferrer = req.Referrer
+		a.refreshInputCookies = req.Cookies
+		a.refreshInputHeaders = req.Headers
+		a.refreshHostWarning = i18n.Tf("refresh.host_mismatch", origHost, newHost)
+		a.BringToForeground()
+		return
+	}
+
+	if err := a.engine.RefreshTaskAddress(targetID, engine.RefreshAddressRequest{
+		URL:      newURL,
+		Referrer: req.Referrer,
+		Cookies:  req.Cookies,
+		Headers:  req.Headers,
+	}); err != nil {
+		a.openRefreshModal(task)
+		a.refreshInputURL = newURL
+		a.refreshInputReferrer = req.Referrer
+		a.refreshInputCookies = req.Cookies
+		a.refreshInputHeaders = req.Headers
+		a.refreshError = err.Error()
+		a.BringToForeground()
+		return
+	}
+
+	name := a.refreshTargetFilename
+	a.cancelRefreshCapture()
+	a.closeRefreshModal()
+	a.selectedTaskID = targetID
+	a.statusMessage = i18n.Tf("msg.refresh_applied", name)
+	a.BringToForeground()
+}
+
+func (a *App) submitRefreshURL() {
+	rawURL := strings.TrimSpace(a.refreshInputURL)
+	if rawURL == "" || (!strings.HasPrefix(rawURL, "http://") && !strings.HasPrefix(rawURL, "https://")) {
+		a.refreshError = i18n.T("refresh.err_invalid_url")
+		return
+	}
+	targetID := a.refreshModalTaskID
+	if targetID == "" {
+		a.closeRefreshModal()
+		return
+	}
+	if err := a.engine.RefreshTaskAddress(targetID, engine.RefreshAddressRequest{
+		URL:      rawURL,
+		Referrer: a.refreshInputReferrer,
+		Cookies:  a.refreshInputCookies,
+		Headers:  a.refreshInputHeaders,
+	}); err != nil {
+		a.refreshError = err.Error()
+		return
+	}
+	name := a.refreshModalFilename
+	if a.refreshTargetTaskID == targetID {
+		a.cancelRefreshCapture()
+	}
+	a.closeRefreshModal()
+	a.selectedTaskID = targetID
+	a.statusMessage = i18n.Tf("msg.refresh_applied", name)
+}
+
+func (a *App) renderRefreshWaitingBanner(c *ui.Context, pal Palette) {
+	if a.refreshTargetTaskID == "" {
+		return
+	}
+	ui.Row(c).
+		Shrink(0).
+		Padding(10, 20).
+		Gap(10).
+		Background(pal.AccentSoft).
+		BorderWidth(0, 0, 1, 0).
+		BorderColor(pal.Accent).
+		AlignItems(ui.Center).
+		Children(func() {
+			ui.Icon(c, iconLink).Width(15).Height(15).TextColor(pal.Accent).Shrink(0)
+			ui.Text(c, i18n.Tf("refresh.waiting_banner", a.refreshTargetFilename)).
+				FontSize(12).
+				FontWeight(600).
+				TextColor(pal.TextPrimary).
+				Grow(1).
+				SingleLine().
+				Ellipsis("...")
+			if toolbarButton(c, pal, iconClipboard, i18n.T("refresh.btn_paste_url"), false, false) {
+				if task, err := a.engine.GetTask(a.refreshTargetTaskID); err == nil && task != nil {
+					a.openRefreshModal(task)
+				}
+			}
+			if toolbarButton(c, pal, iconClose, i18n.T("refresh.cancel"), false, false) {
+				a.cancelRefreshCapture()
+				a.statusMessage = i18n.T("msg.refresh_cancelled")
+			}
+		})
+}
+
+func (a *App) renderRefreshModal(c *ui.Context, pal Palette) {
+	if !a.showRefreshModal {
+		return
+	}
+	ui.Modal(c, &a.showRefreshModal, func() {
+		ui.Column(c).Width(500).Gap(16).Children(func() {
+			ui.Row(c).AlignItems(ui.Center).Justify(ui.SpaceBetween).Children(func() {
+				ui.Row(c).Gap(10).AlignItems(ui.Center).Children(func() {
+					ui.Row(c).Width(32).Height(32).Radius(8).Background(pal.AccentSoft).Center().Shrink(0).Children(func() {
+						ui.Icon(c, iconLink).Width(16).Height(16).TextColor(pal.Accent)
+					})
+					ui.Column(c).Gap(1).Children(func() {
+						ui.Text(c, i18n.T("refresh.title")).FontSize(16).FontWeight(700).TextColor(pal.TextPrimary)
+						ui.Text(c, i18n.T("refresh.subtitle")).FontSize(12).TextColor(pal.TextMuted)
+					})
+				})
+				if rowIconButton(c, pal, iconClose, false) {
+					a.closeRefreshModal()
+				}
+			})
+
+			ui.Divider(c)
+
+			// Option 1: Open Source Page in Browser to Capture
+			ui.Row(c).Padding(10, 12).Radius(8).Background(pal.InputBg).Border(1, pal.Border).Gap(12).AlignItems(ui.Center).Justify(ui.SpaceBetween).Children(func() {
+				ui.Column(c).Gap(2).Grow(1).Children(func() {
+					ui.Text(c, i18n.T("refresh.capture_title")).FontSize(12).FontWeight(600).TextColor(pal.TextPrimary)
+					ui.Text(c, i18n.T("refresh.capture_sub")).FontSize(11).TextColor(pal.TextMuted)
+				})
+				if toolbarButton(c, pal, iconRefresh, i18n.T("refresh.open_source"), false, false) {
+					a.startBrowserRefreshCapture()
+				}
+			})
+
+			// Option 2: Paste New Direct URL
+			ui.Column(c).Gap(6).Children(func() {
+				ui.Text(c, i18n.T("refresh.paste_label")).FontSize(12).FontWeight(600).TextColor(pal.TextSecondary)
+				ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
+					ui.TextInput(c, &a.refreshInputURL).
+						Placeholder(i18n.T("refresh.url_placeholder")).
+						Background(pal.InputBg).
+						Border(1, pal.Border).
+						Radius(7).
+						Grow(1)
+					if toolbarButton(c, pal, iconClipboard, i18n.T("add.paste"), false, false) {
+						if clip := strings.TrimSpace(c.ReadClipboard()); clip != "" {
+							a.refreshInputURL = clip
+							a.refreshError = ""
+						}
+					}
+				})
+			})
+
+			if a.refreshHostWarning != "" {
+				ui.Row(c).Padding(8, 10).Radius(6).Background(pal.WarningSoft).Gap(6).AlignItems(ui.Center).Children(func() {
+					ui.Icon(c, iconAlert).Width(14).Height(14).TextColor(pal.Warning).Shrink(0)
+					ui.Text(c, a.refreshHostWarning).FontSize(12).TextColor(pal.Warning)
+				})
+			}
+
+			if a.refreshError != "" {
+				ui.Row(c).Padding(8, 10).Radius(6).Background(pal.DangerSoft).Gap(6).AlignItems(ui.Center).Children(func() {
+					ui.Icon(c, iconAlert).Width(14).Height(14).TextColor(pal.Danger).Shrink(0)
+					ui.Text(c, a.refreshError).FontSize(12).TextColor(pal.Danger)
+				})
+			}
+
+			ui.Divider(c)
+
+			ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
+				ui.Spacer(c)
+				if toolbarButton(c, pal, nil, i18n.T("refresh.cancel"), false, false) {
+					a.closeRefreshModal()
+				}
+				if primaryCTA(c, pal, iconPlay, i18n.T("refresh.apply")) {
+					a.submitRefreshURL()
+				}
+			})
+		})
+	})
+}
+
+// --- Duplicate Download Detection ---
+
+func (a *App) openDuplicateModal(existing *engine.Task, req engine.AddTaskRequest) {
+	if existing == nil {
+		return
+	}
+	reqCopy := req
+	a.cancelDeleteTask()
+	a.closeRefreshModal()
+	a.showAddModal = false
+	a.showSettingsModal = false
+	a.showOnboardingModal = false
+	a.pendingDuplicateTask = existing
+	a.pendingDuplicateReq = &reqCopy
+}
+
+func (a *App) cancelDuplicateModal() {
+	a.pendingDuplicateTask = nil
+	a.pendingDuplicateReq = nil
+}
+
+func (a *App) resolveDuplicateFocusOrOpen() {
+	dup := a.pendingDuplicateTask
+	a.cancelDuplicateModal()
+	if dup == nil {
+		return
+	}
+	a.filterStatus = "All"
+	a.filterCategory = CatAll
+	a.searchQuery = ""
+	a.selectedTaskID = dup.ID
+	name := dup.Filename
+	if name == "" {
+		name = extractHost(dup.URL)
+	}
+	if dup.Status == engine.StatusCompleted && dup.SavePath != "" {
+		a.revealTaskInFileManager(dup)
+		a.statusMessage = i18n.Tf("msg.opened_folder", name)
+		return
+	}
+	a.statusMessage = i18n.Tf("msg.dup_focused", name)
+}
+
+func (a *App) resolveDuplicateDownloadCopy() {
+	req := a.pendingDuplicateReq
+	a.cancelDuplicateModal()
+	if req == nil {
+		return
+	}
+	task, err := a.engine.AddTask(*req)
+	if err != nil {
+		a.statusMessage = err.Error()
+		return
+	}
+	a.selectedTaskID = task.ID
+	a.statusMessage = i18n.Tf("msg.added_download", task.Filename)
+}
+
+func (a *App) resolveDuplicateOverwrite() {
+	dup := a.pendingDuplicateTask
+	req := a.pendingDuplicateReq
+	a.cancelDuplicateModal()
+	if req == nil {
+		return
+	}
+	if dup != nil {
+		_ = a.engine.DeleteTask(dup.ID, true)
+	}
+	task, err := a.engine.AddTask(*req)
+	if err != nil {
+		a.statusMessage = err.Error()
+		return
+	}
+	a.selectedTaskID = task.ID
+	name := task.Filename
+	if name == "" {
+		name = task.URL
+	}
+	a.statusMessage = i18n.Tf("msg.dup_overwritten", name)
+}
+
+func (a *App) renderDuplicateModal(c *ui.Context, pal Palette) {
+	if a.pendingDuplicateTask == nil {
+		return
+	}
+	dup := a.pendingDuplicateTask
+	name := dup.Filename
+	if name == "" {
+		name = extractHost(dup.URL)
+	}
+	statusLabel := i18n.T("status." + string(dup.Status))
+	focusLabel := i18n.T("dup.focus_task")
+	if dup.Status == engine.StatusCompleted {
+		focusLabel = i18n.T("dup.open_existing")
+	}
+
+	open := true
+	ui.Modal(c, &open, func() {
+		ui.Column(c).Width(480).Gap(16).Children(func() {
+			ui.Row(c).AlignItems(ui.Center).Justify(ui.SpaceBetween).Children(func() {
+				ui.Row(c).Gap(10).AlignItems(ui.Center).Children(func() {
+					ui.Row(c).Width(32).Height(32).Radius(8).Background(pal.WarningSoft).Center().Shrink(0).Children(func() {
+						ui.Icon(c, iconAlert).Width(16).Height(16).TextColor(pal.Warning)
+					})
+					ui.Text(c, i18n.T("dup.title")).FontSize(15).FontWeight(700).TextColor(pal.TextPrimary)
+				})
+				if rowIconButton(c, pal, iconClose, false) {
+					a.cancelDuplicateModal()
+				}
+			})
+
+			ui.Text(c, i18n.Tf("dup.body", name, statusLabel)).FontSize(12).TextColor(pal.TextSecondary)
+
+			ui.Divider(c)
+
+			ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
+				if toolbarButton(c, pal, nil, i18n.T("dup.cancel"), false, false) {
+					a.cancelDuplicateModal()
+				}
+				ui.Spacer(c)
+				if toolbarButton(c, pal, iconTrash, i18n.T("dup.overwrite"), false, true) {
+					a.resolveDuplicateOverwrite()
+				}
+				if toolbarButton(c, pal, iconDownload, i18n.T("dup.download_copy"), false, false) {
+					a.resolveDuplicateDownloadCopy()
+				}
+				if primaryCTA(c, pal, iconFolder, focusLabel) {
+					a.resolveDuplicateFocusOrOpen()
+				}
+			})
+		})
+	})
+	if !open {
+		a.cancelDuplicateModal()
 	}
 }

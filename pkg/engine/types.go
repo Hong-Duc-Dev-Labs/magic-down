@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -21,12 +22,14 @@ const (
 )
 
 // Segment represents one part of a multi-segment download.
+// Start, End, and Downloaded are placed first to guarantee 8-byte alignment
+// for atomic operations on all architectures.
 type Segment struct {
-	Index      int    `json:"index"`
 	Start      int64  `json:"start"`      // starting byte offset in the target file
-	End        int64  `json:"end"`        // ending byte offset (inclusive)
-	Downloaded int64  `json:"downloaded"` // bytes downloaded so far in this segment
-	Status     string `json:"status"`     // "idle", "downloading", "done", "error"
+	End        int64  `json:"end"`        // ending byte offset (inclusive); read/written atomically
+	Downloaded int64  `json:"downloaded"` // bytes downloaded so far in this segment; read/written atomically
+	Index      int    `json:"index"`
+	Status     string `json:"status"` // "idle", "downloading", "done", "error"
 
 	mu sync.RWMutex `json:"-"`
 }
@@ -41,6 +44,14 @@ func (s *Segment) getStatus() string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.Status
+}
+
+func (s *Segment) getEnd() int64 {
+	return atomic.LoadInt64(&s.End)
+}
+
+func (s *Segment) setEnd(end int64) {
+	atomic.StoreInt64(&s.End, end)
 }
 
 // Task represents a download job with all metadata and runtime state.
@@ -75,12 +86,14 @@ type Task struct {
 	CompletedAt     *time.Time        `json:"completed_at,omitempty"`
 
 	// Runtime fields (excluded from JSON persistence)
-	mu         sync.RWMutex       `json:"-"`
-	cancelFn   context.CancelFunc `json:"-"`
-	activeCtx  context.Context    `json:"-"`
-	speedCalc  *speedCalculator   `json:"-"`
-	limiter    *rateLimiter       `json:"-"`
-	retryLimit int                `json:"-"`
+	mu           sync.RWMutex       `json:"-"`
+	cancelFn     context.CancelFunc `json:"-"`
+	activeCtx    context.Context    `json:"-"`
+	workerDone   chan struct{}      `json:"-"`
+	speedCalc    *speedCalculator   `json:"-"`
+	limiter      *rateLimiter       `json:"-"`
+	retryLimit   int                `json:"-"`
+	onStateDirty func()             `json:"-"`
 }
 
 // DefaultMaxRetries is the retry budget used by DefaultConfig. A config value of

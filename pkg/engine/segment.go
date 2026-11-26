@@ -8,6 +8,119 @@ import (
 	"sync/atomic"
 )
 
+const (
+	// defaultMinStealRemaining is the minimum remaining bytes an active segment
+	// must have before an idle worker steals its second half.
+	defaultMinStealRemaining int64 = 2 * 1024 * 1024 // 2 MiB
+
+	// stealSafetyMargin keeps the split boundary well ahead of an active
+	// worker's in-flight 64 KiB read buffer so victim and thief never overlap.
+	stealSafetyMargin int64 = 256 * 1024 // 256 KiB
+)
+
+// segmentCoordinator owns dynamic work-stealing over task.Segments under task.mu.
+type segmentCoordinator struct {
+	task         *Task
+	minRemaining int64
+	maxSegments  int
+	onSplit      func()
+}
+
+func newSegmentCoordinator(task *Task, minRemaining int64, onSplit func()) *segmentCoordinator {
+	if minRemaining <= 0 {
+		minRemaining = defaultMinStealRemaining
+	}
+	task.mu.RLock()
+	base := task.NumSegments
+	cur := len(task.Segments)
+	task.mu.RUnlock()
+
+	if base <= 0 {
+		base = cur
+	}
+	maxSegs := base * 2
+	if maxSegs < cur {
+		maxSegs = cur
+	}
+	return &segmentCoordinator{
+		task:         task,
+		minRemaining: minRemaining,
+		maxSegments:  maxSegs,
+		onSplit:      onSplit,
+	}
+}
+
+// stealSegment finds the active downloading segment with the largest remaining
+// byte range (>= minRemaining) and atomically splits its tail into a new
+// segment under task.mu.Lock(). Returns nil if no eligible segment exists or
+// maxSegments has been reached.
+func (c *segmentCoordinator) stealSegment() *Segment {
+	c.task.mu.Lock()
+	if len(c.task.Segments) >= c.maxSegments {
+		c.task.mu.Unlock()
+		return nil
+	}
+
+	var victim *Segment
+	var victimCurrentPos int64
+	var victimEnd int64
+	var maxRem int64
+
+	minRequired := c.minRemaining
+	if minRequired < 2*stealSafetyMargin {
+		minRequired = 2 * stealSafetyMargin
+	}
+
+	for _, seg := range c.task.Segments {
+		if seg.getStatus() != "downloading" {
+			continue
+		}
+		downloaded := atomic.LoadInt64(&seg.Downloaded)
+		end := seg.getEnd()
+		currentPos := seg.Start + downloaded
+		rem := end - currentPos + 1
+		if rem >= minRequired && rem > maxRem {
+			victim = seg
+			victimCurrentPos = currentPos
+			victimEnd = end
+			maxRem = rem
+		}
+	}
+
+	if victim == nil {
+		c.task.mu.Unlock()
+		return nil
+	}
+
+	mid := victimCurrentPos + maxRem/2
+	if minMid := victimCurrentPos + stealSafetyMargin; mid < minMid {
+		mid = minMid
+	}
+	if mid >= victimEnd {
+		c.task.mu.Unlock()
+		return nil
+	}
+
+	// Mutate victim's End and append the stolen segment in the same task.mu
+	// critical section so Clone() / saveState() / Pause never observe a gap.
+	oldEnd := victimEnd
+	victim.setEnd(mid)
+	stolen := &Segment{
+		Index:      len(c.task.Segments),
+		Start:      mid + 1,
+		End:        oldEnd,
+		Downloaded: 0,
+		Status:     "downloading",
+	}
+	c.task.Segments = append(c.task.Segments, stolen)
+	c.task.mu.Unlock()
+
+	if c.onSplit != nil {
+		c.onSplit()
+	}
+	return stolen
+}
+
 // downloadSegment downloads a specific segment range and writes it into the target file at its offset.
 // Transient network/5xx failures are retried up to maxRetries times, each attempt resuming from the
 // bytes already written for the segment.
@@ -72,7 +185,7 @@ func downloadSegmentAttempt(
 	onChunkDownloaded func(delta int64),
 ) (retryable bool, err error) {
 	rangeStart := seg.Start + atomic.LoadInt64(&seg.Downloaded)
-	rangeEnd := seg.End
+	rangeEnd := seg.getEnd()
 
 	// Segment already completely downloaded
 	if rangeStart > rangeEnd {
@@ -123,7 +236,8 @@ func downloadSegmentAttempt(
 		}
 
 		downloaded := atomic.LoadInt64(&seg.Downloaded)
-		remaining := seg.End - (seg.Start + downloaded) + 1
+		curEnd := seg.getEnd()
+		remaining := curEnd - (seg.Start + downloaded) + 1
 		if remaining <= 0 {
 			break
 		}
@@ -141,23 +255,37 @@ func downloadSegmentAttempt(
 			}
 
 			downloaded = atomic.LoadInt64(&seg.Downloaded)
+			curEnd = seg.getEnd()
+			allowed := curEnd - (seg.Start + downloaded) + 1
+			if allowed <= 0 {
+				break
+			}
+			toWrite := int64(n)
+			if toWrite > allowed {
+				toWrite = allowed
+			}
 			writeOffset := seg.Start + downloaded
 
 			// Write chunk at exact offset in .part file
-			if _, writeErr := writer.WriteAt(readBuf[:n], writeOffset); writeErr != nil {
+			if _, writeErr := writer.WriteAt(readBuf[:toWrite], writeOffset); writeErr != nil {
 				return false, fmt.Errorf("segment %d write failed at offset %d: %w", seg.Index, writeOffset, writeErr)
 			}
 
-			atomic.AddInt64(&seg.Downloaded, int64(n))
+			newDownloaded := atomic.AddInt64(&seg.Downloaded, toWrite)
 			if onChunkDownloaded != nil {
-				onChunkDownloaded(int64(n))
+				onChunkDownloaded(toWrite)
+			}
+			// Stop cleanly if the segment was dynamically shrunk to our current position.
+			if toWrite < int64(n) || newDownloaded >= seg.getEnd()-seg.Start+1 {
+				break
 			}
 		}
 
 		if readErr != nil {
 			if readErr == io.EOF {
-				if atomic.LoadInt64(&seg.Downloaded) < seg.End-seg.Start+1 {
-					return true, fmt.Errorf("segment %d truncated at %d of %d bytes", seg.Index, atomic.LoadInt64(&seg.Downloaded), seg.End-seg.Start+1)
+				expected := seg.getEnd() - seg.Start + 1
+				if atomic.LoadInt64(&seg.Downloaded) < expected {
+					return true, fmt.Errorf("segment %d truncated at %d of %d bytes", seg.Index, atomic.LoadInt64(&seg.Downloaded), expected)
 				}
 				return false, nil
 			}
@@ -168,8 +296,9 @@ func downloadSegmentAttempt(
 		}
 	}
 
-	if atomic.LoadInt64(&seg.Downloaded) < seg.End-seg.Start+1 {
-		return true, fmt.Errorf("segment %d ended early at %d of %d bytes", seg.Index, atomic.LoadInt64(&seg.Downloaded), seg.End-seg.Start+1)
+	expected := seg.getEnd() - seg.Start + 1
+	if atomic.LoadInt64(&seg.Downloaded) < expected {
+		return true, fmt.Errorf("segment %d ended early at %d of %d bytes", seg.Index, atomic.LoadInt64(&seg.Downloaded), expected)
 	}
 	return false, nil
 }

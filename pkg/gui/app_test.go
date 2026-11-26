@@ -2,9 +2,14 @@ package gui
 
 import (
 	"encoding/json"
+	"fmt"
 	"image/png"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -241,5 +246,216 @@ func TestMyGoNativeUIRendersCleanly(t *testing.T) {
 		app.darkMode = false
 		tester.Frame()
 		app.darkMode = true
+	}
+}
+
+func TestDuplicateDetectionResolutionPathsAndModalExclusivity(t *testing.T) {
+	tempDir := t.TempDir()
+	eng, err := engine.NewEngine(engine.Config{
+		MaxConcurrentDownloads: 2,
+		DefaultSegments:        4,
+		DownloadDir:            tempDir,
+		StateFilePath:          filepath.Join(tempDir, "state.json"),
+		OnboardingCompleted:    true,
+	})
+	if err != nil {
+		t.Fatalf("NewEngine failed: %v", err)
+	}
+	defer eng.Close()
+
+	app := NewApp(eng, nil)
+	tester := ui.NewTester(app.View, 1120, 700)
+	tester.SetScale(1)
+
+	// Seed an initial paused task on disk.
+	orig, err := eng.AddTask(engine.AddTaskRequest{
+		URL:         "https://cdn.example.com/files/release.zip?token=old",
+		Filename:    "release.zip",
+		SaveDir:     tempDir,
+		StartPaused: true,
+	})
+	if err != nil {
+		t.Fatalf("AddTask failed: %v", err)
+	}
+	_ = os.WriteFile(orig.SavePath, []byte("existing"), 0644)
+
+	// Enqueue two near-simultaneous IPC requests for the same URL: pendingIncoming should dedup to 1.
+	app.EnqueueIncomingDownload(ipc.AddDownloadRequest{
+		URL:         "https://cdn.example.com/files/release.zip?token=new1",
+		Filename:    "release.zip",
+		SaveDir:     tempDir,
+		StartPaused: true,
+	})
+	app.EnqueueIncomingDownload(ipc.AddDownloadRequest{
+		URL:         "https://cdn.example.com/files/release.zip?token=new2",
+		Filename:    "release.zip",
+		SaveDir:     tempDir,
+		StartPaused: true,
+	})
+	app.pendingMu.Lock()
+	queuedLen := len(app.pendingIncoming)
+	app.pendingMu.Unlock()
+	if queuedLen != 1 {
+		t.Fatalf("expected pendingIncoming deduplicated to 1, got %d", queuedLen)
+	}
+
+	// Render frame: should pop and open Duplicate modal (not Add modal).
+	tester.Frame()
+	if app.pendingDuplicateTask == nil || app.pendingDuplicateTask.ID != orig.ID {
+		t.Fatalf("expected duplicate modal for task %q, got %v", orig.ID, app.pendingDuplicateTask)
+	}
+	if app.showAddModal {
+		t.Fatalf("expected showAddModal to stay false when duplicate modal opens")
+	}
+
+	// Path 1: Focus Existing Task
+	app.filterStatus = "Failed"
+	app.resolveDuplicateFocusOrOpen()
+	if app.pendingDuplicateTask != nil {
+		t.Fatalf("expected duplicate modal cleared after focus")
+	}
+	if app.selectedTaskID != orig.ID || app.filterStatus != "All" {
+		t.Fatalf("expected selectedTaskID=%q and filterStatus=All, got %q / %q", orig.ID, app.selectedTaskID, app.filterStatus)
+	}
+
+	// Path 2: Download as Copy (via manual submitAddDownload)
+	app.openAddModal()
+	app.inputURL = "https://cdn.example.com/files/release.zip?token=copy"
+	app.inputFilename = "release.zip"
+	app.inputSaveDir = tempDir
+	app.submitAddDownload(false)
+	if app.pendingDuplicateTask == nil {
+		t.Fatalf("expected submitAddDownload to open duplicate modal")
+	}
+	tester.Frame()
+	app.resolveDuplicateDownloadCopy()
+	tasks := eng.GetTasks()
+	if len(tasks) != 2 {
+		t.Fatalf("expected 2 tasks after Download as Copy, got %d", len(tasks))
+	}
+	if !strings.Contains(tasks[1].Filename, "(1)") {
+		t.Errorf("expected copied filename to contain (1), got %q", tasks[1].Filename)
+	}
+
+	// Path 3: Overwrite / Re-download
+	app.openDuplicateModal(orig, engine.AddTaskRequest{
+		URL:         "https://cdn.example.com/files/release.zip?token=overwrite",
+		Filename:    "release.zip",
+		SaveDir:     tempDir,
+		StartPaused: true,
+	})
+	// Opening delete modal clears duplicate modal (non-stacking invariant).
+	app.requestDeleteTask(orig)
+	if app.pendingDuplicateTask != nil || app.pendingDeleteTaskID != orig.ID {
+		t.Fatalf("expected requestDeleteTask to clear pendingDuplicateTask cleanly")
+	}
+	app.cancelDeleteTask()
+
+	app.openDuplicateModal(orig, engine.AddTaskRequest{
+		URL:         "https://cdn.example.com/files/release.zip?token=overwrite",
+		Filename:    "release.zip",
+		SaveDir:     tempDir,
+		StartPaused: true,
+	})
+	app.resolveDuplicateOverwrite()
+	if _, err := eng.GetTask(orig.ID); err == nil {
+		t.Fatalf("expected original task %q to be replaced on overwrite", orig.ID)
+	}
+	if app.selectedTaskID == "" || app.selectedTaskID == orig.ID {
+		t.Fatalf("expected newly created replacement task to be selected, got %q", app.selectedTaskID)
+	}
+}
+
+func TestRefreshDownloadAddressModalAndIPCInterception(t *testing.T) {
+	payload := make([]byte, 1024*128)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Accept-Ranges", "bytes")
+		w.Header().Set("Content-Length", strconv.Itoa(len(payload)))
+		if r.Method == http.MethodHead {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes 0-0/%d", len(payload)))
+		w.WriteHeader(http.StatusPartialContent)
+		_, _ = w.Write(payload[:1])
+	}))
+	defer server.Close()
+
+	tempDir := t.TempDir()
+	eng, err := engine.NewEngine(engine.Config{
+		MaxConcurrentDownloads: 2,
+		DefaultSegments:        4,
+		DownloadDir:            tempDir,
+		StateFilePath:          filepath.Join(tempDir, "state.json"),
+		OnboardingCompleted:    true,
+	})
+	if err != nil {
+		t.Fatalf("NewEngine failed: %v", err)
+	}
+	defer eng.Close()
+
+	app := NewApp(eng, nil)
+	openedCh := make(chan string, 1)
+	app.openURLFn = func(u string) error {
+		openedCh <- u
+		return nil
+	}
+	tester := ui.NewTester(app.View, 1120, 700)
+	tester.SetScale(1)
+
+	task, err := eng.AddTask(engine.AddTaskRequest{
+		URL:         server.URL + "/expired.bin",
+		Filename:    "expired.bin",
+		Referrer:    "https://source.example.com/page",
+		TotalBytes:  int64(len(payload)),
+		StartPaused: true,
+	})
+	if err != nil {
+		t.Fatalf("AddTask failed: %v", err)
+	}
+
+	// Open Refresh modal and render it.
+	app.openRefreshModal(task)
+	tester.Frame()
+	if !app.showRefreshModal {
+		t.Fatalf("expected refresh modal open")
+	}
+
+	// Start browser capture -> sets waiting banner and opens referrer.
+	app.startBrowserRefreshCapture()
+	if app.refreshTargetTaskID != task.ID {
+		t.Fatalf("expected refreshTargetTaskID=%q, got %q", task.ID, app.refreshTargetTaskID)
+	}
+	select {
+	case openedURL := <-openedCh:
+		if openedURL != "https://source.example.com/page" {
+			t.Errorf("expected openURLFn called with referrer, got %q", openedURL)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for openURLFn")
+	}
+	tester.Frame()
+
+	// Different-host IPC arrival should open Refresh modal with host mismatch warning instead of auto-applying.
+	app.EnqueueIncomingDownload(ipc.AddDownloadRequest{
+		URL: "https://other-host.example.org/file.bin",
+	})
+	tester.Frame()
+	if !app.showRefreshModal || app.refreshHostWarning == "" {
+		t.Fatalf("expected host-mismatch warning in refresh modal, got show=%v warn=%q", app.showRefreshModal, app.refreshHostWarning)
+	}
+	app.closeRefreshModal()
+
+	// Same-host IPC arrival should auto-apply and clear waiting state.
+	app.EnqueueIncomingDownload(ipc.AddDownloadRequest{
+		URL: server.URL + "/fresh.bin",
+	})
+	tester.Frame()
+	if app.refreshTargetTaskID != "" {
+		t.Fatalf("expected refreshTargetTaskID cleared after successful capture, got %q (err=%q)", app.refreshTargetTaskID, app.refreshError)
+	}
+	updated, _ := eng.GetTask(task.ID)
+	if updated.URL != server.URL+"/fresh.bin" {
+		t.Fatalf("expected task URL updated to fresh link, got %q", updated.URL)
 	}
 }

@@ -141,17 +141,46 @@ var catalogs = map[Lang]map[string]string{
 		"delete.cancel":  "Cancel",
 		"delete.confirm": "Remove",
 
+		// Refresh Download Address
+		"refresh.title":           "Refresh Download Address",
+		"refresh.subtitle":        "Recover an expired link without losing downloaded progress",
+		"refresh.capture_title":   "Capture from Source Page",
+		"refresh.capture_sub":     "Open the original page and click Download again — MagicDown will capture the fresh link automatically.",
+		"refresh.open_source":     "Open Source Page",
+		"refresh.paste_label":     "Or Paste New Direct URL",
+		"refresh.url_placeholder": "https://example.com/fresh-signed-link",
+		"refresh.apply":           "Apply & Resume",
+		"refresh.cancel":          "Cancel",
+		"refresh.waiting_banner":  "Waiting for refreshed link for %s — click download on the source page",
+		"refresh.host_mismatch":   "Host differs from original (%s → %s). Confirm to apply this link.",
+		"refresh.btn_paste_url":   "Paste URL",
+		"refresh.err_invalid_url": "Please enter a valid http:// or https:// URL.",
+
+		// Duplicate Download Detection
+		"dup.title":         "Duplicate Download Detected",
+		"dup.body":          "\"%s\" already exists in your download list (%s). Choose how to proceed:",
+		"dup.open_existing": "Open Existing File",
+		"dup.focus_task":    "Focus Existing Task",
+		"dup.download_copy": "Download as Copy",
+		"dup.overwrite":     "Overwrite / Re-download",
+		"dup.cancel":        "Cancel",
+
 		// Status messages
-		"msg.resumed":          "Resumed %s",
-		"msg.paused":           "Paused %s",
-		"msg.removed":          "Removed %s",
-		"msg.retrying":         "Retrying %s",
-		"msg.opened_folder":    "Opened folder for %s",
-		"msg.cleared_done":     "Cleared %d completed download(s)",
-		"msg.added_download":   "Added download: %s",
-		"msg.settings_saved":   "Settings saved",
-		"msg.setup_complete":   "Setup complete",
+		"msg.resumed":           "Resumed %s",
+		"msg.paused":            "Paused %s",
+		"msg.removed":           "Removed %s",
+		"msg.retrying":          "Retrying %s",
+		"msg.opened_folder":     "Opened folder for %s",
+		"msg.cleared_done":      "Cleared %d completed download(s)",
+		"msg.added_download":    "Added download: %s",
+		"msg.settings_saved":    "Settings saved",
+		"msg.setup_complete":    "Setup complete",
 		"msg.native_registered": "Chrome/Edge Native Messaging registered",
+		"msg.refresh_waiting":   "Waiting for refreshed link for %s",
+		"msg.refresh_applied":   "Refreshed link and resumed %s",
+		"msg.refresh_cancelled": "Cancelled link refresh",
+		"msg.dup_focused":       "Focused existing download: %s",
+		"msg.dup_overwritten":   "Replacing existing download: %s",
 
 		// Empty states
 		"empty.no_downloads_title": "No downloads yet",
@@ -368,6 +397,30 @@ var catalogs = map[Lang]map[string]string{
 		"delete.cancel":  "Hủy",
 		"delete.confirm": "Xóa",
 
+		// Refresh Download Address
+		"refresh.title":           "Làm mới liên kết tải xuống",
+		"refresh.subtitle":        "Khôi phục liên kết hết hạn mà không mất tiến độ đã tải",
+		"refresh.capture_title":   "Bắt liên kết từ trang nguồn",
+		"refresh.capture_sub":     "Mở lại trang nguồn và bấm tải xuống — MagicDown sẽ tự động bắt liên kết mới.",
+		"refresh.open_source":     "Mở trang nguồn",
+		"refresh.paste_label":     "Hoặc dán đường dẫn trực tiếp mới",
+		"refresh.url_placeholder": "https://example.com/duong-dan-moi",
+		"refresh.apply":           "Áp dụng & Tiếp tục",
+		"refresh.cancel":          "Hủy",
+		"refresh.waiting_banner":  "Đang chờ liên kết mới cho %s — hãy bấm tải xuống trên trang nguồn",
+		"refresh.host_mismatch":   "Tên miền khác với liên kết gốc (%s → %s). Xác nhận để áp dụng.",
+		"refresh.btn_paste_url":   "Dán URL",
+		"refresh.err_invalid_url": "Vui lòng nhập đường dẫn http:// hoặc https:// hợp lệ.",
+
+		// Duplicate Download Detection
+		"dup.title":         "Phát hiện tải xuống trùng lặp",
+		"dup.body":          "\"%s\" đã tồn tại trong danh sách tải xuống (%s). Chọn cách xử lý:",
+		"dup.open_existing": "Mở tệp có sẵn",
+		"dup.focus_task":    "Xem mục hiện có",
+		"dup.download_copy": "Tải bản sao",
+		"dup.overwrite":     "Ghi đè / Tải lại",
+		"dup.cancel":        "Hủy",
+
 		// Status messages
 		"msg.resumed":           "Đã tiếp tục %s",
 		"msg.paused":            "Đã tạm dừng %s",
@@ -379,6 +432,11 @@ var catalogs = map[Lang]map[string]string{
 		"msg.settings_saved":    "Đã lưu cài đặt",
 		"msg.setup_complete":    "Thiết lập hoàn tất",
 		"msg.native_registered": "Đã đăng ký Native Messaging cho Chrome/Edge",
+		"msg.refresh_waiting":   "Đang chờ liên kết mới cho %s",
+		"msg.refresh_applied":   "Đã cập nhật liên kết và tiếp tục %s",
+		"msg.refresh_cancelled": "Đã hủy làm mới liên kết",
+		"msg.dup_focused":       "Đã chọn mục tải hiện có: %s",
+		"msg.dup_overwritten":   "Đang tải lại thay thế: %s",
 
 		// Empty states
 		"empty.no_downloads_title": "Chưa có lượt tải nào",

@@ -115,3 +115,10 @@ func launchExplorerWithCmdLine(cmdLine string) error {
 	}
 	return cmd.Start()
 }
+
+func openExternalURL(rawURL string) error {
+	if rawURL == "" {
+		return nil
+	}
+	return shellOpenDirectory(rawURL)
+}
