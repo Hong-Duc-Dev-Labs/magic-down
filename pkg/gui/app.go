@@ -4,9 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -1122,7 +1120,7 @@ func (a *App) renderDownloadCard(c *ui.Context, pal Palette, task *engine.Task) 
 
 				if task.SavePath != "" {
 					if rowIconButton(c, pal, iconFolder, false) {
-						openInFileManager(task.SavePath)
+						a.revealTaskInFileManager(task)
 						a.statusMessage = i18n.Tf("msg.opened_folder", name)
 					}
 				}
@@ -2173,16 +2171,4 @@ func (a *App) completeOnboarding() {
 	a.onboardingError = ""
 	a.statusMessage = i18n.T("msg.setup_complete")
 	a.showOnboardingModal = false
-}
-
-func openInFileManager(targetPath string) {
-	go func() {
-		if runtime.GOOS == "windows" {
-			if _, err := os.Stat(targetPath); err == nil {
-				_ = exec.Command("explorer.exe", "/select,"+targetPath).Start()
-				return
-			}
-			_ = exec.Command("explorer.exe", filepath.Dir(targetPath)).Start()
-		}
-	}()
 }
