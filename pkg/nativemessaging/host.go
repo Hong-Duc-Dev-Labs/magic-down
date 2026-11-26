@@ -64,13 +64,29 @@ type OutboundMessage struct {
 
 // Handler processes native messaging messages and talks to the IPC client.
 type Handler struct {
-	ipcClient   *ipc.Client
-	lastBrowser string
+	ipcClient             *ipc.Client
+	lastBrowser           string
+	detectParentBrowserFn func() string
 }
 
 // NewHandler creates a handler using the given IPC client.
 func NewHandler(client *ipc.Client) *Handler {
-	return &Handler{ipcClient: client}
+	return &Handler{
+		ipcClient:             client,
+		detectParentBrowserFn: DetectParentBrowserID,
+	}
+}
+
+func (h *Handler) resolveBrowserID(declared string) string {
+	if h.detectParentBrowserFn != nil {
+		if detected := strings.ToLower(strings.TrimSpace(h.detectParentBrowserFn())); detected != "" {
+			return detected
+		}
+	}
+	if b := strings.ToLower(strings.TrimSpace(declared)); b != "" {
+		return b
+	}
+	return "chrome"
 }
 
 // HandleMessage parses an inbound message and returns the outbound response bytes.
@@ -87,14 +103,13 @@ func (h *Handler) HandleMessage(msgBytes []byte) ([]byte, error) {
 	action := strings.ToLower(strings.TrimSpace(in.Action))
 	if strings.EqualFold(strings.TrimSpace(in.Type), "HELLO") {
 		action = "hello"
+	} else if strings.EqualFold(strings.TrimSpace(in.Type), "DISCONNECT") {
+		action = "disconnect"
 	}
 
 	switch action {
 	case "hello":
-		browser := strings.ToLower(strings.TrimSpace(in.Browser))
-		if browser == "" {
-			browser = "chrome"
-		}
+		browser := h.resolveBrowserID(in.Browser)
 		h.lastBrowser = browser
 		protoVer := in.ProtocolVersion
 		if protoVer <= 0 {
@@ -108,6 +123,11 @@ func (h *Handler) HandleMessage(msgBytes []byte) ([]byte, error) {
 			HostVersion:      version.Version,
 		})
 		if err != nil {
+			LogEvent("WARN", "hello_handshake", map[string]any{
+				"browser":          browser,
+				"declared_browser": strings.ToLower(strings.TrimSpace(in.Browser)),
+				"status":           "offline",
+			})
 			resp := OutboundMessage{
 				Type:            "WELCOME",
 				ProtocolVersion: 1,
@@ -120,6 +140,11 @@ func (h *Handler) HandleMessage(msgBytes []byte) ([]byte, error) {
 			}
 			return json.Marshal(resp)
 		}
+		LogEvent("INFO", "hello_handshake", map[string]any{
+			"browser":          browser,
+			"declared_browser": strings.ToLower(strings.TrimSpace(in.Browser)),
+			"status":           welcome.Status,
+		})
 		resp := OutboundMessage{
 			Type:            "WELCOME",
 			ProtocolVersion: welcome.ProtocolVersion,
@@ -129,6 +154,16 @@ func (h *Handler) HandleMessage(msgBytes []byte) ([]byte, error) {
 			Action:          "hello",
 			AppRunning:      true,
 			Message:         "connected",
+		}
+		return json.Marshal(resp)
+
+	case "disconnect":
+		browser := h.resolveBrowserID(in.Browser)
+		_ = h.ipcClient.SendDisconnect(browser)
+		resp := OutboundMessage{
+			Success: true,
+			Action:  "disconnect",
+			Message: "disconnected",
 		}
 		return json.Marshal(resp)
 
@@ -284,9 +319,11 @@ func RunStdioHost(in io.Reader, out io.Writer, port int) error {
 
 	LogEvent("INFO", "host_startup", map[string]any{"ipc_port": port})
 	defer func() {
-		if handler.lastBrowser != "" {
-			_ = client.SendDisconnect(handler.lastBrowser)
-		}
+		// Note: Do NOT call client.SendDisconnect on normal stdio EOF.
+		// Chromium's one-shot chrome.runtime.sendNativeMessage closes stdin
+		// immediately after exchanging a single HELLO/WELCOME message; sending
+		// disconnect here would immediately erase the handshake. Connection
+		// liveness is tracked by periodic HELLO heartbeats and IPC handshakeTTL.
 		LogEvent("INFO", "host_shutdown", map[string]any{"ipc_port": port, "browser": handler.lastBrowser})
 	}()
 

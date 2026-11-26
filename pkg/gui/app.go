@@ -213,6 +213,11 @@ func NewApp(eng *engine.Engine, srv *ipc.Server) *App {
 	}
 	app.refreshNativeStatus()
 	app.refreshDetectedBrowsers()
+	if srv != nil {
+		srv.SetOnHandshakeChange(func(string, bool) {
+			app.invalidateUI()
+		})
+	}
 	return app
 }
 
@@ -1432,6 +1437,10 @@ func (a *App) renderSettingsModal(c *ui.Context, pal Palette) {
 				for _, item := range tabs {
 					if settingsTabButton(c, pal, item.label, a.activeSettingsTab == item.tab) {
 						a.activeSettingsTab = item.tab
+						if item.tab == settingsTabBrowser {
+							a.refreshNativeStatus()
+							a.refreshDetectedBrowsers()
+						}
 					}
 				}
 			})

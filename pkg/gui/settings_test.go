@@ -8,6 +8,7 @@ import (
 
 	"magicdown/pkg/engine"
 	"magicdown/pkg/i18n"
+	"magicdown/pkg/ipc"
 	"magicdown/pkg/nativemessaging"
 	"magicdown/pkg/updater"
 )
@@ -166,5 +167,79 @@ func TestSettingsModalTabsRenderAllLocalesAndViewports(t *testing.T) {
 	app.saveSettings()
 	if app.settingsError == "" || app.activeSettingsTab != settingsTabDownloads {
 		t.Fatalf("expected downloads validation error and tab switch, err=%q tab=%v", app.settingsError, app.activeSettingsTab)
+	}
+}
+
+type fakeInvalidateWinCtrl struct {
+	invalidations int
+}
+
+func (f *fakeInvalidateWinCtrl) Minimize()         {}
+func (f *fakeInvalidateWinCtrl) ToggleMaximize()   {}
+func (f *fakeInvalidateWinCtrl) IsMaximized() bool { return false }
+func (f *fakeInvalidateWinCtrl) Close()            {}
+func (f *fakeInvalidateWinCtrl) Hide()             {}
+func (f *fakeInvalidateWinCtrl) Show()             {}
+func (f *fakeInvalidateWinCtrl) Restore()          {}
+func (f *fakeInvalidateWinCtrl) Focus()            {}
+func (f *fakeInvalidateWinCtrl) IsVisible() bool   { return true }
+func (f *fakeInvalidateWinCtrl) Invalidate()       { f.invalidations++ }
+
+func TestBrowserIntegrationInvalidatesUIAndShowsConnectedForChromeEdgeDia(t *testing.T) {
+	tempDir := t.TempDir()
+	eng, err := engine.NewEngine(engine.DefaultConfig(tempDir, filepath.Join(tempDir, "state.json")))
+	if err != nil {
+		t.Fatalf("failed to init engine: %v", err)
+	}
+	defer eng.Close()
+
+	srv := ipc.NewServer(eng, 0)
+	if err := srv.Start(); err != nil {
+		t.Fatalf("start IPC server: %v", err)
+	}
+	defer srv.Stop()
+
+	app := NewApp(eng, srv)
+	win := &fakeInvalidateWinCtrl{}
+	app.SetWindowController(win)
+	app.detectBrowsersFn = func() []nativemessaging.BrowserInfo {
+		return []nativemessaging.BrowserInfo{
+			{ID: "chrome", Name: "Google Chrome", Family: nativemessaging.BrowserFamilyChromium, Installed: true, NativeRegistered: true},
+			{ID: "edge", Name: "Microsoft Edge", Family: nativemessaging.BrowserFamilyChromium, Installed: true, NativeRegistered: true},
+			{ID: "dia", Name: "Dia", Family: nativemessaging.BrowserFamilyChromium, Installed: true, NativeRegistered: true},
+		}
+	}
+	app.refreshDetectedBrowsers()
+
+	client := ipc.NewClient(srv.Port())
+	client.SetAuthToken(srv.AuthToken())
+	for _, browserID := range []string{"chrome", "edge", "dia"} {
+		if _, err := client.SendHello(ipc.HelloRequest{
+			Type:             "HELLO",
+			ProtocolVersion:  1,
+			ExtensionVersion: "0.1.0",
+			Browser:          browserID,
+		}); err != nil {
+			t.Fatalf("SendHello(%s) failed: %v", browserID, err)
+		}
+	}
+
+	if win.invalidations < 3 {
+		t.Fatalf("expected UI invalidations on each HELLO handshake, got %d", win.invalidations)
+	}
+
+	statuses := app.browserIntegrationStatuses()
+	byID := make(map[string]nativemessaging.BrowserIntegrationStatus, len(statuses))
+	for _, st := range statuses {
+		byID[st.Browser.ID] = st
+	}
+	for _, browserID := range []string{"chrome", "edge", "dia"} {
+		st, ok := byID[browserID]
+		if !ok {
+			t.Fatalf("missing browser status for %s", browserID)
+		}
+		if !st.Connection.Connected {
+			t.Fatalf("expected %s Connection.Connected=true after HELLO, got %+v", browserID, st.Connection)
+		}
 	}
 }

@@ -111,6 +111,7 @@ type Server struct {
 	handshakeTTL       time.Duration
 	handshakes         map[string]HandshakeRecord
 	onIncomingDownload func(AddDownloadRequest)
+	onHandshakeChange  func(browser string, connected bool)
 }
 
 // SetOnIncomingDownload registers an optional callback that intercepts incoming
@@ -118,6 +119,14 @@ type Server struct {
 func (s *Server) SetOnIncomingDownload(fn func(AddDownloadRequest)) {
 	s.mu.Lock()
 	s.onIncomingDownload = fn
+	s.mu.Unlock()
+}
+
+// SetOnHandshakeChange registers an optional callback invoked whenever a browser
+// extension connects (HELLO) or disconnects, so the GUI can refresh immediately.
+func (s *Server) SetOnHandshakeChange(fn func(browser string, connected bool)) {
+	s.mu.Lock()
+	s.onHandshakeChange = fn
 	s.mu.Unlock()
 }
 
@@ -131,7 +140,7 @@ func NewServer(eng *engine.Engine, port int) *Server {
 		engine:       eng,
 		port:         port,
 		tokenPath:    DefaultTokenPath(),
-		handshakeTTL: 90 * time.Second,
+		handshakeTTL: 150 * time.Second,
 		handshakes:   make(map[string]HandshakeRecord),
 	}
 }
@@ -317,7 +326,11 @@ func (s *Server) handleHandshakeHello(w http.ResponseWriter, r *http.Request) {
 		Connected:        true,
 		LastSeenAt:       time.Now(),
 	}
+	onChange := s.onHandshakeChange
 	s.mu.Unlock()
+	if onChange != nil {
+		onChange(browser, true)
+	}
 
 	resp := WelcomeResponse{
 		Type:            "WELCOME",
@@ -346,7 +359,11 @@ func (s *Server) handleHandshakeDisconnect(w http.ResponseWriter, r *http.Reques
 			rec.Connected = false
 			s.handshakes[browser] = rec
 		}
+		onChange := s.onHandshakeChange
 		s.mu.Unlock()
+		if onChange != nil {
+			onChange(browser, false)
+		}
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"success": true})

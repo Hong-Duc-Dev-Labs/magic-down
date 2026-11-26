@@ -153,7 +153,11 @@ func TestIPCHelloWelcomeHandshakeDisconnectAndExpiration(t *testing.T) {
 		t.Fatalf("expected expired handshake to report Connected=false")
 	}
 
-	// Re-hello then explicit graceful disconnect
+	// Re-hello then explicit graceful disconnect + onHandshakeChange callback
+	var events []string
+	srv.SetOnHandshakeChange(func(browser string, connected bool) {
+		events = append(events, fmt.Sprintf("%s:%v", browser, connected))
+	})
 	if _, err := client.SendHello(HelloRequest{Type: "HELLO", ProtocolVersion: 1, ExtensionVersion: "0.1.0", Browser: "chrome"}); err != nil {
 		t.Fatalf("SendHello(chrome) failed: %v", err)
 	}
@@ -162,5 +166,8 @@ func TestIPCHelloWelcomeHandshakeDisconnectAndExpiration(t *testing.T) {
 	}
 	if rec := srv.GetHandshakeSnapshots()["chrome"]; rec.Connected {
 		t.Fatalf("expected chrome to be disconnected after SendDisconnect")
+	}
+	if len(events) != 2 || events[0] != "chrome:true" || events[1] != "chrome:false" {
+		t.Fatalf("unexpected handshake change events: %v", events)
 	}
 }

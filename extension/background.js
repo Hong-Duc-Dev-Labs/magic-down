@@ -1489,7 +1489,7 @@ if (typeof chrome !== "undefined" && chrome.downloads) {
 if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.onMessage) {
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message.type === "ping") {
-      sendNativeMessage({ action: "ping" }).then(sendResponse);
+      handlePingMessage().then(sendResponse);
       return true;
     }
     if (message.type === "markDownloadBypass") {
@@ -1661,6 +1661,8 @@ async function forwardBatchDownload({ items, pageUrl = "", subfolder = "", heade
 const PROTOCOL_VERSION = 1;
 const HANDSHAKE_HEARTBEAT_MS = 30000;
 const HANDSHAKE_MAX_BACKOFF_MS = 60000;
+const HANDSHAKE_ALARM_NAME = "magicdown-handshake-heartbeat";
+const HANDSHAKE_ALARM_PERIOD_MIN = 0.5;
 let handshakeBackoffMs = 2000;
 let handshakeTimer = null;
 
@@ -1669,6 +1671,9 @@ function detectBrowserId(ua) {
     ? ua
     : (typeof navigator !== "undefined" && navigator.userAgent ? navigator.userAgent : "");
   if (/\bEdg\//i.test(agent)) return "edge";
+  if (/\bDia\//i.test(agent)) return "dia";
+  if (/\bArc\//i.test(agent)) return "arc";
+  if (/\bBrave/i.test(agent)) return "brave";
   if (/\bOPR\//i.test(agent)) return "opera";
   if (/\bVivaldi\//i.test(agent)) return "vivaldi";
   if (/\bCocCoc/i.test(agent)) return "coccoc";
@@ -1693,14 +1698,35 @@ function buildHelloPayload(options = {}) {
   };
 }
 
-async function performHandshake() {
-  const payload = buildHelloPayload();
-  const resp = await sendNativeMessage(payload);
+async function performHandshake(sendFn = sendNativeMessage, options = {}) {
+  const payload = buildHelloPayload(options);
+  const resp = await sendFn(payload);
   if (resp && resp.type === "WELCOME" && resp.status === "connected" && resp.success) {
     handshakeBackoffMs = 2000;
     return { connected: true, welcome: resp };
   }
-  return { connected: false, error: (resp && resp.error) || "handshake failed" };
+  return { connected: false, error: (resp && resp.error) || "handshake failed", response: resp };
+}
+
+async function handlePingMessage(sendFn = sendNativeMessage, options = {}) {
+  const payload = buildHelloPayload(options);
+  const resp = await sendFn(payload);
+  if (resp && resp.type === "WELCOME" && resp.status === "connected" && resp.success) {
+    handshakeBackoffMs = 2000;
+    return resp;
+  }
+  return resp || { success: false, app_running: false, error: "handshake failed" };
+}
+
+function ensureHandshakeAlarm() {
+  if (typeof chrome === "undefined" || !chrome.alarms || typeof chrome.alarms.create !== "function") {
+    return;
+  }
+  try {
+    chrome.alarms.create(HANDSHAKE_ALARM_NAME, { periodInMinutes: HANDSHAKE_ALARM_PERIOD_MIN });
+  } catch {
+    // ignore in restricted environments
+  }
 }
 
 function scheduleNextHandshake(delayMs) {
@@ -1717,16 +1743,26 @@ function scheduleNextHandshake(delayMs) {
 }
 
 if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.id) {
+  ensureHandshakeAlarm();
   performHandshake().then((res) => {
     scheduleNextHandshake(res.connected ? HANDSHAKE_HEARTBEAT_MS : handshakeBackoffMs);
   });
+  if (chrome.alarms && chrome.alarms.onAlarm) {
+    chrome.alarms.onAlarm.addListener((alarm) => {
+      if (alarm && alarm.name === HANDSHAKE_ALARM_NAME) {
+        performHandshake();
+      }
+    });
+  }
   if (chrome.runtime.onStartup) {
     chrome.runtime.onStartup.addListener(() => {
+      ensureHandshakeAlarm();
       performHandshake();
     });
   }
   if (chrome.runtime.onInstalled) {
     chrome.runtime.onInstalled.addListener(() => {
+      ensureHandshakeAlarm();
       performHandshake();
     });
   }
@@ -1754,6 +1790,9 @@ if (typeof module !== "undefined" && module.exports) {
     buildBatchDownloadPayload,
     detectBrowserId,
     buildHelloPayload,
+    performHandshake,
+    handlePingMessage,
+    HANDSHAKE_ALARM_NAME,
     isInterceptableHttpUrl,
     sanitizeDownloadFilename,
     shouldIntercept,
