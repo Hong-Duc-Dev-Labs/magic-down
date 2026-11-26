@@ -15,7 +15,7 @@
 
       // Popup controls
       "popup.intercept_title": "Auto-Intercept Downloads",
-      "popup.intercept_sub": "Accelerate matching browser downloads",
+      "popup.intercept_sub": "Intercept browser downloads (hold Alt to bypass)",
       "popup.exclude_title": "Exclude Current Site",
       "popup.exclude_none": "No active web page",
       "popup.exclude_unavailable": "Not available on this page",
@@ -159,7 +159,7 @@
 
       // Popup controls
       "popup.intercept_title": "Tự động bắt liên kết tải",
-      "popup.intercept_sub": "Tăng tốc các tệp tải xuống từ trình duyệt",
+      "popup.intercept_sub": "Tự động bắt tải trình duyệt (giữ Alt để bỏ qua)",
       "popup.exclude_title": "Bỏ qua trang hiện tại",
       "popup.exclude_none": "Không có trang web đang mở",
       "popup.exclude_unavailable": "Không khả dụng trên trang này",

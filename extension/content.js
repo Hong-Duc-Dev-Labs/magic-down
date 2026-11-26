@@ -2177,6 +2177,34 @@
   const observer = new MutationObserver(scheduleRefresh);
   observer.observe(document.documentElement, { childList: true, subtree: true });
 
+  // IDM-style Alt+click bypass: holding Alt while clicking a download link lets
+  // the browser handle the download natively instead of intercepting it.
+  if (isExtensionEnv) {
+    const notifyAltBypass = (event) => {
+      if (!event || !event.altKey) return;
+      let href = "";
+      try {
+        const anchor = event.target && typeof event.target.closest === "function"
+          ? event.target.closest("a[href]")
+          : null;
+        if (anchor && anchor.href) {
+          href = anchor.href;
+        }
+      } catch {
+        // ignore
+      }
+      try {
+        chrome.runtime.sendMessage({ type: "markDownloadBypass", url: href }, () => {
+          void chrome.runtime.lastError;
+        });
+      } catch {
+        // ignore
+      }
+    };
+    document.addEventListener("mousedown", notifyAltBypass, { capture: true, passive: true });
+    document.addEventListener("click", notifyAltBypass, { capture: true, passive: true });
+  }
+
   if (isExtensionEnv) {
     // Tab-level network detections are shared by every frame, so only the top
     // frame consumes them; a subframe would otherwise list streams that are not

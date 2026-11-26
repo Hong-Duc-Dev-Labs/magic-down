@@ -20,12 +20,7 @@ const MAX_TAB_VIDEOS = 40;
 
 const DEFAULT_SETTINGS = {
   interceptEnabled: true,
-  extensions: [
-    "zip", "rar", "7z", "tar", "gz", "iso",
-    "exe", "msi", "dmg", "apk", "bin",
-    "mp4", "mkv", "avi", "mov", "webm",
-    "mp3", "flac", "wav", "pdf"
-  ],
+  extensions: ["*"],
   minFileSizeMB: 0,
   excludedDomains: [],
   theme: "dark"
@@ -38,6 +33,75 @@ const tabFbAudios = new Map();
 // Recent batch scan snapshots: Map<scanId, { tabId, pageTitle, pageUrl, items, createdAt }>
 const batchScanResults = new Map();
 const MAX_BATCH_SCANS = 10;
+
+// Download interception state (IDM-style):
+// - handledDownloadIds prevents duplicate interception / infinite loops.
+// - pendingDownloads preserves click-time Alt-bypass & referrer between onCreated and onDeterminingFilename.
+const handledDownloadIds = new Set();
+const MAX_HANDLED_DOWNLOAD_IDS = 500;
+const pendingDownloads = new Map();
+const MAX_PENDING_DOWNLOADS = 200;
+let altBypassUntil = 0;
+const altBypassUrls = new Map();
+const DEFAULT_BYPASS_TTL_MS = 10000;
+
+function markDownloadBypass({ url = "", ttlMs = DEFAULT_BYPASS_TTL_MS, now = Date.now() } = {}) {
+  const safeTtl = Number.isFinite(ttlMs) && ttlMs > 0 ? Math.min(ttlMs, 30000) : DEFAULT_BYPASS_TTL_MS;
+  const expiresAt = now + safeTtl;
+  if (expiresAt > altBypassUntil) {
+    altBypassUntil = expiresAt;
+  }
+  if (typeof url === "string" && url.trim()) {
+    altBypassUrls.set(url.trim(), expiresAt);
+    while (altBypassUrls.size > 50) {
+      altBypassUrls.delete(altBypassUrls.keys().next().value);
+    }
+  }
+}
+
+function isDownloadBypassed(url = "", now = Date.now()) {
+  if (now <= altBypassUntil) {
+    return true;
+  }
+  for (const [key, expiresAt] of altBypassUrls.entries()) {
+    if (now > expiresAt) {
+      altBypassUrls.delete(key);
+    } else if (url && key === url) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function clearDownloadBypass() {
+  altBypassUntil = 0;
+  altBypassUrls.clear();
+}
+
+function isInterceptableHttpUrl(rawUrl) {
+  if (typeof rawUrl !== "string") return false;
+  const trimmed = rawUrl.trim();
+  if (!trimmed) return false;
+  try {
+    const parsed = new URL(trimmed);
+    const proto = parsed.protocol.toLowerCase();
+    return (proto === "http:" || proto === "https:") && Boolean(parsed.hostname);
+  } catch {
+    return false;
+  }
+}
+
+function sanitizeDownloadFilename(rawFilename) {
+  if (typeof rawFilename !== "string") return "";
+  const cleaned = rawFilename.replace(/\0/g, "").trim();
+  if (!cleaned) return "";
+  const parts = cleaned.replace(/\\/g, "/").split("/").filter(Boolean);
+  let base = parts.length > 0 ? parts[parts.length - 1].trim() : "";
+  if (!base || base === "." || base === "..") return "";
+  base = base.replace(/\.\.+/g, ".").replace(/^\.+/, "").trim();
+  if (!base || base === "." || base === "..") return "";
+  return base;
+}
 
 async function getSettings() {
   const stored = await chrome.storage.local.get([
@@ -102,27 +166,56 @@ function isDomainExcluded(url, excludedDomains) {
   });
 }
 
-function shouldIntercept(downloadItem, settings) {
+function shouldIntercept(downloadItem, settings, options = {}) {
+  if (!downloadItem || typeof downloadItem !== "object") {
+    return false;
+  }
+  if (settings && settings.interceptEnabled === false) {
+    return false;
+  }
+  if (downloadItem.bypass === true) {
+    return false;
+  }
+  if (downloadItem.state === "complete" || downloadItem.state === "interrupted") {
+    return false;
+  }
+  const selfExtId =
+    options.extensionId ||
+    (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.id ? chrome.runtime.id : "");
+  if (selfExtId && downloadItem.byExtensionId && downloadItem.byExtensionId === selfExtId) {
+    return false;
+  }
+
   const url = downloadItem.finalUrl || downloadItem.url;
-  if (!url || (!url.startsWith("http://") && !url.startsWith("https://"))) {
+  if (!isInterceptableHttpUrl(url)) {
     return false;
   }
 
-  if (isDomainExcluded(url, settings.excludedDomains)) {
-    return false;
-  }
-  if (downloadItem.referrer && isDomainExcluded(downloadItem.referrer, settings.excludedDomains)) {
+  if (options.bypassed || isDownloadBypassed(url, options.now)) {
     return false;
   }
 
-  if (settings.minFileSizeMB > 0 && typeof downloadItem.fileSize === "number" && downloadItem.fileSize > 0) {
-    const minBytes = settings.minFileSizeMB * 1024 * 1024;
-    if (downloadItem.fileSize < minBytes) {
+  const excludedDomains = (settings && settings.excludedDomains) || [];
+  if (isDomainExcluded(url, excludedDomains)) {
+    return false;
+  }
+  if (downloadItem.referrer && isDomainExcluded(downloadItem.referrer, excludedDomains)) {
+    return false;
+  }
+
+  const minFileSizeMB = settings && typeof settings.minFileSizeMB === "number" ? settings.minFileSizeMB : 0;
+  const knownBytes =
+    typeof downloadItem.fileSize === "number" && downloadItem.fileSize > 0
+      ? downloadItem.fileSize
+      : (typeof downloadItem.totalBytes === "number" && downloadItem.totalBytes > 0 ? downloadItem.totalBytes : 0);
+  if (minFileSizeMB > 0 && knownBytes > 0) {
+    const minBytes = minFileSizeMB * 1024 * 1024;
+    if (knownBytes < minBytes) {
       return false;
     }
   }
 
-  const allowedExts = settings.extensions;
+  const allowedExts = settings && settings.extensions;
   if (!allowedExts || allowedExts.length === 0 || allowedExts.includes("*")) {
     return true;
   }
@@ -204,10 +297,11 @@ function sanitizeHeaders(rawHeaders) {
 
 function buildDownloadPayload({ url, audioUrl = "", filename = "", referrer = "", cookies = "", headers = null, convertFormat = "", targetFormat = "", outputFormat = "", audioBitrate = "", plan = null, size = 0 }) {
   const safeHeaders = sanitizeHeaders(headers);
+  const safeFilename = sanitizeDownloadFilename(filename);
   const payload = {
     action: "download",
     url,
-    filename,
+    filename: safeFilename,
     referrer,
     cookies,
     headers: safeHeaders,
@@ -1055,6 +1149,21 @@ if (typeof chrome !== "undefined" && chrome.storage && chrome.storage.onChanged)
   });
 }
 
+const LEGACY_DEFAULT_EXTENSIONS = [
+  "zip", "rar", "7z", "tar", "gz", "iso",
+  "exe", "msi", "dmg", "apk", "bin",
+  "mp4", "mkv", "avi", "mov", "webm",
+  "mp3", "flac", "wav", "pdf"
+];
+
+function isLegacyDefaultExtensionList(exts) {
+  return (
+    Array.isArray(exts) &&
+    exts.length === LEGACY_DEFAULT_EXTENSIONS.length &&
+    LEGACY_DEFAULT_EXTENSIONS.every((ext, idx) => exts[idx] === ext)
+  );
+}
+
 if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.onInstalled) {
   chrome.runtime.onInstalled.addListener(async () => {
     const current = await chrome.storage.local.get([
@@ -1064,9 +1173,13 @@ if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.onInstalle
       "excludedDomains",
       "theme"
     ]);
+    const nextExtensions =
+      !current.extensions || isLegacyDefaultExtensionList(current.extensions)
+        ? DEFAULT_SETTINGS.extensions
+        : current.extensions;
     await chrome.storage.local.set({
       interceptEnabled: current.interceptEnabled ?? DEFAULT_SETTINGS.interceptEnabled,
-      extensions: current.extensions ?? DEFAULT_SETTINGS.extensions,
+      extensions: nextExtensions,
       minFileSizeMB: current.minFileSizeMB ?? DEFAULT_SETTINGS.minFileSizeMB,
       excludedDomains: current.excludedDomains ?? DEFAULT_SETTINGS.excludedDomains,
       theme: current.theme ?? DEFAULT_SETTINGS.theme
@@ -1117,45 +1230,193 @@ if (typeof chrome !== "undefined" && chrome.contextMenus && chrome.contextMenus.
   });
 }
 
-if (typeof chrome !== "undefined" && chrome.downloads && chrome.downloads.onCreated) {
-  chrome.downloads.onCreated.addListener(async (downloadItem) => {
-    const settings = await getSettings();
-    if (!settings.interceptEnabled) {
-      return;
-    }
-    if (!shouldIntercept(downloadItem, settings)) {
-      return;
-    }
+function trackHandledDownloadId(id) {
+  if (id === undefined || id === null) return;
+  handledDownloadIds.add(id);
+  while (handledDownloadIds.size > MAX_HANDLED_DOWNLOAD_IDS) {
+    handledDownloadIds.delete(handledDownloadIds.keys().next().value);
+  }
+}
 
-    const url = downloadItem.finalUrl || downloadItem.url;
+function recordPendingDownload(downloadItem, options = {}) {
+  if (!downloadItem || downloadItem.id === undefined || downloadItem.id === null) return null;
+  const now = typeof options.now === "number" ? options.now : Date.now();
+  const url = downloadItem.finalUrl || downloadItem.url || "";
+  const entry = {
+    bypassed: Boolean(downloadItem.bypass) || isDownloadBypassed(url, now),
+    referrer: downloadItem.referrer || "",
+    url,
+    createdAt: now
+  };
+  pendingDownloads.set(downloadItem.id, entry);
+  while (pendingDownloads.size > MAX_PENDING_DOWNLOADS) {
+    pendingDownloads.delete(pendingDownloads.keys().next().value);
+  }
+  return entry;
+}
 
+async function handleDownloadInterception(downloadItem, deps = {}) {
+  const suggest = typeof deps.suggest === "function" ? deps.suggest : null;
+  let suggested = false;
+  const safeSuggest = () => {
+    if (!suggest || suggested) return;
+    suggested = true;
     try {
-      await chrome.downloads.pause(downloadItem.id);
+      suggest();
+    } catch {
+      // ignore if Chrome already settled the download
+    }
+  };
+
+  if (!downloadItem || typeof downloadItem !== "object") {
+    safeSuggest();
+    return { intercepted: false, reason: "invalid_item" };
+  }
+
+  const downloadId = downloadItem.id;
+  if (downloadId !== undefined && downloadId !== null && handledDownloadIds.has(downloadId)) {
+    safeSuggest();
+    return { intercepted: false, reason: "already_handled" };
+  }
+
+  const pending = downloadId !== undefined && downloadId !== null ? pendingDownloads.get(downloadId) : null;
+  if (pending) {
+    pendingDownloads.delete(downloadId);
+  }
+
+  const effectiveItem = {
+    ...downloadItem,
+    url: downloadItem.url || (pending && pending.url) || "",
+    referrer: downloadItem.referrer || (pending && pending.referrer) || ""
+  };
+
+  const getSettingsFn = deps.getSettings || getSettings;
+  const forwardDownloadFn = deps.forwardDownload || forwardDownload;
+  const downloadsApi = deps.downloadsApi || (typeof chrome !== "undefined" ? chrome.downloads : null);
+  const now = typeof deps.now === "number" ? deps.now : Date.now();
+
+  const settings = await getSettingsFn();
+  if (!settings || !settings.interceptEnabled) {
+    safeSuggest();
+    return { intercepted: false, reason: "disabled" };
+  }
+
+  const url = effectiveItem.finalUrl || effectiveItem.url;
+  const bypassed = Boolean(pending && pending.bypassed) || Boolean(effectiveItem.bypass) || isDownloadBypassed(url, now);
+  if (bypassed) {
+    safeSuggest();
+    return { intercepted: false, reason: "bypassed" };
+  }
+
+  if (!shouldIntercept(effectiveItem, settings, { bypassed: false, now, extensionId: deps.extensionId })) {
+    safeSuggest();
+    return { intercepted: false, reason: "filtered" };
+  }
+
+  trackHandledDownloadId(downloadId);
+
+  // When running via onCreated fallback (no suggest callback), pause first so
+  // Chrome doesn't finish a small download before Native Messaging responds.
+  let paused = false;
+  if (!suggest && downloadsApi && typeof downloadsApi.pause === "function" && downloadId !== undefined) {
+    try {
+      await downloadsApi.pause(downloadId);
+      paused = true;
+    } catch {
+      // ignore pause errors
+    }
+  }
+
+  const filename = sanitizeDownloadFilename(effectiveItem.filename || "");
+  const size =
+    typeof effectiveItem.fileSize === "number" && effectiveItem.fileSize > 0
+      ? effectiveItem.fileSize
+      : (typeof effectiveItem.totalBytes === "number" && effectiveItem.totalBytes > 0 ? effectiveItem.totalBytes : 0);
+
+  // Always attempt Native Messaging directly even on MV3 service worker cold-start
+  // (do not gate on HELLO/WELCOME handshake completion).
+  let resp = null;
+  try {
+    resp = await forwardDownloadFn({
+      url,
+      filename,
+      referrer: effectiveItem.referrer || "",
+      size
+    });
+  } catch (err) {
+    resp = { success: false, hostError: true, error: String(err) };
+  }
+
+  if (resp && resp.success) {
+    if (downloadsApi && downloadId !== undefined) {
+      try {
+        if (typeof downloadsApi.cancel === "function") {
+          await downloadsApi.cancel(downloadId);
+        }
+      } catch {
+        // ignore
+      }
+      try {
+        if (typeof downloadsApi.erase === "function") {
+          await downloadsApi.erase({ id: downloadId });
+        }
+      } catch {
+        // ignore
+      }
+    }
+    safeSuggest();
+    return { intercepted: true, response: resp };
+  }
+
+  // Fail-safe: MagicDown Desktop is offline or Native Messaging failed.
+  // Never drop the user's download — let the browser continue seamlessly.
+  if (paused && downloadsApi && typeof downloadsApi.resume === "function" && downloadId !== undefined) {
+    try {
+      await downloadsApi.resume(downloadId);
     } catch {
       // ignore
     }
+  }
+  safeSuggest();
+  return { intercepted: false, reason: "host_error", response: resp };
+}
 
-    const resp = await forwardDownload({
-      url,
-      filename: downloadItem.filename || "",
-      referrer: downloadItem.referrer || ""
+function onDownloadCreated(downloadItem, deps = {}) {
+  if (!downloadItem || typeof downloadItem !== "object") return;
+  const downloadsApi = deps.downloadsApi || (typeof chrome !== "undefined" ? chrome.downloads : null);
+  const hasDeterminingFilename = Boolean(downloadsApi && downloadsApi.onDeterminingFilename);
+  if (hasDeterminingFilename && !deps.forceImmediate) {
+    // Record Alt-bypass & initial referrer at creation time so redirects before
+    // onDeterminingFilename cannot expire the click-time bypass window.
+    recordPendingDownload(downloadItem, { now: deps.now });
+    return;
+  }
+  return handleDownloadInterception(downloadItem, deps);
+}
+
+if (typeof chrome !== "undefined" && chrome.downloads) {
+  if (chrome.downloads.onCreated) {
+    chrome.downloads.onCreated.addListener((downloadItem) => {
+      onDownloadCreated(downloadItem);
     });
-
-    if (resp && resp.success) {
-      try {
-        await chrome.downloads.cancel(downloadItem.id);
-        await chrome.downloads.erase({ id: downloadItem.id });
-      } catch {
-        // ignore
+  }
+  if (chrome.downloads.onDeterminingFilename) {
+    chrome.downloads.onDeterminingFilename.addListener((downloadItem, suggest) => {
+      handleDownloadInterception(downloadItem, { suggest });
+      // Return true to indicate suggest() will be called asynchronously.
+      return true;
+    });
+  }
+  if (chrome.downloads.onChanged) {
+    chrome.downloads.onChanged.addListener((delta) => {
+      if (!delta || delta.id === undefined) return;
+      const state = delta.state && delta.state.current;
+      if (state === "complete" || state === "interrupted") {
+        pendingDownloads.delete(delta.id);
+        handledDownloadIds.delete(delta.id);
       }
-    } else {
-      try {
-        await chrome.downloads.resume(downloadItem.id);
-      } catch {
-        // ignore
-      }
-    }
-  });
+    });
+  }
 }
 
 if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.onMessage) {
@@ -1163,6 +1424,11 @@ if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.onMessage)
     if (message.type === "ping") {
       sendNativeMessage({ action: "ping" }).then(sendResponse);
       return true;
+    }
+    if (message.type === "markDownloadBypass") {
+      markDownloadBypass({ url: message.url || "", ttlMs: message.ttlMs });
+      sendResponse({ ok: true });
+      return false;
     }
     if (message.type === "download") {
       forwardDownload({
@@ -1401,6 +1667,7 @@ if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.id) {
 
 if (typeof module !== "undefined" && module.exports) {
   module.exports = {
+    DEFAULT_SETTINGS,
     normalizeMediaUrl,
     getMediaDedupKey,
     parseFacebookEfg,
@@ -1416,6 +1683,16 @@ if (typeof module !== "undefined" && module.exports) {
     buildBatchDownloadPayload,
     detectBrowserId,
     buildHelloPayload,
+    isInterceptableHttpUrl,
+    sanitizeDownloadFilename,
+    shouldIntercept,
+    markDownloadBypass,
+    isDownloadBypassed,
+    clearDownloadBypass,
+    handleDownloadInterception,
+    onDownloadCreated,
+    handledDownloadIds,
+    pendingDownloads,
     tabVideos,
     tabFbAudios
   };

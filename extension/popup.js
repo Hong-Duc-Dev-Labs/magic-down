@@ -1,9 +1,4 @@
-const DEFAULT_EXTS = [
-  "zip", "rar", "7z", "tar", "gz", "iso",
-  "exe", "msi", "dmg", "apk", "bin",
-  "mp4", "mkv", "avi", "mov", "webm",
-  "mp3", "flac", "wav", "pdf"
-];
+const DEFAULT_EXTS = ["*"];
 
 const I18N = window.MagicDownI18n;
 function t(key, params) {
