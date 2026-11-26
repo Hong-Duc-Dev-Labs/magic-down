@@ -112,17 +112,30 @@ func (t *Task) Probe(ctx context.Context, client *http.Client, downloadDir strin
 
 // probeOnce performs a single HEAD/GET probe and reports whether the failure is retryable.
 func (t *Task) probeOnce(ctx context.Context, client *http.Client, downloadDir string) (retryable bool, err error) {
+	t.mu.RLock()
+	taskURL := t.URL
+	referrer := t.Referrer
+	cookies := t.Cookies
+	var headers map[string]string
+	if len(t.Headers) > 0 {
+		headers = make(map[string]string, len(t.Headers))
+		for k, v := range t.Headers {
+			headers[k] = v
+		}
+	}
+	t.mu.RUnlock()
+
 	// Try HEAD first
-	headReq, err := http.NewRequestWithContext(ctx, http.MethodHead, t.URL, nil)
+	headReq, err := http.NewRequestWithContext(ctx, http.MethodHead, taskURL, nil)
 	if err == nil {
 		headReq.Header.Set("User-Agent", "MagicDown/1.0 (Windows NT 10.0; Win64; x64)")
-		if t.Referrer != "" {
-			headReq.Header.Set("Referer", t.Referrer)
+		if referrer != "" {
+			headReq.Header.Set("Referer", referrer)
 		}
-		if t.Cookies != "" {
-			headReq.Header.Set("Cookie", t.Cookies)
+		if cookies != "" {
+			headReq.Header.Set("Cookie", cookies)
 		}
-		for k, v := range t.Headers {
+		for k, v := range headers {
 			headReq.Header.Set(k, v)
 		}
 
@@ -138,19 +151,19 @@ func (t *Task) probeOnce(ctx context.Context, client *http.Client, downloadDir s
 	}
 
 	// If HEAD failed or returned 405 Method Not Allowed, fallback to ranged GET probe
-	getReq, err := http.NewRequestWithContext(ctx, http.MethodGet, t.URL, nil)
+	getReq, err := http.NewRequestWithContext(ctx, http.MethodGet, taskURL, nil)
 	if err != nil {
 		return false, fmt.Errorf("failed to create probe request: %w", err)
 	}
 	getReq.Header.Set("Range", "bytes=0-0")
 	getReq.Header.Set("User-Agent", "MagicDown/1.0 (Windows NT 10.0; Win64; x64)")
-	if t.Referrer != "" {
-		getReq.Header.Set("Referer", t.Referrer)
+	if referrer != "" {
+		getReq.Header.Set("Referer", referrer)
 	}
-	if t.Cookies != "" {
-		getReq.Header.Set("Cookie", t.Cookies)
+	if cookies != "" {
+		getReq.Header.Set("Cookie", cookies)
 	}
-	for k, v := range t.Headers {
+	for k, v := range headers {
 		getReq.Header.Set(k, v)
 	}
 

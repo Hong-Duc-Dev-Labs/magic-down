@@ -154,13 +154,24 @@ func TestProxyConnection(ctx context.Context, cfg ProxyConfig, targetURL string)
 	req.Header.Set("User-Agent", "MagicDown/1.0")
 	resp, err := client.Do(req)
 	if err != nil {
-		return err
+		return sanitizeProxyError(err, cfg.Password)
 	}
 	_ = resp.Body.Close()
 	if resp.StatusCode >= 400 && resp.StatusCode != http.StatusMethodNotAllowed {
 		return fmt.Errorf("proxy test returned HTTP %d", resp.StatusCode)
 	}
 	return nil
+}
+
+func sanitizeProxyError(err error, password string) error {
+	if err == nil || password == "" {
+		return err
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, password) {
+		return err
+	}
+	return errors.New(strings.ReplaceAll(msg, password, "***"))
 }
 
 // parseWindowsProxyServer parses WinINet ProxyServer registry values such as:

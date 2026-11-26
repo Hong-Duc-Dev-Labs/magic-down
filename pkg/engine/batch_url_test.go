@@ -83,4 +83,18 @@ func TestAddTasksBatch500URLsSingleLock(t *testing.T) {
 	if got := len(eng.GetTasks()); got != MaxBatchURLs {
 		t.Fatalf("expected %d tasks in engine, got %d", MaxBatchURLs, got)
 	}
+
+	// Colliding filenames within a single batch must receive distinct SavePaths
+	// even before any .magicpart exists on disk.
+	collideReqs := []AddTaskRequest{
+		{URL: "https://a.example.com/same.zip", Filename: "same.zip", SaveDir: tempDir, StartPaused: true},
+		{URL: "https://b.example.com/same.zip", Filename: "same.zip", SaveDir: tempDir, StartPaused: true},
+	}
+	collided, err := eng.AddTasksBatch(collideReqs)
+	if err != nil {
+		t.Fatalf("AddTasksBatch(colliding) failed: %v", err)
+	}
+	if collided[0].SavePath == collided[1].SavePath {
+		t.Fatalf("expected distinct SavePaths for colliding batch filenames, both got %q", collided[0].SavePath)
+	}
 }

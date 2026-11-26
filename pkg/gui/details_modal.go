@@ -20,6 +20,7 @@ func (a *App) openTaskDetails(task *engine.Task) {
 	a.cancelDeleteTask()
 	a.cancelDuplicateModal()
 	a.closeRefreshModal()
+	a.closeBatchModal()
 	a.showAddModal = false
 	a.showSettingsModal = false
 	a.showOnboardingModal = false

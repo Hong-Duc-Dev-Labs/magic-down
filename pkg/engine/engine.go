@@ -211,7 +211,7 @@ func (e *Engine) AddTask(req AddTaskRequest) (*Task, error) {
 
 	e.mu.Lock()
 	if task.Filename != "" {
-		task.SavePath = UniqueFilePath(saveDir, task.Filename)
+		task.SavePath = e.uniqueTaskSavePathLocked(saveDir, task.Filename)
 		task.Filename = filepath.Base(task.SavePath)
 		task.PartPath = task.SavePath + ".magicpart"
 	}
@@ -251,7 +251,7 @@ func (e *Engine) AddTaskOrFindDuplicate(req AddTaskRequest) (*Task, *Task, error
 		return nil, dup, nil
 	}
 	if task.Filename != "" {
-		task.SavePath = UniqueFilePath(saveDir, task.Filename)
+		task.SavePath = e.uniqueTaskSavePathLocked(saveDir, task.Filename)
 		task.Filename = filepath.Base(task.SavePath)
 		task.PartPath = task.SavePath + ".magicpart"
 	}
@@ -305,7 +305,7 @@ func (e *Engine) AddTasksBatch(reqs []AddTaskRequest) ([]*Task, error) {
 	e.mu.Lock()
 	for _, item := range prepared {
 		if item.task.Filename != "" {
-			item.task.SavePath = UniqueFilePath(item.saveDir, item.task.Filename)
+			item.task.SavePath = e.uniqueTaskSavePathLocked(item.saveDir, item.task.Filename)
 			item.task.Filename = filepath.Base(item.task.SavePath)
 			item.task.PartPath = item.task.SavePath + ".magicpart"
 		}
@@ -934,12 +934,73 @@ func (e *Engine) saveConfig() error {
 	if err != nil {
 		return err
 	}
-	tmpPath := e.configPath + ".tmp"
-	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
+	dir := filepath.Dir(e.configPath)
+	_ = os.MkdirAll(dir, 0755)
+	tmpFile, err := os.CreateTemp(dir, "config-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmpFile.Name()
+	_ = tmpFile.Chmod(0600)
+	if _, err := tmpFile.Write(data); err != nil {
+		_ = tmpFile.Close()
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	if err := tmpFile.Sync(); err != nil {
+		_ = tmpFile.Close()
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	if err := tmpFile.Close(); err != nil {
+		_ = os.Remove(tmpPath)
 		return err
 	}
 	_ = os.Remove(e.configPath)
-	return os.Rename(tmpPath, e.configPath)
+	if err := os.Rename(tmpPath, e.configPath); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	return nil
+}
+
+// uniqueTaskSavePathLocked returns a save path that collides neither with
+// existing files on disk nor with any SavePath already reserved by an existing
+// non-cancelled task in e.tasks. Caller must hold e.mu.Lock().
+func (e *Engine) uniqueTaskSavePathLocked(dir, filename string) string {
+	clean := SanitizeFilename(filename)
+	isReserved := func(candidate string) bool {
+		if pathExists(candidate) || pathExists(candidate+".magicpart") {
+			return true
+		}
+		cleanCand := cleanComparePath(candidate)
+		for _, t := range e.tasks {
+			if t.GetStatus() == StatusCancelled {
+				continue
+			}
+			t.mu.RLock()
+			sp := t.SavePath
+			t.mu.RUnlock()
+			if sp != "" && sameFilePath(cleanCand, cleanComparePath(sp)) {
+				return true
+			}
+		}
+		return false
+	}
+
+	candidate := filepath.Join(dir, clean)
+	if !isReserved(candidate) {
+		return candidate
+	}
+	ext := filepath.Ext(clean)
+	stem := strings.TrimSuffix(clean, ext)
+	for i := 1; i < 10000; i++ {
+		next := filepath.Join(dir, fmt.Sprintf("%s (%d)%s", stem, i, ext))
+		if !isReserved(next) {
+			return next
+		}
+	}
+	return candidate
 }
 
 // loadConfig applies previously persisted settings over the passed defaults.

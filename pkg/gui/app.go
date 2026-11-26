@@ -624,6 +624,7 @@ func (a *App) openIncomingDownloadDialog(req ipc.AddDownloadRequest) {
 	a.cancelDuplicateModal()
 	a.closeRefreshModal()
 	a.closeTaskDetails()
+	a.closeBatchModal()
 	a.showSettingsModal = false
 	a.showOnboardingModal = false
 	a.showAddModal = true
@@ -914,6 +915,7 @@ func (a *App) openAddModal() {
 	a.cancelDuplicateModal()
 	a.closeRefreshModal()
 	a.closeTaskDetails()
+	a.closeBatchModal()
 	a.showSettingsModal = false
 	a.showOnboardingModal = false
 	a.showAddModal = true
@@ -989,6 +991,7 @@ func (a *App) openSettingsModal() {
 	a.cancelDuplicateModal()
 	a.closeRefreshModal()
 	a.closeTaskDetails()
+	a.closeBatchModal()
 	a.showAddModal = false
 	a.showOnboardingModal = false
 	a.showSettingsModal = true
@@ -1009,6 +1012,7 @@ func (a *App) OpenOnboardingModal() {
 	a.cancelDuplicateModal()
 	a.closeRefreshModal()
 	a.closeTaskDetails()
+	a.closeBatchModal()
 	a.showAddModal = false
 	a.showSettingsModal = false
 	a.showOnboardingModal = true
@@ -2735,6 +2739,7 @@ func (a *App) requestDeleteTask(task *engine.Task) {
 	a.cancelDuplicateModal()
 	a.closeRefreshModal()
 	a.closeTaskDetails()
+	a.closeBatchModal()
 	a.showAddModal = false
 	a.showSettingsModal = false
 	a.showOnboardingModal = false
@@ -2813,6 +2818,7 @@ func (a *App) openRefreshModal(task *engine.Task) {
 	a.cancelDeleteTask()
 	a.cancelDuplicateModal()
 	a.closeTaskDetails()
+	a.closeBatchModal()
 	a.showAddModal = false
 	a.showSettingsModal = false
 	a.showOnboardingModal = false
@@ -3072,6 +3078,7 @@ func (a *App) openDuplicateModal(existing *engine.Task, req engine.AddTaskReques
 	a.cancelDeleteTask()
 	a.closeRefreshModal()
 	a.closeTaskDetails()
+	a.closeBatchModal()
 	a.showAddModal = false
 	a.showSettingsModal = false
 	a.showOnboardingModal = false
