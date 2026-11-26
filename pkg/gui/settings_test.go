@@ -7,6 +7,9 @@ import (
 	"github.com/egoist/mygo/ui"
 
 	"magicdown/pkg/engine"
+	"magicdown/pkg/i18n"
+	"magicdown/pkg/nativemessaging"
+	"magicdown/pkg/updater"
 )
 
 func TestSettingsApplyRetriesAndSpeedLimit(t *testing.T) {
@@ -90,9 +93,78 @@ func TestSettingsAutoCheckUpdatesPersistenceAndRender(t *testing.T) {
 	tester := ui.NewTester(app.View, 1120, 700)
 	tester.SetScale(1)
 	app.openSettingsModal()
+	app.activeSettingsTab = settingsTabUpdates
 	app.updateMu.Lock()
 	app.updateStatus = "available"
 	app.updateMessage = "New version v2.0.0 available"
+	app.updateRelease = &updater.ReleaseInfo{Version: "v2.0.0", Body: "New tabbed Settings modal"}
 	app.updateMu.Unlock()
 	tester.Frame()
+
+	app.updateMu.Lock()
+	app.updateStatus = "downloading"
+	app.updateDownloaded = 512 * 1024
+	app.updateTotal = 1024 * 1024
+	app.updateMu.Unlock()
+	tester.Frame()
+}
+
+func TestSettingsModalTabsRenderAllLocalesAndViewports(t *testing.T) {
+	prevLang := i18n.CurrentLang()
+	defer i18n.SetLang(prevLang)
+
+	tempDir := t.TempDir()
+	eng, err := engine.NewEngine(engine.DefaultConfig(tempDir, filepath.Join(tempDir, "state.json")))
+	if err != nil {
+		t.Fatalf("failed to init engine: %v", err)
+	}
+	defer eng.Close()
+
+	app := NewApp(eng, nil)
+	app.detectBrowsersFn = func() []nativemessaging.BrowserInfo {
+		return []nativemessaging.BrowserInfo{
+			{ID: "chrome", Name: "Google Chrome", Family: nativemessaging.BrowserFamilyChromium, Installed: true, Version: "131.0"},
+			{ID: "edge", Name: "Microsoft Edge", Family: nativemessaging.BrowserFamilyChromium, Installed: true, Version: "131.0"},
+			{ID: "dia", Name: "Dia", Family: nativemessaging.BrowserFamilyChromium, Installed: true},
+		}
+	}
+	app.openSettingsModal()
+	if app.activeSettingsTab != settingsTabGeneral {
+		t.Fatalf("expected openSettingsModal to default to General tab, got %v", app.activeSettingsTab)
+	}
+
+	viewports := [][2]int{
+		{1120, 700},
+		{920, 580},
+	}
+	tabs := []settingsTab{
+		settingsTabGeneral,
+		settingsTabDownloads,
+		settingsTabBrowser,
+		settingsTabUpdates,
+	}
+
+	for _, lang := range []i18n.Lang{i18n.LangVI, i18n.LangEN} {
+		app.SetLanguage(lang)
+		for _, vp := range viewports {
+			tester := ui.NewTester(app.View, vp[0], vp[1])
+			tester.SetScale(1)
+			for _, tab := range tabs {
+				app.activeSettingsTab = tab
+				if tab == settingsTabBrowser {
+					app.troubleshootBrowserID = "chrome"
+					app.installGuideBrowserID = "edge"
+				}
+				tester.Frame()
+			}
+		}
+	}
+
+	// Validation error on Downloads fields switches focus to Downloads tab automatically.
+	app.activeSettingsTab = settingsTabGeneral
+	app.settingSpeedLimit = "invalid"
+	app.saveSettings()
+	if app.settingsError == "" || app.activeSettingsTab != settingsTabDownloads {
+		t.Fatalf("expected downloads validation error and tab switch, err=%q tab=%v", app.settingsError, app.activeSettingsTab)
+	}
 }

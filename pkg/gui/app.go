@@ -54,6 +54,15 @@ const (
 	FrameScheduleIdle
 )
 
+type settingsTab int
+
+const (
+	settingsTabGeneral settingsTab = iota
+	settingsTabDownloads
+	settingsTabBrowser
+	settingsTabUpdates
+)
+
 // App holds the UI state for MagicDown's MyGo Native UI desktop application.
 type App struct {
 	engine    *engine.Engine
@@ -120,6 +129,7 @@ type App struct {
 
 	// Settings modal state
 	showSettingsModal       bool
+	activeSettingsTab       settingsTab
 	settingDownloadDir      string
 	settingMaxConcurrent    int
 	settingSegments         int
@@ -701,7 +711,9 @@ func (a *App) openSettingsModal() {
 	a.settingAutoCheckUpdates = cfg.AutoCheckUpdates
 	a.settingsError = ""
 	a.nativeRegMsg = ""
+	a.activeSettingsTab = settingsTabGeneral
 	a.refreshNativeStatus()
+	a.refreshDetectedBrowsers()
 	a.showAddModal = false
 	a.showOnboardingModal = false
 	a.showSettingsModal = true
@@ -1377,17 +1389,28 @@ func (a *App) renderSettingsModal(c *ui.Context, pal Palette) {
 		return
 	}
 
+	_, winH := c.Size()
+	modalH := float32(520)
+	if winH > 0 {
+		if maxAvail := winH - 100; maxAvail < modalH {
+			modalH = maxAvail
+		}
+		if modalH < 340 {
+			modalH = 340
+		}
+	}
+
 	ui.Modal(c, &a.showSettingsModal, func() {
-		ui.Column(c).Width(520).Gap(16).Children(func() {
-			// Header
-			ui.Row(c).AlignItems(ui.Center).Justify(ui.SpaceBetween).Children(func() {
+		ui.Column(c).Width(560).Height(modalH).Clip().Gap(12).Children(func() {
+			// Fixed Header
+			ui.Row(c).Shrink(0).AlignItems(ui.Center).Justify(ui.SpaceBetween).Children(func() {
 				ui.Row(c).Gap(10).AlignItems(ui.Center).Children(func() {
-					ui.Row(c).Width(32).Height(32).Radius(8).Background(pal.AccentSoft).Center().Children(func() {
+					ui.Row(c).Width(32).Height(32).Radius(8).Background(pal.AccentSoft).Center().Shrink(0).Children(func() {
 						ui.Icon(c, iconSettings).Width(16).Height(16).TextColor(pal.Accent)
 					})
 					ui.Column(c).Gap(1).Children(func() {
-						ui.Text(c, i18n.T("settings.title")).FontSize(16).FontWeight(700).TextColor(pal.TextPrimary)
-						ui.Text(c, i18n.T("settings.subtitle")).FontSize(12).TextColor(pal.TextMuted)
+						ui.Text(c, i18n.T("settings.title")).FontSize(16).FontWeight(700).TextColor(pal.TextPrimary).SingleLine()
+						ui.Text(c, i18n.T("settings.subtitle")).FontSize(12).TextColor(pal.TextMuted).SingleLine()
 					})
 				})
 				if rowIconButton(c, pal, iconClose, false) {
@@ -1395,185 +1418,53 @@ func (a *App) renderSettingsModal(c *ui.Context, pal Palette) {
 				}
 			})
 
+			// Fixed Horizontal Tab Bar
+			ui.Row(c).Shrink(0).Padding(4).Gap(4).Radius(8).Background(pal.InputBg).Border(1, pal.Border).Children(func() {
+				tabs := []struct {
+					tab   settingsTab
+					label string
+				}{
+					{settingsTabGeneral, i18n.T("settings.tab_general")},
+					{settingsTabDownloads, i18n.T("settings.tab_downloads")},
+					{settingsTabBrowser, i18n.T("settings.tab_browser")},
+					{settingsTabUpdates, i18n.T("settings.tab_updates")},
+				}
+				for _, item := range tabs {
+					if settingsTabButton(c, pal, item.label, a.activeSettingsTab == item.tab) {
+						a.activeSettingsTab = item.tab
+					}
+				}
+			})
+
 			ui.Divider(c)
 
-			// Language (takes effect immediately)
-			ui.Column(c).Gap(6).Children(func() {
-				ui.Text(c, i18n.T("lang.label")).FontSize(12).FontWeight(600).TextColor(pal.TextSecondary)
-				ui.Row(c).Gap(8).Children(func() {
-					if segmentOption(c, pal, i18n.T("lang.vi"), a.language == i18n.LangVI) {
-						a.SetLanguage(i18n.LangVI)
-					}
-					if segmentOption(c, pal, i18n.T("lang.en"), a.language == i18n.LangEN) {
-						a.SetLanguage(i18n.LangEN)
-					}
-				})
-			})
-
-			// Download Directory
-			ui.Column(c).Gap(6).Children(func() {
-				ui.Text(c, i18n.T("settings.download_dir")).FontSize(12).FontWeight(600).TextColor(pal.TextSecondary)
-				ui.TextInput(c, &a.settingDownloadDir).
-					Background(pal.InputBg).
-					Border(1, pal.Border).
-					Radius(7)
-			})
-
-			// Max Concurrent Downloads
-			ui.Column(c).Gap(6).Children(func() {
-				ui.Text(c, i18n.T("settings.max_concurrent")).FontSize(12).FontWeight(600).TextColor(pal.TextSecondary)
-				ui.Row(c).Gap(8).Children(func() {
-					for _, n := range []int{1, 2, 3, 5, 8} {
-						if segmentOption(c, pal, fmt.Sprintf("%d", n), a.settingMaxConcurrent == n) {
-							a.settingMaxConcurrent = n
-						}
+			// Scrollable Tab Content Area (clipped within modal viewport)
+			ui.Scroll(c).Fill().Grow(1).Clip().Children(func() {
+				ui.Column(c).Fill().Gap(14).Padding(2, 6, 4, 0).Children(func() {
+					switch a.activeSettingsTab {
+					case settingsTabDownloads:
+						a.renderSettingsDownloadsTab(c, pal)
+					case settingsTabBrowser:
+						a.renderSettingsBrowserTab(c, pal)
+					case settingsTabUpdates:
+						a.renderSettingsUpdatesTab(c, pal)
+					default:
+						a.renderSettingsGeneralTab(c, pal)
 					}
 				})
 			})
-
-			// Default Segments
-			ui.Column(c).Gap(6).Children(func() {
-				ui.Text(c, i18n.T("settings.default_segments")).FontSize(12).FontWeight(600).TextColor(pal.TextSecondary)
-				ui.Row(c).Gap(8).Children(func() {
-					for _, seg := range []int{4, 8, 16} {
-						if segmentOption(c, pal, i18n.Tf("add.connections", seg), a.settingSegments == seg) {
-							a.settingSegments = seg
-						}
-					}
-				})
-			})
-
-			// Reliability & throughput limits
-			ui.Row(c).Gap(16).Children(func() {
-				ui.Column(c).Gap(6).Grow(1).Children(func() {
-					ui.Text(c, i18n.T("settings.max_retries")).FontSize(12).FontWeight(600).TextColor(pal.TextSecondary)
-					ui.TextInput(c, &a.settingMaxRetries).
-						Background(pal.InputBg).
-						Border(1, pal.Border).
-						Radius(7)
-					ui.Text(c, i18n.T("settings.max_retries_hint")).FontSize(10).TextColor(pal.TextMuted)
-				})
-				ui.Column(c).Gap(6).Grow(1).Children(func() {
-					ui.Text(c, i18n.T("settings.speed_limit")).FontSize(12).FontWeight(600).TextColor(pal.TextSecondary)
-					ui.TextInput(c, &a.settingSpeedLimit).
-						Background(pal.InputBg).
-						Border(1, pal.Border).
-						Radius(7)
-					ui.Text(c, i18n.T("settings.speed_limit_hint")).FontSize(10).TextColor(pal.TextMuted)
-				})
-			})
-
-			// Auto-Categorize toggle
-			ui.Column(c).Gap(6).Children(func() {
-				ui.Text(c, i18n.T("settings.auto_categorize")).FontSize(12).FontWeight(600).TextColor(pal.TextSecondary)
-				ui.Row(c).Gap(8).Children(func() {
-					if segmentOption(c, pal, i18n.T("settings.auto_categorize_on"), a.settingAutoCategorize) {
-						a.settingAutoCategorize = true
-					}
-					if segmentOption(c, pal, i18n.T("settings.disabled"), !a.settingAutoCategorize) {
-						a.settingAutoCategorize = false
-					}
-				})
-			})
-
-			// Windows Startup & System Tray
-			ui.Row(c).Gap(16).Children(func() {
-				ui.Column(c).Gap(6).Grow(1).Children(func() {
-					ui.Text(c, i18n.T("settings.launch_startup")).FontSize(12).FontWeight(600).TextColor(pal.TextSecondary)
-					ui.Row(c).Gap(6).Children(func() {
-						if segmentOption(c, pal, i18n.T("settings.enabled"), a.settingLaunchAtStartup) {
-							a.settingLaunchAtStartup = true
-						}
-						if segmentOption(c, pal, i18n.T("settings.disabled"), !a.settingLaunchAtStartup) {
-							a.settingLaunchAtStartup = false
-						}
-					})
-				})
-				ui.Column(c).Gap(6).Grow(1).Children(func() {
-					ui.Text(c, i18n.T("settings.appearance")).FontSize(12).FontWeight(600).TextColor(pal.TextSecondary)
-					ui.Row(c).Gap(6).Children(func() {
-						if segmentOption(c, pal, i18n.T("settings.dark"), a.darkMode) {
-							a.darkMode = true
-						}
-						if segmentOption(c, pal, i18n.T("settings.light"), !a.darkMode) {
-							a.darkMode = false
-						}
-					})
-				})
-			})
-
-			ui.Row(c).Gap(16).Children(func() {
-				ui.Column(c).Gap(6).Grow(1).Children(func() {
-					ui.Text(c, i18n.T("settings.close_behavior")).FontSize(12).FontWeight(600).TextColor(pal.TextSecondary)
-					ui.Row(c).Gap(6).Children(func() {
-						if segmentOption(c, pal, i18n.T("settings.hide_to_tray"), a.settingCloseToTray) {
-							a.settingCloseToTray = true
-						}
-						if segmentOption(c, pal, i18n.T("settings.exit_app"), !a.settingCloseToTray) {
-							a.settingCloseToTray = false
-						}
-					})
-				})
-				ui.Column(c).Gap(6).Grow(1).Children(func() {
-					ui.Text(c, i18n.T("settings.minimize_behavior")).FontSize(12).FontWeight(600).TextColor(pal.TextSecondary)
-					ui.Row(c).Gap(6).Children(func() {
-						if segmentOption(c, pal, i18n.T("settings.hide_to_tray"), a.settingMinimizeToTray) {
-							a.settingMinimizeToTray = true
-						}
-						if segmentOption(c, pal, i18n.T("settings.taskbar"), !a.settingMinimizeToTray) {
-							a.settingMinimizeToTray = false
-						}
-					})
-				})
-			})
-
-			// Native Messaging & IPC Status Info Card
-			ipcPort := ipc.DefaultPort
-			if a.ipcServer != nil {
-				ipcPort = a.ipcServer.Port()
-			}
-			ui.Row(c).Padding(10, 12).Radius(8).Background(pal.InputBg).Border(1, pal.Border).AlignItems(ui.Center).Justify(ui.SpaceBetween).Children(func() {
-				ui.Column(c).Gap(2).Children(func() {
-					ui.Text(c, i18n.T("settings.native_title")).FontSize(12).FontWeight(600).TextColor(pal.TextPrimary)
-					regState := i18n.T("settings.native_not_registered")
-					if a.nativeStatus.IsReady() {
-						regState = i18n.T("settings.native_registered")
-					}
-					ui.Text(c, fmt.Sprintf("%s  •  IPC 127.0.0.1:%d", regState, ipcPort)).FontSize(11).FontFeatures("tnum").TextColor(pal.TextMuted)
-				})
-				ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
-					regLabel := i18n.T("settings.native_register")
-					if a.nativeStatus.IsReady() {
-						regLabel = i18n.T("settings.native_reregister")
-					}
-					if toolbarButton(c, pal, nil, regLabel, false, false) {
-						a.registerNativeMessaging()
-					}
-				})
-			})
-			if a.nativeRegMsg != "" {
-				ui.Text(c, a.nativeRegMsg).FontSize(11).TextColor(pal.Accent)
-			}
-
-			// Browser Integration card (Chrome / Edge / Chromium)
-			a.renderBrowserIntegrationSection(c, pal)
-
-			// Software Updates card
-			a.renderUpdateCard(c, pal)
 
 			if a.settingsError != "" {
-				ui.Row(c).Padding(8, 10).Radius(6).Background(pal.DangerSoft).Gap(6).AlignItems(ui.Center).Children(func() {
-					ui.Icon(c, iconAlert).Width(14).Height(14).TextColor(pal.Danger)
+				ui.Row(c).Shrink(0).Padding(8, 10).Radius(6).Background(pal.DangerSoft).Gap(6).AlignItems(ui.Center).Children(func() {
+					ui.Icon(c, iconAlert).Width(14).Height(14).TextColor(pal.Danger).Shrink(0)
 					ui.Text(c, a.settingsError).FontSize(12).TextColor(pal.Danger)
 				})
 			}
 
 			ui.Divider(c)
 
-			ui.Row(c).Gap(8).Children(func() {
-				if toolbarButton(c, pal, nil, i18n.T("settings.welcome_setup"), false, false) {
-					a.OpenOnboardingModal()
-				}
+			// Fixed Footer
+			ui.Row(c).Shrink(0).Gap(8).AlignItems(ui.Center).Children(func() {
 				ui.Spacer(c)
 				if toolbarButton(c, pal, nil, i18n.T("settings.cancel"), false, false) {
 					a.showSettingsModal = false
@@ -1584,6 +1475,201 @@ func (a *App) renderSettingsModal(c *ui.Context, pal Palette) {
 			})
 		})
 	})
+}
+
+func (a *App) renderSettingsGeneralTab(c *ui.Context, pal Palette) {
+	// Language & Appearance (short labels fit comfortably in 2 columns)
+	ui.Row(c).Gap(16).Children(func() {
+		ui.Column(c).Gap(6).Grow(1).Children(func() {
+			ui.Text(c, i18n.T("lang.label")).FontSize(12).FontWeight(600).TextColor(pal.TextSecondary)
+			ui.Row(c).Gap(8).Children(func() {
+				if segmentOption(c, pal, i18n.T("lang.vi"), a.language == i18n.LangVI) {
+					a.SetLanguage(i18n.LangVI)
+				}
+				if segmentOption(c, pal, i18n.T("lang.en"), a.language == i18n.LangEN) {
+					a.SetLanguage(i18n.LangEN)
+				}
+			})
+		})
+		ui.Column(c).Gap(6).Grow(1).Children(func() {
+			ui.Text(c, i18n.T("settings.appearance")).FontSize(12).FontWeight(600).TextColor(pal.TextSecondary)
+			ui.Row(c).Gap(8).Children(func() {
+				if segmentOption(c, pal, i18n.T("settings.dark"), a.darkMode) {
+					a.darkMode = true
+				}
+				if segmentOption(c, pal, i18n.T("settings.light"), !a.darkMode) {
+					a.darkMode = false
+				}
+			})
+		})
+	})
+
+	// Launch at Windows Startup
+	ui.Column(c).Gap(6).Children(func() {
+		ui.Text(c, i18n.T("settings.launch_startup")).FontSize(12).FontWeight(600).TextColor(pal.TextSecondary)
+		ui.Row(c).Gap(8).Children(func() {
+			if segmentOption(c, pal, i18n.T("settings.enabled"), a.settingLaunchAtStartup) {
+				a.settingLaunchAtStartup = true
+			}
+			if segmentOption(c, pal, i18n.T("settings.disabled"), !a.settingLaunchAtStartup) {
+				a.settingLaunchAtStartup = false
+			}
+		})
+	})
+
+	// Close Button (X) Behavior (full-width row so labels never truncate)
+	ui.Column(c).Gap(6).Children(func() {
+		ui.Text(c, i18n.T("settings.close_behavior")).FontSize(12).FontWeight(600).TextColor(pal.TextSecondary)
+		ui.Row(c).Gap(8).Children(func() {
+			if segmentOption(c, pal, i18n.T("settings.hide_to_tray"), a.settingCloseToTray) {
+				a.settingCloseToTray = true
+			}
+			if segmentOption(c, pal, i18n.T("settings.exit_app"), !a.settingCloseToTray) {
+				a.settingCloseToTray = false
+			}
+		})
+	})
+
+	// Minimize Button Behavior (full-width row so labels never truncate)
+	ui.Column(c).Gap(6).Children(func() {
+		ui.Text(c, i18n.T("settings.minimize_behavior")).FontSize(12).FontWeight(600).TextColor(pal.TextSecondary)
+		ui.Row(c).Gap(8).Children(func() {
+			if segmentOption(c, pal, i18n.T("settings.hide_to_tray"), a.settingMinimizeToTray) {
+				a.settingMinimizeToTray = true
+			}
+			if segmentOption(c, pal, i18n.T("settings.taskbar"), !a.settingMinimizeToTray) {
+				a.settingMinimizeToTray = false
+			}
+		})
+	})
+
+	// Welcome Setup quick re-launch card
+	ui.Row(c).Padding(10, 12).Radius(8).Background(pal.InputBg).Border(1, pal.Border).Gap(12).AlignItems(ui.Center).Justify(ui.SpaceBetween).Children(func() {
+		ui.Column(c).Gap(2).Grow(1).Children(func() {
+			ui.Text(c, i18n.T("settings.welcome_setup")).FontSize(12).FontWeight(600).TextColor(pal.TextPrimary)
+			ui.Text(c, i18n.T("settings.welcome_setup_sub")).FontSize(11).TextColor(pal.TextMuted)
+		})
+		if toolbarButton(c, pal, nil, i18n.T("settings.welcome_setup"), false, false) {
+			a.OpenOnboardingModal()
+		}
+	})
+}
+
+func (a *App) renderSettingsDownloadsTab(c *ui.Context, pal Palette) {
+	// Download Directory
+	ui.Column(c).Gap(6).Children(func() {
+		ui.Text(c, i18n.T("settings.download_dir")).FontSize(12).FontWeight(600).TextColor(pal.TextSecondary)
+		ui.TextInput(c, &a.settingDownloadDir).
+			Background(pal.InputBg).
+			Border(1, pal.Border).
+			Radius(7)
+	})
+
+	// Auto-Categorize toggle
+	ui.Column(c).Gap(6).Children(func() {
+		ui.Text(c, i18n.T("settings.auto_categorize")).FontSize(12).FontWeight(600).TextColor(pal.TextSecondary)
+		ui.Row(c).Gap(8).Children(func() {
+			if segmentOption(c, pal, i18n.T("settings.auto_categorize_on"), a.settingAutoCategorize) {
+				a.settingAutoCategorize = true
+			}
+			if segmentOption(c, pal, i18n.T("settings.disabled"), !a.settingAutoCategorize) {
+				a.settingAutoCategorize = false
+			}
+		})
+	})
+
+	// Max Concurrent Downloads
+	ui.Column(c).Gap(6).Children(func() {
+		ui.Text(c, i18n.T("settings.max_concurrent")).FontSize(12).FontWeight(600).TextColor(pal.TextSecondary)
+		ui.Row(c).Gap(8).Children(func() {
+			for _, n := range []int{1, 2, 3, 5, 8} {
+				if segmentOption(c, pal, fmt.Sprintf("%d", n), a.settingMaxConcurrent == n) {
+					a.settingMaxConcurrent = n
+				}
+			}
+		})
+	})
+
+	// Default Segments
+	ui.Column(c).Gap(6).Children(func() {
+		ui.Text(c, i18n.T("settings.default_segments")).FontSize(12).FontWeight(600).TextColor(pal.TextSecondary)
+		ui.Row(c).Gap(8).Children(func() {
+			for _, seg := range []int{4, 8, 16} {
+				if segmentOption(c, pal, i18n.Tf("add.connections", seg), a.settingSegments == seg) {
+					a.settingSegments = seg
+				}
+			}
+		})
+	})
+
+	// Reliability & throughput limits
+	ui.Row(c).Gap(16).Children(func() {
+		ui.Column(c).Gap(6).Grow(1).Children(func() {
+			ui.Text(c, i18n.T("settings.max_retries")).FontSize(12).FontWeight(600).TextColor(pal.TextSecondary)
+			ui.TextInput(c, &a.settingMaxRetries).
+				Background(pal.InputBg).
+				Border(1, pal.Border).
+				Radius(7)
+			ui.Text(c, i18n.T("settings.max_retries_hint")).FontSize(10).TextColor(pal.TextMuted)
+		})
+		ui.Column(c).Gap(6).Grow(1).Children(func() {
+			ui.Text(c, i18n.T("settings.speed_limit")).FontSize(12).FontWeight(600).TextColor(pal.TextSecondary)
+			ui.TextInput(c, &a.settingSpeedLimit).
+				Background(pal.InputBg).
+				Border(1, pal.Border).
+				Radius(7)
+			ui.Text(c, i18n.T("settings.speed_limit_hint")).FontSize(10).TextColor(pal.TextMuted)
+		})
+	})
+}
+
+func (a *App) renderSettingsBrowserTab(c *ui.Context, pal Palette) {
+	// Native Messaging & IPC Status Info Card
+	ipcPort := ipc.DefaultPort
+	if a.ipcServer != nil {
+		ipcPort = a.ipcServer.Port()
+	}
+	ui.Row(c).Padding(10, 12).Radius(8).Background(pal.InputBg).Border(1, pal.Border).Gap(10).AlignItems(ui.Center).Justify(ui.SpaceBetween).Children(func() {
+		ui.Column(c).Gap(2).Grow(1).Children(func() {
+			ui.Text(c, i18n.T("settings.native_title")).FontSize(12).FontWeight(600).TextColor(pal.TextPrimary)
+			regState := i18n.T("settings.native_not_registered")
+			if a.nativeStatus.IsReady() {
+				regState = i18n.T("settings.native_registered")
+			}
+			ui.Text(c, fmt.Sprintf("%s  •  IPC 127.0.0.1:%d", regState, ipcPort)).FontSize(11).FontFeatures("tnum").TextColor(pal.TextMuted)
+		})
+		regLabel := i18n.T("settings.native_register")
+		if a.nativeStatus.IsReady() {
+			regLabel = i18n.T("settings.native_reregister")
+		}
+		if toolbarButton(c, pal, nil, regLabel, false, false) {
+			a.registerNativeMessaging()
+		}
+	})
+	if a.nativeRegMsg != "" {
+		ui.Text(c, a.nativeRegMsg).FontSize(11).TextColor(pal.Accent)
+	}
+
+	// Browser Integration card (Chrome / Edge / Dia / Chromium)
+	a.renderBrowserIntegrationSection(c, pal)
+}
+
+func (a *App) renderSettingsUpdatesTab(c *ui.Context, pal Palette) {
+	// Auto-check on startup toggle
+	ui.Column(c).Gap(6).Children(func() {
+		ui.Text(c, i18n.T("update.auto_check_sub")).FontSize(12).FontWeight(600).TextColor(pal.TextSecondary)
+		ui.Row(c).Gap(8).Children(func() {
+			if segmentOption(c, pal, i18n.T("update.auto"), a.settingAutoCheckUpdates) {
+				a.settingAutoCheckUpdates = true
+			}
+			if segmentOption(c, pal, i18n.T("update.manual"), !a.settingAutoCheckUpdates) {
+				a.settingAutoCheckUpdates = false
+			}
+		})
+	})
+
+	// Software Updates status & action card
+	a.renderUpdateCard(c, pal)
 }
 
 func (a *App) registerNativeMessaging() {
@@ -1775,45 +1861,35 @@ func (a *App) renderUpdateCard(c *ui.Context, pal Palette) {
 	total := a.updateTotal
 	a.updateMu.Unlock()
 
-	ui.Column(c).Padding(10, 12).Radius(8).Background(pal.InputBg).Border(1, pal.Border).Gap(8).Children(func() {
-		ui.Row(c).AlignItems(ui.Center).Justify(ui.SpaceBetween).Children(func() {
-			ui.Column(c).Gap(2).Children(func() {
-				ui.Text(c, i18n.Tf("update.title", version.DisplayVersion())).FontSize(12).FontWeight(600).TextColor(pal.TextPrimary)
-				ui.Text(c, i18n.T("update.auto_check_sub")).FontSize(11).TextColor(pal.TextMuted)
-			})
-			ui.Row(c).Gap(6).AlignItems(ui.Center).Children(func() {
-				if segmentOption(c, pal, i18n.T("update.auto"), a.settingAutoCheckUpdates) {
-					a.settingAutoCheckUpdates = true
-				}
-				if segmentOption(c, pal, i18n.T("update.manual"), !a.settingAutoCheckUpdates) {
-					a.settingAutoCheckUpdates = false
-				}
-				checkLabel := i18n.T("update.check_btn")
-				if status == "checking" {
-					checkLabel = i18n.T("update.checking_btn")
-				}
-				if toolbarButton(c, pal, nil, checkLabel, false, status == "checking" || status == "downloading" || status == "applying") {
-					a.triggerUpdateCheck()
+	ui.Column(c).Padding(12, 14).Radius(8).Background(pal.InputBg).Border(1, pal.Border).Gap(10).Children(func() {
+		ui.Row(c).AlignItems(ui.Center).Justify(ui.SpaceBetween).Gap(12).Children(func() {
+			ui.Column(c).Gap(2).Grow(1).Children(func() {
+				ui.Text(c, i18n.Tf("update.title", version.DisplayVersion())).FontSize(13).FontWeight(600).TextColor(pal.TextPrimary)
+				if msg != "" {
+					msgColor := pal.TextSecondary
+					if status == "error" {
+						msgColor = pal.Danger
+					} else if status == "available" || status == "applying" {
+						msgColor = pal.Accent
+					}
+					ui.Text(c, msg).FontSize(11).TextColor(msgColor)
 				}
 			})
-		})
-
-		if msg != "" {
-			msgColor := pal.TextSecondary
-			if status == "error" {
-				msgColor = pal.Danger
-			} else if status == "available" || status == "applying" {
-				msgColor = pal.Accent
+			checkLabel := i18n.T("update.check_btn")
+			if status == "checking" {
+				checkLabel = i18n.T("update.checking_btn")
 			}
-			ui.Text(c, msg).FontSize(11).TextColor(msgColor)
-		}
+			if toolbarButton(c, pal, iconRefresh, checkLabel, status == "checking" || status == "downloading" || status == "applying", false) {
+				a.triggerUpdateCheck()
+			}
+		})
 
 		if status == "available" && rel != nil {
 			if summary := summarizeReleaseNotes(rel.Body); summary != "" {
 				ui.Text(c, summary).FontSize(11).TextColor(pal.TextMuted)
 			}
 			ui.Row(c).AlignItems(ui.Center).Justify(ui.SpaceBetween).Gap(8).Children(func() {
-				ui.Text(c, i18n.T("update.restart_hint")).FontSize(10).TextColor(pal.TextMuted)
+				ui.Text(c, i18n.T("update.restart_hint")).FontSize(11).TextColor(pal.TextMuted)
 				if primaryCTA(c, pal, iconDownload, i18n.T("update.download_install")) {
 					a.triggerDownloadAndInstall()
 				}
@@ -1828,20 +1904,16 @@ func (a *App) renderUpdateCard(c *ui.Context, pal Palette) {
 					pct = 1
 				}
 			}
-			ui.Row(c).Height(6).Radius(3).Background(pal.Border).Children(func() {
-				barW := int(pct * 460)
-				if barW < 4 && downloaded > 0 {
-					barW = 4
-				}
-				if barW > 0 {
-					ui.Row(c).Width(float32(barW)).Height(6).Radius(3).Background(pal.Accent)
-				}
-			})
+			ui.Progress(c, pct).
+				Height(6).
+				Radius(999).
+				Background(pal.TrackBg).
+				TextColor(pal.Accent)
 			progressLabel := i18n.Tf("update.progress", FormatBytes(downloaded))
 			if total > 0 {
 				progressLabel = i18n.Tf("update.progress_total", FormatBytes(downloaded), FormatBytes(total), pct*100)
 			}
-			ui.Text(c, progressLabel).FontSize(10).FontFeatures("tnum").TextColor(pal.TextMuted)
+			ui.Text(c, progressLabel).FontSize(11).FontFeatures("tnum").TextColor(pal.TextMuted)
 		}
 	})
 }
@@ -1849,6 +1921,7 @@ func (a *App) renderUpdateCard(c *ui.Context, pal Palette) {
 func (a *App) saveSettings() {
 	dir := strings.TrimSpace(a.settingDownloadDir)
 	if dir == "" {
+		a.activeSettingsTab = settingsTabDownloads
 		a.settingsError = i18n.T("settings.err_empty_dir")
 		return
 	}
@@ -1862,6 +1935,7 @@ func (a *App) saveSettings() {
 	}
 	retries, err := strconv.Atoi(strings.TrimSpace(a.settingMaxRetries))
 	if err != nil || retries < 0 {
+		a.activeSettingsTab = settingsTabDownloads
 		a.settingsError = i18n.T("settings.err_retries")
 		return
 	}
@@ -1870,6 +1944,7 @@ func (a *App) saveSettings() {
 	}
 	speedKBps, err := strconv.ParseInt(strings.TrimSpace(a.settingSpeedLimit), 10, 64)
 	if err != nil || speedKBps < 0 {
+		a.activeSettingsTab = settingsTabDownloads
 		a.settingsError = i18n.T("settings.err_speed_limit")
 		return
 	}
@@ -1879,6 +1954,7 @@ func (a *App) saveSettings() {
 
 	if a.autostartSetter != nil {
 		if err := a.autostartSetter(a.settingLaunchAtStartup); err != nil {
+			a.activeSettingsTab = settingsTabGeneral
 			a.settingsError = i18n.Tf("settings.err_startup", err.Error())
 			return
 		}

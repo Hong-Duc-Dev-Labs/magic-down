@@ -170,29 +170,33 @@ func (a *App) renderBrowserIntegrationSection(c *ui.Context, pal Palette) {
 				hostLabel = i18n.T("browser.host_ok")
 			}
 
-			ui.Column(c).Gap(6).Padding(8, 10).Radius(6).Background(pal.Canvas).Border(1, pal.Border).Children(func() {
+			ui.Column(c).Gap(8).Padding(10, 12).Radius(7).Background(pal.Canvas).Border(1, pal.Border).Children(func() {
 				ui.Row(c).AlignItems(ui.Center).Justify(ui.SpaceBetween).Gap(8).Children(func() {
-					ui.Column(c).Gap(2).Children(func() {
-						ui.Text(c, title).FontSize(12).FontWeight(600).TextColor(pal.TextPrimary)
-						ui.Text(c, fmt.Sprintf("%s  •  %s", hostLabel, label)).FontSize(11).TextColor(badgeColor)
+					ui.Column(c).Gap(2).Grow(1).Children(func() {
+						ui.Text(c, title).FontSize(12).FontWeight(600).TextColor(pal.TextPrimary).SingleLine().Ellipsis("...")
+						ui.Text(c, hostLabel).FontSize(11).TextColor(pal.TextMuted).SingleLine()
 					})
-					ui.Row(c).Gap(6).AlignItems(ui.Center).Children(func() {
-						if curSt.Browser.Family == nativemessaging.BrowserFamilyChromium {
-							if toolbarButton(c, pal, nil, i18n.T("browser.btn_install"), false, false) {
-								a.installExtensionForBrowser(c, curSt)
-							}
-							if toolbarButton(c, pal, nil, i18n.T("browser.btn_reconnect"), false, false) {
-								a.reconnectBrowser(curSt)
-							}
-						}
-						if toolbarButton(c, pal, nil, i18n.T("browser.btn_troubleshoot"), false, a.troubleshootBrowserID == curSt.Browser.ID) {
-							if a.troubleshootBrowserID == curSt.Browser.ID {
-								a.troubleshootBrowserID = ""
-							} else {
-								a.troubleshootBrowserID = curSt.Browser.ID
-							}
-						}
+					ui.Box(c).Padding(2, 8).Radius(999).Background(pal.BadgeBg).Shrink(0).Children(func() {
+						ui.Text(c, label).FontSize(11).FontWeight(600).TextColor(badgeColor).SingleLine()
 					})
+				})
+
+				ui.Row(c).Gap(6).AlignItems(ui.Center).Children(func() {
+					if curSt.Browser.Family == nativemessaging.BrowserFamilyChromium {
+						if toolbarButton(c, pal, nil, i18n.T("browser.btn_install"), false, false) {
+							a.installExtensionForBrowser(c, curSt)
+						}
+						if toolbarButton(c, pal, nil, i18n.T("browser.btn_reconnect"), false, false) {
+							a.reconnectBrowser(curSt)
+						}
+					}
+					if toolbarButton(c, pal, nil, i18n.T("browser.btn_troubleshoot"), false, a.troubleshootBrowserID == curSt.Browser.ID) {
+						if a.troubleshootBrowserID == curSt.Browser.ID {
+							a.troubleshootBrowserID = ""
+						} else {
+							a.troubleshootBrowserID = curSt.Browser.ID
+						}
+					}
 				})
 
 				if a.installGuideBrowserID == curSt.Browser.ID && curSt.State != nativemessaging.StateConnected {

@@ -111,6 +111,7 @@ func toolbarButton(c *ui.Context, pal Palette, icon *ui.SVG, label string, disab
 		Gap(6).
 		Radius(7).
 		AlignItems(ui.Center).
+		Shrink(0).
 		Border(1, pal.Border).
 		Disabled(disabled)
 
@@ -153,6 +154,7 @@ func primaryCTA(c *ui.Context, pal Palette, icon *ui.SVG, label string) bool {
 		Gap(6).
 		Radius(7).
 		AlignItems(ui.Center).
+		Shrink(0).
 		Cursor(ui.CursorPointer).
 		Focusable()
 
@@ -226,6 +228,7 @@ func segmentOption(c *ui.Context, pal Palette, label string, active bool) bool {
 		Padding(6, 14).
 		Radius(6).
 		Center().
+		Shrink(0).
 		Cursor(ui.CursorPointer).
 		Focusable()
 
@@ -238,6 +241,39 @@ func segmentOption(c *ui.Context, pal Palette, label string, active bool) bool {
 		border = pal.Accent
 	} else if btn.Hovered() {
 		bg = pal.CardHover
+		fg = pal.TextPrimary
+	}
+
+	btn.Background(bg).Border(1, border).Children(func() {
+		t := ui.Text(c, label).FontSize(12).TextColor(fg).SingleLine()
+		if active {
+			t.FontWeight(600)
+		} else {
+			t.FontWeight(500)
+		}
+	})
+	return btn.Clicked()
+}
+
+// settingsTabButton renders a horizontal tab pill inside the Settings modal tab bar.
+func settingsTabButton(c *ui.Context, pal Palette, label string, active bool) bool {
+	btn := ui.Row(c).
+		Grow(1).
+		Padding(7, 10).
+		Radius(6).
+		Center().
+		Cursor(ui.CursorPointer).
+		Focusable()
+
+	bg := ui.Transparent
+	fg := pal.TextSecondary
+	border := ui.Transparent
+	if active {
+		bg = pal.AccentSoft
+		fg = pal.Accent
+		border = pal.Accent
+	} else if btn.Hovered() {
+		bg = pal.NavHover
 		fg = pal.TextPrimary
 	}
 
