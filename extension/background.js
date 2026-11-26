@@ -38,6 +38,7 @@ const MAX_BATCH_SCANS = 10;
 // - handledDownloadIds prevents duplicate interception / infinite loops.
 // - pendingDownloads preserves click-time Alt-bypass & referrer between onCreated and onDeterminingFilename.
 const handledDownloadIds = new Set();
+const fallbackDownloadIds = new Set();
 const MAX_HANDLED_DOWNLOAD_IDS = 500;
 const pendingDownloads = new Map();
 const MAX_PENDING_DOWNLOADS = 200;
@@ -1258,7 +1259,15 @@ function trackHandledDownloadId(id) {
   }
 }
 
-const ON_CREATED_FALLBACK_DELAY_MS = 250;
+function trackFallbackDownloadId(id) {
+  if (id === undefined || id === null) return;
+  fallbackDownloadIds.add(id);
+  while (fallbackDownloadIds.size > MAX_HANDLED_DOWNLOAD_IDS) {
+    fallbackDownloadIds.delete(fallbackDownloadIds.keys().next().value);
+  }
+}
+
+const ON_CREATED_FALLBACK_DELAY_MS = 3000;
 
 function clearPendingDownload(id) {
   if (id === undefined || id === null) return null;
@@ -1315,7 +1324,12 @@ async function handleDownloadInterception(downloadItem, deps = {}) {
   const downloadId = downloadItem.id;
   if (downloadId !== undefined && downloadId !== null && handledDownloadIds.has(downloadId)) {
     clearPendingDownload(downloadId);
-    safeSuggest();
+    // Only settle suggest() if the earlier attempt fell back to the browser;
+    // never call suggest() for an already-intercepted/in-flight download so
+    // Chrome does not open its "Save As" dialog.
+    if (fallbackDownloadIds.has(downloadId)) {
+      safeSuggest();
+    }
     return { intercepted: false, reason: "already_handled" };
   }
 
@@ -1401,12 +1415,16 @@ async function handleDownloadInterception(downloadItem, deps = {}) {
         // ignore
       }
     }
-    safeSuggest();
+    // Intentionally do NOT call safeSuggest() after cancel():
+    // onDeterminingFilename returned true to hold Chrome before opening its
+    // "Save As" dialog; cancelling while held aborts the browser download
+    // cleanly without ever showing Save As.
     return { intercepted: true, response: resp };
   }
 
   // Fail-safe: MagicDown Desktop is offline or Native Messaging failed.
   // Never drop the user's download — let the browser continue seamlessly.
+  trackFallbackDownloadId(downloadId);
   if (paused && downloadsApi && typeof downloadsApi.resume === "function" && downloadId !== undefined) {
     try {
       await downloadsApi.resume(downloadId);
@@ -1444,7 +1462,11 @@ function onDownloadCreated(downloadItem, deps = {}) {
             // fall back to original onCreated downloadItem
           }
         }
-        if (handledDownloadIds.has(downloadItem.id)) {
+        if (handledDownloadIds.has(downloadItem.id) || !pendingDownloads.has(downloadItem.id)) {
+          return;
+        }
+        if (latestItem.state === "complete" || latestItem.state === "interrupted") {
+          clearPendingDownload(downloadItem.id);
           return;
         }
         await handleDownloadInterception(latestItem, deps);
@@ -1481,6 +1503,7 @@ if (typeof chrome !== "undefined" && chrome.downloads) {
       if (state === "complete" || state === "interrupted") {
         clearPendingDownload(delta.id);
         handledDownloadIds.delete(delta.id);
+        fallbackDownloadIds.delete(delta.id);
       }
     });
   }
@@ -1801,7 +1824,9 @@ if (typeof module !== "undefined" && module.exports) {
     clearDownloadBypass,
     handleDownloadInterception,
     onDownloadCreated,
+    ON_CREATED_FALLBACK_DELAY_MS,
     handledDownloadIds,
+    fallbackDownloadIds,
     pendingDownloads,
     tabVideos,
     tabFbAudios

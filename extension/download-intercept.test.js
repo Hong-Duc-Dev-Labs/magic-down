@@ -15,14 +15,17 @@ const {
   clearDownloadBypass,
   handleDownloadInterception,
   onDownloadCreated,
+  ON_CREATED_FALLBACK_DELAY_MS,
   buildDownloadPayload,
   handledDownloadIds,
+  fallbackDownloadIds,
   pendingDownloads
 } = require("./background.js");
 
 function resetState() {
   clearDownloadBypass();
   handledDownloadIds.clear();
+  fallbackDownloadIds.clear();
   for (const id of Array.from(pendingDownloads.keys())) {
     clearPendingDownload(id);
   }
@@ -130,9 +133,10 @@ test("handleDownloadInterception intercepts HTTP/HTTPS downloads with Content-Di
     ["cancel", 101],
     ["erase", 101]
   ]);
-  assert.equal(suggestCount, 1);
+  // suggest() must NOT be called after successful cancel so Chrome never opens Save As.
+  assert.equal(suggestCount, 0);
 
-  // Duplicate event for the same download ID must not re-intercept or loop.
+  // Duplicate event for the same download ID must not re-intercept, loop, or trigger Save As.
   const dup = await handleDownloadInterception(
     {
       id: 101,
@@ -151,7 +155,7 @@ test("handleDownloadInterception intercepts HTTP/HTTPS downloads with Content-Di
   );
   assert.equal(dup.intercepted, false);
   assert.equal(dup.reason, "already_handled");
-  assert.equal(suggestCount, 2);
+  assert.equal(suggestCount, 0);
 });
 
 test("handleDownloadInterception skips blob:, data:, chrome:, edge: URLs without calling native host", async () => {
@@ -461,7 +465,7 @@ test("Google Drive drive.usercontent.google.com/download URL with unknown size (
     ["cancel", 701],
     ["erase", 701]
   ]);
-  assert.equal(suggestCount, 1);
+  assert.equal(suggestCount, 0);
   assert.equal(pendingDownloads.has(701), false);
 });
 
@@ -558,4 +562,151 @@ test("onDownloadCreated fallback timer intercepts Google Drive download if onDet
     ["cancel", 704],
     ["erase", 704]
   ]);
+});
+
+test("sanitizeDownloadFilename preserves extensions (.7z/.zip/.mp4) and valid punctuation (., -, _, ())", () => {
+  assert.equal(
+    sanitizeDownloadFilename("FLAC-.VA-Grand_Theft_Auto_VI_The_Album-OS.7z"),
+    "FLAC-.VA-Grand_Theft_Auto_VI_The_Album-OS.7z"
+  );
+  assert.equal(
+    sanitizeDownloadFilename("Downloads\\FLAC-.VA-Grand_Theft_Auto_VI_The_Album-OS (2026).7z"),
+    "FLAC-.VA-Grand_Theft_Auto_VI_The_Album-OS (2026).7z"
+  );
+  assert.equal(sanitizeDownloadFilename("archive-v1.2_final(1).zip"), "archive-v1.2_final(1).zip");
+  assert.equal(sanitizeDownloadFilename("clip_1080p_(hdr).mp4"), "clip_1080p_(hdr).mp4");
+});
+
+test("Google Drive /download?... with Content-Disposition .7z filename: exact filename forwarded, cancel+erase called, suggest NOT called on success and IS called on fail-safe", async () => {
+  resetState();
+  assert.ok(
+    ON_CREATED_FALLBACK_DELAY_MS >= 2000,
+    `expected ON_CREATED_FALLBACK_DELAY_MS >= 2000ms to avoid racing onDeterminingFilename, got ${ON_CREATED_FALLBACK_DELAY_MS}`
+  );
+
+  const gdriveUrl =
+    "https://drive.usercontent.google.com/download?id=1abcXYZ_GTA6_Album&export=download&authuser=0&confirm=t";
+  const realFilename = "FLAC-.VA-Grand_Theft_Auto_VI_The_Album-OS.7z";
+
+  // Case 1: Intercept succeeds -> MagicDown receives exact .7z filename,
+  // cancel + erase are called, and suggest() is NOT called (blocks Chrome Save As).
+  const forwarded = [];
+  const calls = [];
+  let suggestCount = 0;
+
+  onDownloadCreated(
+    {
+      id: 801,
+      url: gdriveUrl,
+      filename: "",
+      referrer: "https://drive.google.com/",
+      totalBytes: -1,
+      fileSize: -1,
+      state: "in_progress"
+    },
+    {
+      downloadsApi: {
+        onDeterminingFilename: {},
+        search: async () => [
+          {
+            id: 801,
+            url: gdriveUrl,
+            filename: "",
+            state: "in_progress"
+          }
+        ]
+      },
+      getSettings: async () => ({ ...DEFAULT_SETTINGS }),
+      forwardDownload: async () => {
+        throw new Error("onCreated fallback timer must not hijack before onDeterminingFilename");
+      }
+    }
+  );
+
+  // Simulate realistic network/header delay (> old 250ms timer) before onDeterminingFilename fires.
+  await new Promise((resolve) => setTimeout(resolve, 320));
+
+  const successRes = await handleDownloadInterception(
+    {
+      id: 801,
+      url: gdriveUrl,
+      finalUrl: gdriveUrl,
+      filename: realFilename,
+      referrer: "https://drive.google.com/",
+      totalBytes: 524288000,
+      fileSize: 524288000,
+      state: "in_progress"
+    },
+    {
+      getSettings: async () => ({ ...DEFAULT_SETTINGS }),
+      forwardDownload: async (req) => {
+        forwarded.push(req);
+        return { success: true, taskId: "task-gdrive-801", filename: req.filename };
+      },
+      downloadsApi: {
+        pause: async (id) => calls.push(["pause", id]),
+        cancel: async (id) => calls.push(["cancel", id]),
+        erase: async (q) => calls.push(["erase", q.id]),
+        resume: async (id) => calls.push(["resume", id])
+      },
+      suggest: () => {
+        suggestCount++;
+      }
+    }
+  );
+
+  assert.equal(successRes.intercepted, true);
+  assert.equal(forwarded.length, 1);
+  assert.equal(forwarded[0].filename, realFilename);
+  assert.equal(forwarded[0].url, gdriveUrl);
+  assert.deepEqual(calls, [
+    ["pause", 801],
+    ["cancel", 801],
+    ["erase", 801]
+  ]);
+  assert.equal(suggestCount, 0, "suggest() must NOT be called when interception succeeds so Save As never opens");
+  assert.equal(pendingDownloads.has(801), false);
+
+  // Case 2: Fail-safe fallback when MagicDown is offline/rejects ->
+  // browser download is resumed and suggest() IS called so Chrome proceeds normally.
+  const fallbackCalls = [];
+  let fallbackSuggestCount = 0;
+
+  const fallbackRes = await handleDownloadInterception(
+    {
+      id: 802,
+      url: gdriveUrl,
+      finalUrl: gdriveUrl,
+      filename: realFilename,
+      referrer: "https://drive.google.com/",
+      totalBytes: 524288000,
+      fileSize: 524288000,
+      state: "in_progress"
+    },
+    {
+      getSettings: async () => ({ ...DEFAULT_SETTINGS }),
+      forwardDownload: async () => ({
+        success: false,
+        hostError: true,
+        error: "MagicDown desktop app is not running"
+      }),
+      downloadsApi: {
+        pause: async (id) => fallbackCalls.push(["pause", id]),
+        cancel: async (id) => fallbackCalls.push(["cancel", id]),
+        erase: async (q) => fallbackCalls.push(["erase", q.id]),
+        resume: async (id) => fallbackCalls.push(["resume", id])
+      },
+      suggest: () => {
+        fallbackSuggestCount++;
+      }
+    }
+  );
+
+  assert.equal(fallbackRes.intercepted, false);
+  assert.equal(fallbackRes.reason, "host_error");
+  assert.deepEqual(fallbackCalls, [
+    ["pause", 802],
+    ["resume", 802]
+  ]);
+  assert.equal(fallbackSuggestCount, 1, "suggest() must be called on fail-safe fallback");
 });
