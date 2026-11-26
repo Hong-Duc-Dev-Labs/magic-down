@@ -1,5 +1,7 @@
 # MagicDown
 
+**English** | [Tiếng Việt](README.vi.md)
+
 A fast, IDM-inspired desktop download manager for Windows built in pure Go with **MyGo Native UI** (GPU-rendered, zero webview) and a **Manifest V3 Chromium Browser Extension** connected via Native Messaging with real-time `HELLO/WELCOME` handshake verification.
 
 ---
