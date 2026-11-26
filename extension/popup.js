@@ -23,6 +23,7 @@ const isExtensionEnv = typeof chrome !== "undefined" && Boolean(chrome.runtime &
 
 const els = {
   root: document.documentElement,
+  brandVersion: document.getElementById("brandVersion"),
   statusPill: document.getElementById("statusPill"),
   statusText: document.getElementById("statusText"),
   langToggleBtn: document.getElementById("langToggleBtn"),
@@ -78,9 +79,13 @@ function applyLanguage(lang) {
   if (els.langToggleBtn) {
     els.langToggleBtn.textContent = state.language.toUpperCase();
     els.langToggleBtn.title = t("popup.lang_toggle");
+    els.langToggleBtn.setAttribute("aria-label", t("popup.lang_toggle"));
   }
   if (els.statusPill) els.statusPill.title = t("popup.status_tooltip");
-  if (els.themeToggleBtn) els.themeToggleBtn.title = t("popup.theme_toggle");
+  if (els.themeToggleBtn) {
+    els.themeToggleBtn.title = t("popup.theme_toggle");
+    els.themeToggleBtn.setAttribute("aria-label", t("popup.theme_toggle"));
+  }
 
   for (const el of document.querySelectorAll("[data-i18n]")) {
     el.textContent = t(el.dataset.i18n);
@@ -605,6 +610,14 @@ if (els.scanPageBtn) {
       showToast(err?.message || t("popup.toast_scan_failed"), "error");
     }
   });
+}
+
+// Sync version badge with manifest.json
+if (els.brandVersion && isExtensionEnv && chrome.runtime && typeof chrome.runtime.getManifest === "function") {
+  const manifestVersion = chrome.runtime.getManifest().version;
+  if (manifestVersion) {
+    els.brandVersion.textContent = manifestVersion.startsWith("v") ? manifestVersion : `v${manifestVersion}`;
+  }
 }
 
 // Boot

@@ -1469,8 +1469,8 @@
         color: #60A5FA;
       }
       .md-dismiss {
-        width: 22px;
-        height: 22px;
+        width: 24px;
+        height: 24px;
         border-radius: 999px;
         border: none;
         background: transparent;
@@ -1483,6 +1483,12 @@
         justify-content: center;
       }
       .md-dismiss:hover { background: rgba(255,255,255,0.08); color: #F1F5F9; }
+      .md-pill-btn:focus-visible,
+      .md-dismiss:focus-visible,
+      .md-item:focus-visible {
+        outline: 2px solid #3B82F6;
+        outline-offset: 2px;
+      }
       .md-dropdown {
         width: 320px;
         background: rgba(16, 19, 27, 0.96);
@@ -1513,7 +1519,7 @@
       }
       .md-dd-sub {
         font-size: 10.5px;
-        color: #64748B;
+        color: #8494AB;
         white-space: nowrap;
       }
       .md-empty {
@@ -1580,7 +1586,7 @@
         font-weight: 600;
         padding: 3px 9px;
         border-radius: 999px;
-        background: #3B82F6;
+        background: #2563EB;
         color: #FFFFFF;
         flex-shrink: 0;
       }
@@ -1604,6 +1610,12 @@
         background: rgba(16, 185, 129, 0.18);
         color: #34D399;
       }
+      @media (prefers-reduced-motion: reduce) {
+        *, *::before, *::after {
+          animation-duration: 0.01ms !important;
+          transition-duration: 0.01ms !important;
+        }
+      }
     `;
     shadow.appendChild(style);
 
@@ -1616,6 +1628,8 @@
     pillBtn = document.createElement("button");
     pillBtn.className = "md-pill-btn";
     pillBtn.type = "button";
+    pillBtn.setAttribute("aria-haspopup", "menu");
+    pillBtn.setAttribute("aria-expanded", "false");
     pillBtn.innerHTML = `<span class="md-bolt"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z"/></svg></span><span>MagicDown</span>`;
 
     countBadge = document.createElement("span");
@@ -1628,17 +1642,20 @@
     dismissBtn.className = "md-dismiss";
     dismissBtn.type = "button";
     dismissBtn.title = t("overlay.dismiss_title");
+    dismissBtn.setAttribute("aria-label", t("overlay.dismiss_title"));
     dismissBtn.textContent = "×";
     dismissBtn.addEventListener("click", (e) => {
       e.stopPropagation();
       if (activeVideo) dismissedVideos.add(activeVideo);
       dropdownOpen = false;
+      pillBtn.setAttribute("aria-expanded", "false");
       overlayEl.classList.add("hidden");
     });
 
     pillBtn.addEventListener("click", (e) => {
       e.stopPropagation();
       dropdownOpen = !dropdownOpen;
+      pillBtn.setAttribute("aria-expanded", String(dropdownOpen));
       if (dropdownOpen && isYouTubePage && !currentYouTubeEntry()) {
         try {
           window.postMessage({ __mdSniff: YT_PROBE_MSG }, "*");
@@ -1697,9 +1714,23 @@
     document.addEventListener("click", () => {
       if (dropdownOpen) {
         dropdownOpen = false;
+        if (pillBtn) pillBtn.setAttribute("aria-expanded", "false");
         dropdownEl.classList.add("hidden");
       }
     });
+
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape" && dropdownOpen && overlayEl && !overlayEl.classList.contains("hidden")) {
+        e.preventDefault();
+        e.stopPropagation();
+        dropdownOpen = false;
+        if (pillBtn) {
+          pillBtn.setAttribute("aria-expanded", "false");
+          pillBtn.focus();
+        }
+        dropdownEl.classList.add("hidden");
+      }
+    }, true);
   }
 
   function getMp3VariantsForVideos(videos) {
@@ -2091,6 +2122,9 @@
       const candidate = findPrimaryVideo();
       if (candidate) activeVideo = candidate;
       if (!isVideoRenderable(activeVideo)) {
+        dropdownOpen = false;
+        if (pillBtn) pillBtn.setAttribute("aria-expanded", "false");
+        if (dropdownEl) dropdownEl.classList.add("hidden");
         overlayEl.classList.add("hidden");
         return;
       }

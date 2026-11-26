@@ -38,10 +38,12 @@ type Palette struct {
 	TextSecondary ui.Color
 	TextMuted     ui.Color
 
-	Accent        ui.Color
-	AccentHover   ui.Color
-	AccentSoft    ui.Color
-	AccentText    ui.Color
+	Accent          ui.Color
+	AccentHover     ui.Color
+	AccentFill      ui.Color
+	AccentFillHover ui.Color
+	AccentSoft      ui.Color
+	AccentText      ui.Color
 
 	Success       ui.Color
 	SuccessSoft   ui.Color
@@ -65,7 +67,7 @@ func DarkPalette() Palette {
 	t.SurfacePressed = ui.Hex("#252E40")
 	t.Border = ui.Hex("#252C3D")
 	t.Text = ui.Hex("#F1F5F9")
-	t.TextMuted = ui.Hex("#7D899E")
+	t.TextMuted = ui.Hex("#8494AB")
 	t.Accent = ui.Hex("#3B82F6")
 	t.AccentHover = ui.Hex("#2563EB")
 	t.AccentPressed = ui.Hex("#1D4ED8")
@@ -95,11 +97,13 @@ func DarkPalette() Palette {
 		BadgeBg:       ui.RGBA(255, 255, 255, 0.07),
 		TextPrimary:   ui.Hex("#F1F5F9"),
 		TextSecondary: ui.Hex("#94A3B8"),
-		TextMuted:     ui.Hex("#64748B"),
-		Accent:        ui.Hex("#3B82F6"),
-		AccentHover:   ui.Hex("#60A5FA"),
-		AccentSoft:    ui.RGBA(59, 130, 246, 0.15),
-		AccentText:    ui.Hex("#FFFFFF"),
+		TextMuted:     ui.Hex("#8494AB"),
+		Accent:          ui.Hex("#3B82F6"),
+		AccentHover:     ui.Hex("#60A5FA"),
+		AccentFill:      ui.Hex("#2563EB"),
+		AccentFillHover: ui.Hex("#1D4ED8"),
+		AccentSoft:      ui.RGBA(59, 130, 246, 0.15),
+		AccentText:      ui.Hex("#FFFFFF"),
 		Success:       ui.Hex("#10B981"),
 		SuccessSoft:   ui.RGBA(16, 185, 129, 0.15),
 		Warning:       ui.Hex("#F59E0B"),
@@ -122,7 +126,7 @@ func LightPalette() Palette {
 	t.SurfacePressed = ui.Hex("#E2E8F0")
 	t.Border = ui.Hex("#E2E8F0")
 	t.Text = ui.Hex("#0F172A")
-	t.TextMuted = ui.Hex("#64748B")
+	t.TextMuted = ui.Hex("#526075")
 	t.Accent = ui.Hex("#2563EB")
 	t.AccentHover = ui.Hex("#1D4ED8")
 	t.AccentPressed = ui.Hex("#1E40AF")
@@ -152,11 +156,13 @@ func LightPalette() Palette {
 		BadgeBg:       ui.RGBA(15, 23, 42, 0.06),
 		TextPrimary:   ui.Hex("#0F172A"),
 		TextSecondary: ui.Hex("#475569"),
-		TextMuted:     ui.Hex("#94A3B8"),
-		Accent:        ui.Hex("#2563EB"),
-		AccentHover:   ui.Hex("#1D4ED8"),
-		AccentSoft:    ui.RGBA(37, 99, 235, 0.12),
-		AccentText:    ui.Hex("#FFFFFF"),
+		TextMuted:     ui.Hex("#526075"),
+		Accent:          ui.Hex("#2563EB"),
+		AccentHover:     ui.Hex("#1D4ED8"),
+		AccentFill:      ui.Hex("#2563EB"),
+		AccentFillHover: ui.Hex("#1D4ED8"),
+		AccentSoft:      ui.RGBA(37, 99, 235, 0.12),
+		AccentText:      ui.Hex("#FFFFFF"),
 		Success:       ui.Hex("#059669"),
 		SuccessSoft:   ui.RGBA(5, 150, 105, 0.12),
 		Warning:       ui.Hex("#D97706"),

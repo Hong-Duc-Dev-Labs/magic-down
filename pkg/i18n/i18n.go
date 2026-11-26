@@ -135,6 +135,12 @@ var catalogs = map[Lang]map[string]string{
 		"toolbar.clear_done":         "Clear Done",
 		"toolbar.new_download":       "New Download",
 
+		// Delete confirmation modal
+		"delete.title":   "Remove Download?",
+		"delete.body":    "Remove \"%s\" from the download list? Any completed file on disk will be kept.",
+		"delete.cancel":  "Cancel",
+		"delete.confirm": "Remove",
+
 		// Status messages
 		"msg.resumed":          "Resumed %s",
 		"msg.paused":           "Paused %s",
@@ -355,6 +361,12 @@ var catalogs = map[Lang]map[string]string{
 		"toolbar.delete":             "Xóa",
 		"toolbar.clear_done":         "Xóa đã xong",
 		"toolbar.new_download":       "Thêm liên kết",
+
+		// Delete confirmation modal
+		"delete.title":   "Xóa khỏi danh sách?",
+		"delete.body":    "Xóa \"%s\" khỏi danh sách tải xuống? Tệp đã tải trên ổ đĩa vẫn được giữ nguyên.",
+		"delete.cancel":  "Hủy",
+		"delete.confirm": "Xóa",
 
 		// Status messages
 		"msg.resumed":           "Đã tiếp tục %s",

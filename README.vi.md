@@ -4,6 +4,11 @@
 
 Trình quản lý tải xuống tốc độ cao dành cho Windows lấy cảm hứng từ IDM, được xây dựng hoàn toàn bằng Go thuần với **MyGo Native UI** (render bằng GPU, không dùng webview) kết hợp **Tiện ích trình duyệt Chromium Manifest V3** kết nối qua Native Messaging kèm xác minh bắt tay `HELLO/WELCOME` theo thời gian thực.
 
+<p align="center">
+  <img src="screenshots/01-main-dark.png" alt="Ứng dụng MagicDown Desktop — Chế độ tối" width="72%" />
+  <img src="screenshots/ext-popup-dark.png" alt="Tiện ích trình duyệt MagicDown" width="26%" />
+</p>
+
 ---
 
 ## Tính năng nổi bật
@@ -15,7 +20,7 @@ Trình quản lý tải xuống tốc độ cao dành cho Windows lấy cảm h�
 - **Tải video MP4 & âm thanh MP3 từ YouTube**
   - Nút nổi tự động phát hiện video kèm bộ chọn chất lượng cho **MP4** (ưu tiên H.264/avc1, tự động ghép hình và tiếng bằng FFmpeg) và trích xuất âm thanh **MP3** ở các mức **320 / 192 / 128 kbps**.
 - **Hỗ trợ Video Mạng xã hội & Streaming**
-  - Tích hợp sẵn khả năng phát hiện và lập kế hoạch tải cho **Facebook**, **Weibo**, **Bilibili**, **Douyin**, các luồng HLS (`.m3u8` bao gồm cả `#EXT-X-MAP`) và trình phát DASH/MSE.
+  - Tích hợp sẵn khả năng phát hiện và lập kế hoạch tải cho **X / Twitter**, **Facebook**, **Weibo**, **Bilibili**, **Douyin**, các luồng HLS (`.m3u8` bao gồm cả `#EXT-X-MAP`) và trình phát DASH/MSE.
 - **Tải ảnh thu nhỏ Video (Video Thumbnail Downloader)**
   - Trích xuất ảnh thu nhỏ độ phân giải cao chỉ với một cú nhấp chuột trên YouTube, Bilibili, Weibo, Facebook, Douyin và các trang HTML5 `<video>` tiêu chuẩn.
 - **Tải hàng loạt (Batch Download All)**
@@ -107,6 +112,19 @@ Các trình duyệt nhân Chromium được hỗ trợ: **Google Chrome**, **Mic
 Ngay sau khi nạp xong, tiện ích sẽ lập tức kết nối tới `magicdown-host.exe` và thực hiện bắt tay `HELLO/WELCOME` với ứng dụng MagicDown:
 - Trong **MagicDown → Settings → Browser Integration**, trạng thái trình duyệt của bạn sẽ tự động chuyển từ **Waiting for Connection** sang **Connected**.
 - Khi nhấp vào biểu tượng **MagicDown** trên thanh công cụ trình duyệt, trạng thái cũng sẽ hiển thị **Connected**.
+
+---
+
+## Quyền riêng tư & Bảo mật cục bộ
+
+MagicDown hoạt động **100% cục bộ** trên máy của bạn, không thu thập dữ liệu phân tích/telemetry và không đi qua máy chủ trung gian:
+
+- **IPC cục bộ có xác thực:** Tiện ích trình duyệt chỉ giao tiếp với `magicdown-host.exe` (qua Chrome Native Messaging) và ứng dụng MagicDown tại `127.0.0.1` bằng auth token ngẫu nhiên theo từng người dùng (`pkg/ipc/auth.go`).
+- **Lý do yêu cầu các quyền của tiện ích:**
+  - `http://*/*` & `https://*/*` + `webRequest`: Phát hiện luồng video/HLS/DASH có thể tải trên trang đang mở.
+  - `cookies`: Chuyển tiếp cookie phiên cục bộ sang ứng dụng MagicDown trên máy bạn để tải được tệp yêu cầu đăng nhập.
+  - `downloads` & `contextMenus`: Bắt sự kiện tải tệp và thêm thao tác chuột phải cho ảnh/video.
+  - `nativeMessaging`: Kết nối với `magicdown-host.exe` trên máy tính của bạn.
 
 ---
 

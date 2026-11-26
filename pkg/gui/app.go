@@ -99,11 +99,14 @@ type App struct {
 	openExtensionsPageFn  func(nativemessaging.BrowserInfo) error
 	extensionDir          string
 
-	darkMode       bool
-	filterStatus   string       // "All", "Downloading", "Completed", "Queued", "Failed"
-	filterCategory FileCategory // CatAll or specific category
-	searchQuery    string
-	selectedTaskID string
+	darkMode            bool
+	filterStatus        string       // "All", "Downloading", "Completed", "Queued", "Failed"
+	filterCategory      FileCategory // CatAll or specific category
+	searchQuery         string
+	focusSearchNext     bool
+	selectedTaskID      string
+	pendingDeleteTaskID string
+	pendingDeleteName   string
 
 	// Add / Download Info Dialog state
 	showAddModal       bool
@@ -407,7 +410,7 @@ func (a *App) EnqueueIncomingDownload(req ipc.AddDownloadRequest) {
 }
 
 func (a *App) popPendingIncoming() {
-	if a.showAddModal {
+	if a.showAddModal || a.pendingDeleteTaskID != "" {
 		return
 	}
 	a.pendingMu.Lock()
@@ -477,6 +480,7 @@ func (a *App) openIncomingDownloadDialog(req ipc.AddDownloadRequest) {
 	}
 	a.lastAutoTarget = a.inputFilename + "|" + a.inputURL
 	a.addError = ""
+	a.cancelDeleteTask()
 	a.showSettingsModal = false
 	a.showOnboardingModal = false
 	a.showAddModal = true
@@ -537,12 +541,20 @@ func (a *App) View(c *ui.Context) {
 	c.SetTheme(pal.UITheme)
 
 	// Global keyboard shortcuts
-	if c.Shortcut(ui.Cmd, ui.KeyN) && !a.showAddModal && !a.showOnboardingModal {
+	anyModalOpen := a.showAddModal || a.showSettingsModal || a.showOnboardingModal || a.pendingDeleteTaskID != ""
+	if c.Shortcut(ui.Cmd, ui.KeyN) && !anyModalOpen {
 		a.openAddModal()
+	}
+	if c.Shortcut(ui.Cmd, ui.KeyComma) && !anyModalOpen {
+		a.openSettingsModal()
+	}
+	if c.Shortcut(ui.Cmd, ui.KeyF) && !anyModalOpen {
+		a.focusSearchNext = true
 	}
 	if c.Shortcut(0, ui.KeyEscape) {
 		a.showAddModal = false
 		a.showSettingsModal = false
+		a.cancelDeleteTask()
 	}
 
 	// Open Download Info Dialog for any incoming extension download.
@@ -596,6 +608,10 @@ func (a *App) View(c *ui.Context) {
 		catCounts[ClassifyFile(t.Filename, t.URL)]++
 	}
 
+	if c.Shortcut(0, ui.KeyDelete) && !c.FocusTakesText() && !anyModalOpen && selectedTask != nil {
+		a.requestDeleteTask(selectedTask)
+	}
+
 	// Root window layout: Integrated Custom Title Bar + (Left Sidebar | Right Main Column)
 	ui.Column(c).Fill().Background(pal.Canvas).TextColor(pal.TextPrimary).Children(func() {
 		a.renderTitleBar(c, pal)
@@ -616,6 +632,7 @@ func (a *App) View(c *ui.Context) {
 	a.renderAddModal(c, pal)
 	a.renderSettingsModal(c, pal)
 	a.renderOnboardingModal(c, pal)
+	a.renderDeleteConfirmModal(c, pal)
 }
 
 func (a *App) renderTitleBar(c *ui.Context, pal Palette) {
@@ -640,7 +657,7 @@ func (a *App) renderTitleBar(c *ui.Context, pal Palette) {
 					})
 					ui.Text(c, "MagicDown").FontSize(13).FontWeight(700).TextColor(pal.TextPrimary).SingleLine()
 					ui.Box(c).Padding(1, 5).Radius(4).Background(pal.BadgeBg).Shrink(0).Children(func() {
-						ui.Text(c, "v1.0").FontSize(10).FontWeight(600).TextColor(pal.TextMuted).SingleLine()
+						ui.Text(c, version.NormalizedVersion()).FontSize(10).FontWeight(600).TextColor(pal.TextMuted).SingleLine()
 					})
 					ui.Text(c, "—").FontSize(11).TextColor(pal.BorderStrong).SingleLine()
 					ui.Text(c, i18n.T("app.subtitle")).FontSize(11).TextColor(pal.TextMuted).SingleLine()
@@ -728,6 +745,7 @@ func (a *App) openAddModal() {
 	a.inputPlan = nil
 	a.lastAutoTarget = ""
 	a.addError = ""
+	a.cancelDeleteTask()
 	a.showSettingsModal = false
 	a.showOnboardingModal = false
 	a.showAddModal = true
@@ -750,6 +768,7 @@ func (a *App) openSettingsModal() {
 	a.activeSettingsTab = settingsTabGeneral
 	a.refreshNativeStatus()
 	a.refreshDetectedBrowsers()
+	a.cancelDeleteTask()
 	a.showAddModal = false
 	a.showOnboardingModal = false
 	a.showSettingsModal = true
@@ -766,6 +785,7 @@ func (a *App) OpenOnboardingModal() {
 	a.nativeRegMsg = ""
 	a.refreshNativeStatus()
 	a.refreshDetectedBrowsers()
+	a.cancelDeleteTask()
 	a.showAddModal = false
 	a.showSettingsModal = false
 	a.showOnboardingModal = true
@@ -879,12 +899,16 @@ func (a *App) renderHeader(c *ui.Context, pal Palette, selected *engine.Task, co
 				AlignItems(ui.Center).
 				Children(func() {
 					ui.Icon(c, iconSearch).Width(14).Height(14).TextColor(pal.TextMuted).Shrink(0)
-					ui.TextInput(c, &a.searchQuery).
+					searchEl := ui.TextInput(c, &a.searchQuery).
 						Placeholder(i18n.T("toolbar.search_placeholder")).
 						Background(ui.Transparent).
 						Border(0, ui.Transparent).
 						Padding(6, 0).
 						Grow(1)
+					if a.focusSearchNext {
+						searchEl.Focus()
+						a.focusSearchNext = false
+					}
 				})
 
 			ui.Spacer(c)
@@ -907,12 +931,7 @@ func (a *App) renderHeader(c *ui.Context, pal Palette, selected *engine.Task, co
 			}
 
 			if toolbarButton(c, pal, iconTrash, i18n.T("toolbar.delete"), !canDelete, true) {
-				if err := a.engine.DeleteTask(selected.ID, false); err != nil {
-					a.statusMessage = err.Error()
-				} else {
-					a.statusMessage = i18n.Tf("msg.removed", selected.Filename)
-					a.selectedTaskID = ""
-				}
+				a.requestDeleteTask(selected)
 			}
 
 			if toolbarButton(c, pal, iconCheck, i18n.T("toolbar.clear_done"), !canClearDone, false) {
@@ -1126,11 +1145,7 @@ func (a *App) renderDownloadCard(c *ui.Context, pal Palette, task *engine.Task) 
 				}
 
 				if rowIconButton(c, pal, iconTrash, true) {
-					_ = a.engine.DeleteTask(task.ID, false)
-					if a.selectedTaskID == task.ID {
-						a.selectedTaskID = ""
-					}
-					a.statusMessage = i18n.Tf("msg.removed", name)
+					a.requestDeleteTask(task)
 				}
 			})
 		})
@@ -2171,4 +2186,70 @@ func (a *App) completeOnboarding() {
 	a.onboardingError = ""
 	a.statusMessage = i18n.T("msg.setup_complete")
 	a.showOnboardingModal = false
+}
+
+func (a *App) requestDeleteTask(task *engine.Task) {
+	if task == nil {
+		return
+	}
+	name := task.Filename
+	if name == "" {
+		name = task.URL
+	}
+	a.pendingDeleteTaskID = task.ID
+	a.pendingDeleteName = name
+}
+
+func (a *App) cancelDeleteTask() {
+	a.pendingDeleteTaskID = ""
+	a.pendingDeleteName = ""
+}
+
+func (a *App) confirmDeleteTask() {
+	if a.pendingDeleteTaskID == "" {
+		return
+	}
+	id := a.pendingDeleteTaskID
+	name := a.pendingDeleteName
+	a.cancelDeleteTask()
+
+	if err := a.engine.DeleteTask(id, false); err != nil {
+		a.statusMessage = err.Error()
+		return
+	}
+	if a.selectedTaskID == id {
+		a.selectedTaskID = ""
+	}
+	a.statusMessage = i18n.Tf("msg.removed", name)
+}
+
+func (a *App) renderDeleteConfirmModal(c *ui.Context, pal Palette) {
+	if a.pendingDeleteTaskID == "" {
+		return
+	}
+	open := true
+	ui.Modal(c, &open, func() {
+		ui.Column(c).Width(420).Gap(16).Children(func() {
+			ui.Row(c).Gap(10).AlignItems(ui.Center).Children(func() {
+				ui.Row(c).Width(32).Height(32).Radius(8).Background(pal.DangerSoft).Center().Shrink(0).Children(func() {
+					ui.Icon(c, iconTrash).Width(16).Height(16).TextColor(pal.Danger)
+				})
+				ui.Text(c, i18n.T("delete.title")).FontSize(15).FontWeight(700).TextColor(pal.TextPrimary)
+			})
+
+			ui.Text(c, i18n.Tf("delete.body", a.pendingDeleteName)).FontSize(12).TextColor(pal.TextSecondary)
+
+			ui.Row(c).Gap(8).Justify(ui.End).Children(func() {
+				if toolbarButton(c, pal, nil, i18n.T("delete.cancel"), false, false) {
+					a.cancelDeleteTask()
+				}
+				if toolbarButton(c, pal, iconTrash, i18n.T("delete.confirm"), false, true) {
+					a.confirmDeleteTask()
+				}
+			})
+		})
+	})
+	if !open {
+		a.cancelDeleteTask()
+	}
 }

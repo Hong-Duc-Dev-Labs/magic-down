@@ -4,6 +4,11 @@
 
 A fast, IDM-inspired desktop download manager for Windows built in pure Go with **MyGo Native UI** (GPU-rendered, zero webview) and a **Manifest V3 Chromium Browser Extension** connected via Native Messaging with real-time `HELLO/WELCOME` handshake verification.
 
+<p align="center">
+  <img src="screenshots/01-main-dark.png" alt="MagicDown Desktop App — Dark Mode" width="72%" />
+  <img src="screenshots/ext-popup-dark.png" alt="MagicDown Chromium Extension Popup" width="26%" />
+</p>
+
 ---
 
 ## Features
@@ -15,7 +20,7 @@ A fast, IDM-inspired desktop download manager for Windows built in pure Go with 
 - **YouTube MP4 & MP3 Downloads**
   - Floating video detector with quality selector for **MP4** (H.264/avc1 preferred, automatic video+audio muxing via FFmpeg) and **MP3** audio extraction at **320 / 192 / 128 kbps**.
 - **Social & Streaming Video Support**
-  - Built-in detection and download plans for **Facebook**, **Weibo**, **Bilibili**, **Douyin**, HLS (`.m3u8` including `#EXT-X-MAP`), and DASH/MSE players.
+  - Built-in detection and download plans for **X / Twitter**, **Facebook**, **Weibo**, **Bilibili**, **Douyin**, HLS (`.m3u8` including `#EXT-X-MAP`), and DASH/MSE players.
 - **Video Thumbnail Downloader**
   - One-click high-resolution thumbnail extraction across YouTube, Bilibili, Weibo, Facebook, Douyin, and standard HTML5 `<video>` pages.
 - **Batch Download All**
@@ -107,6 +112,19 @@ Supported Chromium browsers: **Google Chrome**, **Microsoft Edge**, **Dia**, **B
 Once loaded, the extension immediately connects to `magicdown-host.exe` and performs a `HELLO/WELCOME` handshake with the MagicDown desktop app:
 - In **MagicDown → Settings → Browser Integration**, your browser status automatically changes from **Waiting for Connection** to **Connected**.
 - Clicking the **MagicDown** toolbar icon in your browser also shows **Connected**.
+
+---
+
+## Privacy & Local-Only Security
+
+MagicDown runs **100% locally** with zero analytics, zero telemetry, and no external proxy servers:
+
+- **Authenticated localhost IPC:** The browser extension talks only to `magicdown-host.exe` (via Chrome Native Messaging) and the local MagicDown app on `127.0.0.1` using a per-user random auth token (`pkg/ipc/auth.go`).
+- **Why extension permissions are requested:**
+  - `http://*/*` & `https://*/*` + `webRequest`: Detect downloadable video/HLS/DASH streams on the active page.
+  - `cookies`: Forward session cookies strictly to your local MagicDown desktop engine so authenticated downloads (e.g., private files or logged-in media) succeed.
+  - `downloads` & `contextMenus`: Intercept browser downloads and add right-click image/media actions.
+  - `nativeMessaging`: Communicate with `magicdown-host.exe` on your own machine.
 
 ---
 

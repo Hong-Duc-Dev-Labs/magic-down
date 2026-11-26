@@ -1,9 +1,9 @@
 <!DOCTYPE html>
-<html lang="vi" data-theme="dark">
+<html lang="en" data-theme="dark">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>MagicDown — Tải toàn bộ trang</title>
+  <title>MagicDown — Batch Download All</title>
   <link rel="stylesheet" href="batch-picker.css" />
 </head>
 <body>
@@ -16,69 +16,69 @@
           </svg>
         </div>
         <div class="brand-meta">
-          <h1 class="brand-title" data-i18n="batch.title">MagicDown — Tải toàn bộ trang</h1>
-          <div id="pageSourceLabel" class="page-source" data-i18n="batch.loading">Đang tải danh sách tài nguyên...</div>
+          <h1 class="brand-title" data-i18n="batch.title">MagicDown — Batch Download All</h1>
+          <div id="pageSourceLabel" class="page-source" data-i18n="batch.loading">Loading page resources...</div>
         </div>
       </div>
 
       <div class="header-controls">
-        <label class="subfolder-box" data-i18n-title="batch.subfolder_title" title="Thư mục con trong thư mục tải xuống của MagicDown">
-          <span data-i18n="batch.subfolder_label">Thư mục con:</span>
-          <input type="text" id="subfolderInput" data-i18n-placeholder="batch.subfolder_placeholder" placeholder="Tên thư mục (tuỳ chọn)" autocomplete="off" />
+        <label class="subfolder-box" data-i18n-title="batch.subfolder_title" title="Optional subfolder inside MagicDown's download directory">
+          <span data-i18n="batch.subfolder_label">Subfolder:</span>
+          <input type="text" id="subfolderInput" data-i18n-placeholder="batch.subfolder_placeholder" placeholder="Folder name (optional)" autocomplete="off" />
         </label>
-        <button id="rescanBtn" class="btn-secondary" type="button" data-i18n="batch.rescan">Quét lại</button>
+        <button id="rescanBtn" class="btn-secondary" type="button" data-i18n="batch.rescan">Rescan</button>
       </div>
     </header>
 
     <section class="toolbar">
       <div class="category-tabs" role="tablist">
         <button class="cat-tab active" data-category="image" role="tab" aria-selected="true">
-          <span data-i18n="batch.tab_image">Ảnh</span> <span id="countImage" class="badge">0</span>
+          <span data-i18n="batch.tab_image">Images</span> <span id="countImage" class="badge">0</span>
         </button>
         <button class="cat-tab" data-category="media" role="tab" aria-selected="false">
           <span data-i18n="batch.tab_media">Video/Audio</span> <span id="countMedia" class="badge">0</span>
         </button>
         <button class="cat-tab" data-category="file" role="tab" aria-selected="false">
-          <span data-i18n="batch.tab_file">Tài liệu/File</span> <span id="countFile" class="badge">0</span>
+          <span data-i18n="batch.tab_file">Files/Docs</span> <span id="countFile" class="badge">0</span>
         </button>
         <button class="cat-tab" data-category="all" role="tab" aria-selected="false">
-          <span data-i18n="batch.tab_all">Tất cả</span> <span id="countAll" class="badge">0</span>
+          <span data-i18n="batch.tab_all">All</span> <span id="countAll" class="badge">0</span>
         </button>
       </div>
 
       <div class="filter-controls">
-        <select id="minSizeSelect" data-i18n-title="batch.min_size_title" title="Lọc kích thước ảnh tối thiểu để bỏ icon nhỏ">
-          <option value="0" data-i18n="batch.min_size_0">Mọi kích thước ảnh</option>
-          <option value="50" data-i18n="batch.min_size_50">Ảnh &ge; 50px</option>
-          <option value="100" selected data-i18n="batch.min_size_100">Ảnh &ge; 100px (lọc icon)</option>
-          <option value="200" data-i18n="batch.min_size_200">Ảnh &ge; 200px</option>
-          <option value="400" data-i18n="batch.min_size_400">Ảnh &ge; 400px</option>
+        <select id="minSizeSelect" aria-label="Minimum image size" data-i18n-aria-label="batch.min_size_title" data-i18n-title="batch.min_size_title" title="Filter minimum image size to skip small icons">
+          <option value="0" data-i18n="batch.min_size_0">All image sizes</option>
+          <option value="50" data-i18n="batch.min_size_50">Images &ge; 50px</option>
+          <option value="100" selected data-i18n="batch.min_size_100">Images &ge; 100px (skip icons)</option>
+          <option value="200" data-i18n="batch.min_size_200">Images &ge; 200px</option>
+          <option value="400" data-i18n="batch.min_size_400">Images &ge; 400px</option>
         </select>
 
-        <input type="search" id="searchInput" data-i18n-placeholder="batch.search_placeholder" placeholder="Tìm theo tên, đuôi file (vd: jpg, pdf, zip)..." autocomplete="off" />
+        <input type="search" id="searchInput" aria-label="Filter resources" data-i18n-aria-label="batch.search_placeholder" data-i18n-placeholder="batch.search_placeholder" placeholder="Search by name or extension (e.g. jpg, pdf, zip)..." autocomplete="off" />
 
-        <button id="selectAllBtn" class="btn-secondary" type="button" data-i18n="batch.select_all">Chọn tất cả</button>
-        <button id="deselectAllBtn" class="btn-secondary" type="button" data-i18n="batch.deselect_all">Bỏ chọn</button>
+        <button id="selectAllBtn" class="btn-secondary" type="button" data-i18n="batch.select_all">Select All</button>
+        <button id="deselectAllBtn" class="btn-secondary" type="button" data-i18n="batch.deselect_all">Clear</button>
       </div>
     </section>
 
-    <div id="statusBanner" class="status-banner hidden" role="status"></div>
+    <div id="statusBanner" class="status-banner hidden" role="status" aria-live="polite"></div>
 
     <main class="picker-main">
       <div id="resourceContainer" class="resource-grid"></div>
       <div id="emptyState" class="empty-state hidden">
-        <div class="empty-title" data-i18n="batch.empty_title">Không tìm thấy tài nguyên phù hợp</div>
-        <div class="empty-sub" data-i18n="batch.empty_sub">Thử đổi tab bộ lọc, giảm kích thước ảnh tối thiểu hoặc xoá từ khoá tìm kiếm.</div>
+        <div class="empty-title" data-i18n="batch.empty_title">No matching resources found</div>
+        <div class="empty-sub" data-i18n="batch.empty_sub">Try switching category tabs, lowering the minimum image size, or clearing your search query.</div>
       </div>
     </main>
 
     <footer class="picker-footer">
       <div class="selection-summary">
-        <span data-i18n="batch.summary_showing">Đang hiển thị</span> <strong id="visibleCount">0</strong> <span data-i18n="batch.summary_items">mục</span> &middot; <span data-i18n="batch.summary_selected">Đã chọn</span> <strong id="selectedCount">0</strong> <span data-i18n="batch.summary_items">mục</span>
+        <span data-i18n="batch.summary_showing">Showing</span> <strong id="visibleCount">0</strong> <span data-i18n="batch.summary_items">items</span> &middot; <span data-i18n="batch.summary_selected">Selected</span> <strong id="selectedCount">0</strong> <span data-i18n="batch.summary_items">items</span>
       </div>
       <div class="footer-actions">
-        <button id="downloadAllBtn" class="btn-secondary" type="button">Tải toàn bộ (0)</button>
-        <button id="downloadSelectedBtn" class="btn-primary" type="button" disabled>Tải các mục đã chọn (0)</button>
+        <button id="downloadAllBtn" class="btn-secondary" type="button">Download All (0)</button>
+        <button id="downloadSelectedBtn" class="btn-primary" type="button" disabled>Download Selected (0)</button>
       </div>
     </footer>
   </div>

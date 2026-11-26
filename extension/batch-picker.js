@@ -17,6 +17,9 @@
     for (const el of document.querySelectorAll("[data-i18n-title]")) {
       el.title = t(el.dataset.i18nTitle);
     }
+    for (const el of document.querySelectorAll("[data-i18n-aria-label]")) {
+      el.setAttribute("aria-label", t(el.dataset.i18nAriaLabel));
+    }
     updateFooterCounts(getFilteredItems());
   }
   const isExtensionEnv = typeof chrome !== "undefined" && Boolean(chrome.runtime && chrome.runtime.id);

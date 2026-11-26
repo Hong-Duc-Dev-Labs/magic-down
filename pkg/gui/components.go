@@ -158,9 +158,9 @@ func primaryCTA(c *ui.Context, pal Palette, icon *ui.SVG, label string) bool {
 		Cursor(ui.CursorPointer).
 		Focusable()
 
-	bg := pal.Accent
+	bg := pal.AccentFill
 	if btn.Hovered() {
-		bg = pal.AccentHover
+		bg = pal.AccentFillHover
 	}
 	btn.Background(bg).Children(func() {
 		if icon != nil {

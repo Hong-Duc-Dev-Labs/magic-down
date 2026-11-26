@@ -1,0 +1,19 @@
+# MagicDown
+
+> Fast, IDM-inspired Windows desktop download manager in pure Go (MyGo GPU Native UI, zero webview) paired with a Manifest V3 Chromium browser extension over authenticated local Native Messaging.
+
+MagicDown accelerates HTTP/HTTPS downloads with multi-segment range probing, handles YouTube MP4/MP3 and social/streaming media (X/Twitter, Facebook, Weibo, Bilibili, Douyin, HLS, DASH), supports page-wide batch downloading, and offers a bilingual English/Vietnamese UI.
+
+## Core Documentation
+- [README (English)](README.md): Overview, features, Windows installation, extension setup, privacy/security model, and build/test commands.
+- [README (Tiếng Việt)](README.vi.md): Vietnamese overview, installation, and extension setup guide.
+- [Design System](DESIGN.md): Shared dark/light color tokens, typography, spacing, WCAG AA contrast rules, motion, and responsive breakpoints.
+- [UX/AX Review Checklist](REVIEW.md): Pre-merge quality bar for UI, accessibility, and documentation changes.
+- [Agent Guidelines](AGENTS.md): Repository conventions and verification commands for AI coding agents.
+
+## Technical Guides
+- [Native Messaging Architecture](docs/NATIVE_MESSAGING.md): `HELLO/WELCOME` handshake, localhost IPC auth token, and browser host registration.
+- [Extension Installation](docs/EXTENSION_INSTALLATION.md): Deterministic MV3 Extension ID and Chromium browser setup details.
+- [Extension Distribution](docs/EXTENSION_DISTRIBUTION.md): Packaging and distribution notes for the Chromium extension.
+- [Release Guide](docs/RELEASE_GUIDE.md): Building, signing/hashing, and publishing GitHub Releases for the auto-updater.
+- [Implementation Audit](docs/IMPLEMENTATION_AUDIT.md): Security and reliability audit findings and resolutions.

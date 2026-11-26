@@ -191,6 +191,53 @@ func TestMyGoNativeUIRendersCleanly(t *testing.T) {
 		tester.Frame()
 		app.showSettingsModal = false
 
+		// Exercise delete confirmation modal (request -> cancel -> request -> confirm)
+		tasks := eng.GetTasks()
+		if len(tasks) > 0 {
+			target := tasks[0]
+			app.selectedTaskID = target.ID
+			app.requestDeleteTask(target)
+			if app.pendingDeleteTaskID != target.ID {
+				t.Fatalf("expected pendingDeleteTaskID=%q, got %q", target.ID, app.pendingDeleteTaskID)
+			}
+			// Incoming IPC download must not stack while delete confirmation is open
+			app.EnqueueIncomingDownload(ipc.AddDownloadRequest{
+				URL:        "https://example.com/queued-during-delete.zip",
+				Filename:   "queued-during-delete.zip",
+				TotalBytes: 1024,
+			})
+			tester.Frame()
+			if app.showAddModal {
+				t.Fatalf("expected incoming download modal to wait while delete confirmation is open")
+			}
+
+			// Opening another modal clears pendingDeleteTaskID cleanly
+			app.openSettingsModal()
+			if app.pendingDeleteTaskID != "" {
+				t.Fatalf("expected openSettingsModal to clear pendingDeleteTaskID")
+			}
+			app.showSettingsModal = false
+
+			// Ctrl+F search focus flag is consumed cleanly during frame render
+			app.focusSearchNext = true
+			tester.Frame()
+			if app.focusSearchNext {
+				t.Fatalf("expected focusSearchNext to be cleared after focusing search input")
+			}
+
+			app.requestDeleteTask(target)
+			app.cancelDeleteTask()
+			if app.pendingDeleteTaskID != "" {
+				t.Fatalf("expected cancelDeleteTask to clear pendingDeleteTaskID")
+			}
+
+			app.requestDeleteTask(target)
+			app.confirmDeleteTask()
+			if app.pendingDeleteTaskID != "" || app.selectedTaskID != "" {
+				t.Fatalf("expected confirmDeleteTask to clear pendingDeleteTaskID and selectedTaskID")
+			}
+		}
+
 		app.darkMode = false
 		tester.Frame()
 		app.darkMode = true
