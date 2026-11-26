@@ -127,6 +127,7 @@ func (h *Handler) HandleMessage(msgBytes []byte) ([]byte, error) {
 				"browser":          browser,
 				"declared_browser": strings.ToLower(strings.TrimSpace(in.Browser)),
 				"status":           "offline",
+				"error":            err.Error(),
 			})
 			resp := OutboundMessage{
 				Type:            "WELCOME",
@@ -208,8 +209,12 @@ func (h *Handler) HandleMessage(msgBytes []byte) ([]byte, error) {
 		}
 
 		// Check if desktop app is running
-		if !h.ipcClient.IsAppRunning() {
-			LogEvent("WARN", "download_app_offline", map[string]any{"host": safeURLHost(in.URL)})
+		if st, err := h.ipcClient.GetStatus(); err != nil || st == nil || st.App != "MagicDown" {
+			errMsg := "unexpected status response"
+			if err != nil {
+				errMsg = err.Error()
+			}
+			LogEvent("WARN", "download_app_offline", map[string]any{"host": safeURLHost(in.URL), "error": errMsg})
 			resp := OutboundMessage{
 				Success: false,
 				Action:  "download",

@@ -136,4 +136,36 @@ func TestNativeMessagingIPCForwarding(t *testing.T) {
 	if planTask.IsHLS || planTask.SupportsRanges {
 		t.Errorf("plan task must not be flagged as HLS/ranged: %+v", planTask)
 	}
+
+	// 5. Google Drive folder ZIP download with brackets and unknown size (total_bytes omitted / 0).
+	gdriveZipFilename := "[44.1-24 Tidal MQA]-20261126T081600Z-001.zip"
+	gdriveZipURL := "https://takeout-download-drive.usercontent.google.com/download/j/1234567890?user=0&authuser=0"
+	gdriveMsg, _ := json.Marshal(InboundMessage{
+		Action:     "download",
+		URL:        gdriveZipURL,
+		Filename:   gdriveZipFilename,
+		Referrer:   "https://drive.google.com/",
+		TotalBytes: 0,
+	})
+	gdriveRespBytes, err := handler.HandleMessage(gdriveMsg)
+	if err != nil {
+		t.Fatalf("HandleMessage Google Drive folder ZIP error: %v", err)
+	}
+	var gdriveResp OutboundMessage
+	if err := json.Unmarshal(gdriveRespBytes, &gdriveResp); err != nil {
+		t.Fatalf("failed to unmarshal Google Drive folder ZIP response: %v", err)
+	}
+	if !gdriveResp.Success || gdriveResp.TaskID == "" {
+		t.Fatalf("unexpected Google Drive folder ZIP response: %+v", gdriveResp)
+	}
+	gdriveTask, err := eng.GetTask(gdriveResp.TaskID)
+	if err != nil {
+		t.Fatalf("Google Drive folder ZIP task not found: %v", err)
+	}
+	if gdriveTask.Filename != gdriveZipFilename {
+		t.Errorf("expected filename %q, got %q", gdriveZipFilename, gdriveTask.Filename)
+	}
+	if gdriveTask.URL != gdriveZipURL {
+		t.Errorf("expected URL %q, got %q", gdriveZipURL, gdriveTask.URL)
+	}
 }

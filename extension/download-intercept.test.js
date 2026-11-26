@@ -710,3 +710,111 @@ test("Google Drive /download?... with Content-Disposition .7z filename: exact fi
   ]);
   assert.equal(fallbackSuggestCount, 1, "suggest() must be called on fail-safe fallback");
 });
+
+test("Google Drive folder ZIP download (takeout-download-drive.usercontent.google.com, bracketed filename, totalBytes = -1) is intercepted and preserves exact filename", async () => {
+  resetState();
+  const initialUrl = "https://drive.google.com/drive/folders/1AbCdEfGhIjKlMnOpQrStUvWxYz";
+  const finalUrl =
+    "https://takeout-download-drive.usercontent.google.com/download/j/1234567890?user=0&authuser=0";
+  const folderZipName = "[44.1-24 Tidal MQA]-20261126T081600Z-001.zip";
+
+  assert.equal(sanitizeDownloadFilename(folderZipName), folderZipName);
+  assert.equal(
+    sanitizeDownloadFilename(`C:\\Users\\hongducdev\\Downloads\\${folderZipName}`),
+    folderZipName
+  );
+
+  // Unknown size (-1) must pass both default '*' and custom ['zip'] filter even with minFileSizeMB > 0.
+  assert.equal(
+    shouldIntercept(
+      {
+        id: 901,
+        url: initialUrl,
+        finalUrl,
+        filename: folderZipName,
+        referrer: "https://drive.google.com/",
+        totalBytes: -1,
+        fileSize: -1,
+        state: "in_progress"
+      },
+      { ...DEFAULT_SETTINGS, extensions: ["zip"], minFileSizeMB: 10 }
+    ),
+    true
+  );
+
+  const forwarded = [];
+  const calls = [];
+  let suggestCount = 0;
+
+  onDownloadCreated(
+    {
+      id: 901,
+      url: initialUrl,
+      finalUrl,
+      filename: "",
+      referrer: "https://drive.google.com/",
+      totalBytes: -1,
+      fileSize: -1,
+      state: "in_progress"
+    },
+    {
+      downloadsApi: { onDeterminingFilename: {} },
+      fallbackDelayMs: 5000
+    }
+  );
+
+  const res = await handleDownloadInterception(
+    {
+      id: 901,
+      url: initialUrl,
+      finalUrl,
+      filename: folderZipName,
+      referrer: "https://drive.google.com/",
+      totalBytes: -1,
+      fileSize: -1,
+      state: "in_progress"
+    },
+    {
+      getSettings: async () => ({ ...DEFAULT_SETTINGS, minFileSizeMB: 5 }),
+      forwardDownload: async (req) => {
+        forwarded.push(req);
+        return { success: true, taskId: "task-gdrive-folder-901", filename: req.filename };
+      },
+      downloadsApi: {
+        pause: async (id) => calls.push(["pause", id]),
+        cancel: async (id) => calls.push(["cancel", id]),
+        erase: async (q) => calls.push(["erase", q.id]),
+        resume: async (id) => calls.push(["resume", id])
+      },
+      suggest: () => {
+        suggestCount++;
+      }
+    }
+  );
+
+  assert.equal(res.intercepted, true);
+  assert.equal(forwarded.length, 1);
+  assert.equal(forwarded[0].url, finalUrl);
+  assert.equal(forwarded[0].filename, folderZipName);
+  assert.equal(forwarded[0].referrer, "https://drive.google.com/");
+  assert.equal(forwarded[0].size, 0);
+
+  const payload = buildDownloadPayload({
+    url: forwarded[0].url,
+    filename: forwarded[0].filename,
+    referrer: forwarded[0].referrer,
+    cookies: "SID=abc; HSID=def",
+    size: forwarded[0].size
+  });
+  assert.equal(payload.url, finalUrl);
+  assert.equal(payload.filename, folderZipName);
+  assert.equal(payload.total_bytes, undefined);
+
+  assert.deepEqual(calls, [
+    ["pause", 901],
+    ["cancel", 901],
+    ["erase", 901]
+  ]);
+  assert.equal(suggestCount, 0);
+  assert.equal(pendingDownloads.has(901), false);
+});

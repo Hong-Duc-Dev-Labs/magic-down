@@ -244,3 +244,55 @@ func TestIPCAddDownload_MP3OutputFormatAndBitrate(t *testing.T) {
 		t.Fatalf("expected Music category, got %q", resp.Task.Category)
 	}
 }
+
+func TestIPCAddDownload_GoogleDriveFolderZip(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Setenv("MAGICDOWN_IPC_TOKEN_PATH", filepath.Join(tempDir, "ipc.token"))
+	cfg := engine.DefaultConfig(tempDir, filepath.Join(tempDir, "state.json"))
+	cfg.AutoCategorize = true
+	eng, err := engine.NewEngine(cfg)
+	if err != nil {
+		t.Fatalf("failed to init engine: %v", err)
+	}
+	defer eng.Close()
+
+	srv := NewServer(eng, 0)
+	if err := srv.Start(); err != nil {
+		t.Fatalf("failed to start server: %v", err)
+	}
+	defer srv.Stop()
+
+	folderZipURL := "https://takeout-download-drive.usercontent.google.com/download/j/1234567890?user=0&authuser=0"
+	folderZipFilename := "[44.1-24 Tidal MQA]-20261126T081600Z-001.zip"
+
+	if err := ValidateHTTPURL(folderZipURL); err != nil {
+		t.Fatalf("ValidateHTTPURL rejected Google Drive folder ZIP URL: %v", err)
+	}
+	if err := ValidateFilename(folderZipFilename); err != nil {
+		t.Fatalf("ValidateFilename rejected bracketed Google Drive folder ZIP filename: %v", err)
+	}
+
+	client := NewClient(srv.Port())
+	resp, err := client.AddDownload(AddDownloadRequest{
+		URL:        folderZipURL,
+		Filename:   folderZipFilename,
+		Referrer:   "https://drive.google.com/",
+		TotalBytes: 0, // chunked streaming ZIP where browser reports totalBytes = -1
+		AutoStart:  false,
+	})
+	if err != nil {
+		t.Fatalf("AddDownload failed for Google Drive folder ZIP: %v", err)
+	}
+	if !resp.Success || resp.Task == nil {
+		t.Fatalf("expected success with task, got %+v", resp)
+	}
+	if resp.Task.Filename != folderZipFilename {
+		t.Fatalf("expected filename %q, got %q", folderZipFilename, resp.Task.Filename)
+	}
+	if resp.Task.TotalBytes != 0 {
+		t.Fatalf("expected TotalBytes=0 for streaming ZIP, got %d", resp.Task.TotalBytes)
+	}
+	if resp.Task.Category != engine.CategoryCompressed {
+		t.Fatalf("expected Compressed category for .zip, got %q", resp.Task.Category)
+	}
+}

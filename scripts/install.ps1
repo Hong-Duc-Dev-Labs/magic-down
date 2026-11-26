@@ -239,5 +239,19 @@ Write-Host "  Native Messaging : $ManifestPath -> $InstalledHostExe"
 Write-Host "  Uninstall Entry  : $UninstallRegPath"
 
 if ($LaunchAfterInstall) {
-    Start-Process -FilePath $InstalledGuiExe
+    $launched = $false
+    try {
+        $res = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{
+            CommandLine      = "`"$InstalledGuiExe`""
+            CurrentDirectory = $InstallDir
+        } -ErrorAction Stop
+        if ($res -and $res.ReturnValue -eq 0) {
+            $launched = $true
+        }
+    } catch {
+        $launched = $false
+    }
+    if (-not $launched) {
+        Start-Process -FilePath $InstalledGuiExe -WorkingDirectory $InstallDir
+    }
 }
