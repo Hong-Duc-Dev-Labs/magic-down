@@ -103,17 +103,31 @@ function sanitizeDownloadFilename(rawFilename) {
   return base;
 }
 
-async function getSettings() {
-  const stored = await chrome.storage.local.get([
-    "interceptEnabled",
-    "extensions",
-    "minFileSizeMB",
-    "excludedDomains",
-    "theme"
-  ]);
+async function getSettings(storageArea) {
+  const storage = storageArea || (typeof chrome !== "undefined" && chrome.storage && chrome.storage.local);
+  const stored = storage
+    ? await storage.get([
+        "interceptEnabled",
+        "extensions",
+        "minFileSizeMB",
+        "excludedDomains",
+        "theme"
+      ])
+    : {};
+  let extensions = Array.isArray(stored.extensions) ? stored.extensions : DEFAULT_SETTINGS.extensions;
+  if (isLegacyDefaultExtensionList(extensions)) {
+    extensions = [...DEFAULT_SETTINGS.extensions];
+    if (storage && typeof storage.set === "function") {
+      try {
+        await storage.set({ extensions });
+      } catch {
+        // ignore storage write errors during migration
+      }
+    }
+  }
   return {
     interceptEnabled: stored.interceptEnabled !== undefined ? stored.interceptEnabled : DEFAULT_SETTINGS.interceptEnabled,
-    extensions: Array.isArray(stored.extensions) ? stored.extensions : DEFAULT_SETTINGS.extensions,
+    extensions,
     minFileSizeMB: typeof stored.minFileSizeMB === "number" ? stored.minFileSizeMB : DEFAULT_SETTINGS.minFileSizeMB,
     excludedDomains: Array.isArray(stored.excludedDomains) ? stored.excludedDomains : DEFAULT_SETTINGS.excludedDomains,
     theme: stored.theme || DEFAULT_SETTINGS.theme
@@ -1238,19 +1252,38 @@ function trackHandledDownloadId(id) {
   }
 }
 
+const ON_CREATED_FALLBACK_DELAY_MS = 250;
+
+function clearPendingDownload(id) {
+  if (id === undefined || id === null) return null;
+  const pending = pendingDownloads.get(id) || null;
+  if (pending) {
+    if (pending.fallbackTimer) {
+      clearTimeout(pending.fallbackTimer);
+      pending.fallbackTimer = null;
+    }
+    pendingDownloads.delete(id);
+  }
+  return pending;
+}
+
 function recordPendingDownload(downloadItem, options = {}) {
   if (!downloadItem || downloadItem.id === undefined || downloadItem.id === null) return null;
+  clearPendingDownload(downloadItem.id);
   const now = typeof options.now === "number" ? options.now : Date.now();
   const url = downloadItem.finalUrl || downloadItem.url || "";
   const entry = {
     bypassed: Boolean(downloadItem.bypass) || isDownloadBypassed(url, now),
     referrer: downloadItem.referrer || "",
     url,
+    item: downloadItem,
+    fallbackTimer: null,
     createdAt: now
   };
   pendingDownloads.set(downloadItem.id, entry);
   while (pendingDownloads.size > MAX_PENDING_DOWNLOADS) {
-    pendingDownloads.delete(pendingDownloads.keys().next().value);
+    const oldestKey = pendingDownloads.keys().next().value;
+    clearPendingDownload(oldestKey);
   }
   return entry;
 }
@@ -1275,14 +1308,12 @@ async function handleDownloadInterception(downloadItem, deps = {}) {
 
   const downloadId = downloadItem.id;
   if (downloadId !== undefined && downloadId !== null && handledDownloadIds.has(downloadId)) {
+    clearPendingDownload(downloadId);
     safeSuggest();
     return { intercepted: false, reason: "already_handled" };
   }
 
-  const pending = downloadId !== undefined && downloadId !== null ? pendingDownloads.get(downloadId) : null;
-  if (pending) {
-    pendingDownloads.delete(downloadId);
-  }
+  const pending = clearPendingDownload(downloadId);
 
   const effectiveItem = {
     ...downloadItem,
@@ -1315,10 +1346,10 @@ async function handleDownloadInterception(downloadItem, deps = {}) {
 
   trackHandledDownloadId(downloadId);
 
-  // When running via onCreated fallback (no suggest callback), pause first so
-  // Chrome doesn't finish a small download before Native Messaging responds.
+  // Pause the browser download immediately (even on onDeterminingFilename) so
+  // fast/small files don't stream to completion while Native Messaging responds.
   let paused = false;
-  if (!suggest && downloadsApi && typeof downloadsApi.pause === "function" && downloadId !== undefined) {
+  if (downloadsApi && typeof downloadsApi.pause === "function" && downloadId !== undefined) {
     try {
       await downloadsApi.pause(downloadId);
       paused = true;
@@ -1388,7 +1419,31 @@ function onDownloadCreated(downloadItem, deps = {}) {
   if (hasDeterminingFilename && !deps.forceImmediate) {
     // Record Alt-bypass & initial referrer at creation time so redirects before
     // onDeterminingFilename cannot expire the click-time bypass window.
-    recordPendingDownload(downloadItem, { now: deps.now });
+    const entry = recordPendingDownload(downloadItem, { now: deps.now });
+    const fallbackDelayMs =
+      typeof deps.fallbackDelayMs === "number" ? deps.fallbackDelayMs : ON_CREATED_FALLBACK_DELAY_MS;
+    if (entry && fallbackDelayMs >= 0 && downloadItem.id !== undefined && downloadItem.id !== null) {
+      entry.fallbackTimer = setTimeout(async () => {
+        if (handledDownloadIds.has(downloadItem.id) || !pendingDownloads.has(downloadItem.id)) {
+          return;
+        }
+        let latestItem = downloadItem;
+        if (downloadsApi && typeof downloadsApi.search === "function") {
+          try {
+            const results = await downloadsApi.search({ id: downloadItem.id });
+            if (Array.isArray(results) && results.length > 0 && results[0]) {
+              latestItem = results[0];
+            }
+          } catch {
+            // fall back to original onCreated downloadItem
+          }
+        }
+        if (handledDownloadIds.has(downloadItem.id)) {
+          return;
+        }
+        await handleDownloadInterception(latestItem, deps);
+      }, fallbackDelayMs);
+    }
     return;
   }
   return handleDownloadInterception(downloadItem, deps);
@@ -1402,7 +1457,13 @@ if (typeof chrome !== "undefined" && chrome.downloads) {
   }
   if (chrome.downloads.onDeterminingFilename) {
     chrome.downloads.onDeterminingFilename.addListener((downloadItem, suggest) => {
-      handleDownloadInterception(downloadItem, { suggest });
+      handleDownloadInterception(downloadItem, { suggest }).catch(() => {
+        try {
+          suggest();
+        } catch {
+          // ignore
+        }
+      });
       // Return true to indicate suggest() will be called asynchronously.
       return true;
     });
@@ -1412,7 +1473,7 @@ if (typeof chrome !== "undefined" && chrome.downloads) {
       if (!delta || delta.id === undefined) return;
       const state = delta.state && delta.state.current;
       if (state === "complete" || state === "interrupted") {
-        pendingDownloads.delete(delta.id);
+        clearPendingDownload(delta.id);
         handledDownloadIds.delete(delta.id);
       }
     });
@@ -1668,6 +1729,10 @@ if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.id) {
 if (typeof module !== "undefined" && module.exports) {
   module.exports = {
     DEFAULT_SETTINGS,
+    LEGACY_DEFAULT_EXTENSIONS,
+    getSettings,
+    isLegacyDefaultExtensionList,
+    clearPendingDownload,
     normalizeMediaUrl,
     getMediaDedupKey,
     parseFacebookEfg,

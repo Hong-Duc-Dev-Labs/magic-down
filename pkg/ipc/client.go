@@ -90,6 +90,11 @@ func (c *Client) AddDownload(req AddDownloadRequest) (*TaskResponse, error) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		bodySnippet, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
+		msg := strings.TrimSpace(string(bodySnippet))
+		if msg != "" {
+			return nil, fmt.Errorf("server returned status: %d (%s)", resp.StatusCode, msg)
+		}
 		return nil, fmt.Errorf("server returned status: %d", resp.StatusCode)
 	}
 
@@ -116,6 +121,11 @@ func (c *Client) AddBatchDownload(req BatchDownloadRequest) (*BatchDownloadRespo
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		bodySnippet, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
+		msg := strings.TrimSpace(string(bodySnippet))
+		if msg != "" {
+			return nil, fmt.Errorf("server returned status: %d (%s)", resp.StatusCode, msg)
+		}
 		return nil, fmt.Errorf("server returned status: %d", resp.StatusCode)
 	}
 

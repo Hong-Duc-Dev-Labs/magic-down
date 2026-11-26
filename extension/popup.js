@@ -1,4 +1,18 @@
 const DEFAULT_EXTS = ["*"];
+const LEGACY_DEFAULT_EXTS = [
+  "zip", "rar", "7z", "tar", "gz", "iso",
+  "exe", "msi", "dmg", "apk", "bin",
+  "mp4", "mkv", "avi", "mov", "webm",
+  "mp3", "flac", "wav", "pdf"
+];
+
+function isLegacyDefaultExts(exts) {
+  return (
+    Array.isArray(exts) &&
+    exts.length === LEGACY_DEFAULT_EXTS.length &&
+    LEGACY_DEFAULT_EXTS.every((ext, idx) => exts[idx] === ext)
+  );
+}
 
 const I18N = window.MagicDownI18n;
 function t(key, params) {
@@ -463,7 +477,12 @@ async function loadState() {
   state.theme = stored.theme || "dark";
   state.language = I18N ? I18N.resolveLang(stored.language) : (stored.language || "en");
   state.interceptEnabled = stored.interceptEnabled !== false;
-  state.extensions = Array.isArray(stored.extensions) ? stored.extensions : [...DEFAULT_EXTS];
+  if (isLegacyDefaultExts(stored.extensions)) {
+    state.extensions = [...DEFAULT_EXTS];
+    await chrome.storage.local.set({ extensions: state.extensions });
+  } else {
+    state.extensions = Array.isArray(stored.extensions) ? stored.extensions : [...DEFAULT_EXTS];
+  }
   state.minFileSizeMB = typeof stored.minFileSizeMB === "number" ? stored.minFileSizeMB : 0;
   state.excludedDomains = Array.isArray(stored.excludedDomains) ? stored.excludedDomains : [];
   state.recentDownloads = Array.isArray(stored.recentDownloads) ? stored.recentDownloads : [];

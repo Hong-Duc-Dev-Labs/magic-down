@@ -3,6 +3,10 @@ const assert = require("node:assert/strict");
 
 const {
   DEFAULT_SETTINGS,
+  LEGACY_DEFAULT_EXTENSIONS,
+  getSettings,
+  isLegacyDefaultExtensionList,
+  clearPendingDownload,
   isInterceptableHttpUrl,
   sanitizeDownloadFilename,
   shouldIntercept,
@@ -19,7 +23,9 @@ const {
 function resetState() {
   clearDownloadBypass();
   handledDownloadIds.clear();
-  pendingDownloads.clear();
+  for (const id of Array.from(pendingDownloads.keys())) {
+    clearPendingDownload(id);
+  }
 }
 
 test("DEFAULT_SETTINGS intercepts all browser downloads by default (IDM-style)", () => {
@@ -120,6 +126,7 @@ test("handleDownloadInterception intercepts HTTP/HTTPS downloads with Content-Di
   assert.equal(forwarded[0].referrer, "https://example.com/dashboard");
   assert.equal(forwarded[0].size, 5242880);
   assert.deepEqual(calls, [
+    ["pause", 101],
     ["cancel", 101],
     ["erase", 101]
   ]);
@@ -273,7 +280,10 @@ test("Fail-safe: when MagicDown Desktop is offline or native messaging fails, br
   assert.equal(res1.intercepted, false);
   assert.equal(res1.reason, "host_error");
   assert.equal(suggested, true);
-  assert.deepEqual(calls, []);
+  assert.deepEqual(calls, [
+    ["pause", 501],
+    ["resume", 501]
+  ]);
 
   // Path 2: onCreated fallback path (no suggest) pauses then resumes on error
   const calls2 = [];
@@ -385,4 +395,167 @@ test("shouldIntercept respects custom extension filters (using Content-Dispositi
     ),
     false
   );
+});
+
+test("Google Drive drive.usercontent.google.com/download URL with unknown size (-1) is intercepted via onDeterminingFilename", async () => {
+  resetState();
+  const gdriveUrl =
+    "https://drive.usercontent.google.com/download?id=10pgMGJGLBVCsH_tpl-OvWS444lPP5qHa&export=download&authuser=0";
+  const forwarded = [];
+  const calls = [];
+  let suggestCount = 0;
+
+  onDownloadCreated(
+    {
+      id: 701,
+      url: gdriveUrl,
+      filename: "",
+      referrer: "https://drive.google.com/",
+      totalBytes: -1,
+      fileSize: -1,
+      state: "in_progress"
+    },
+    {
+      downloadsApi: { onDeterminingFilename: {} },
+      fallbackDelayMs: 5000
+    }
+  );
+
+  const res = await handleDownloadInterception(
+    {
+      id: 701,
+      url: gdriveUrl,
+      finalUrl: gdriveUrl,
+      filename: "Project-Deck.pptx",
+      referrer: "https://drive.google.com/",
+      totalBytes: -1,
+      fileSize: -1,
+      state: "in_progress"
+    },
+    {
+      getSettings: async () => ({ ...DEFAULT_SETTINGS, minFileSizeMB: 5 }),
+      forwardDownload: async (req) => {
+        forwarded.push(req);
+        return { success: true, taskId: "task-gdrive-701", filename: req.filename };
+      },
+      downloadsApi: {
+        pause: async (id) => calls.push(["pause", id]),
+        cancel: async (id) => calls.push(["cancel", id]),
+        erase: async (q) => calls.push(["erase", q.id]),
+        resume: async (id) => calls.push(["resume", id])
+      },
+      suggest: () => {
+        suggestCount++;
+      }
+    }
+  );
+
+  assert.equal(res.intercepted, true);
+  assert.equal(forwarded.length, 1);
+  assert.equal(forwarded[0].url, gdriveUrl);
+  assert.equal(forwarded[0].filename, "Project-Deck.pptx");
+  assert.equal(forwarded[0].referrer, "https://drive.google.com/");
+  assert.equal(forwarded[0].size, 0);
+  assert.deepEqual(calls, [
+    ["pause", 701],
+    ["cancel", 701],
+    ["erase", 701]
+  ]);
+  assert.equal(suggestCount, 1);
+  assert.equal(pendingDownloads.has(701), false);
+});
+
+test("getSettings auto-migrates legacy 20-extension list to ['*'] so Google Drive files are not skipped", async () => {
+  resetState();
+  const store = {
+    interceptEnabled: true,
+    extensions: [...LEGACY_DEFAULT_EXTENSIONS],
+    minFileSizeMB: 0,
+    excludedDomains: []
+  };
+  let setCalls = 0;
+  const mockStorage = {
+    get: async () => ({ ...store }),
+    set: async (patch) => {
+      setCalls++;
+      Object.assign(store, patch);
+    }
+  };
+
+  assert.equal(isLegacyDefaultExtensionList(store.extensions), true);
+  const migrated = await getSettings(mockStorage);
+  assert.deepEqual(migrated.extensions, ["*"]);
+  assert.equal(setCalls, 1);
+  assert.deepEqual(store.extensions, ["*"]);
+
+  // Verify Google Drive URL with non-legacy extension (.docx) and empty filename both intercept
+  const gdriveUrl =
+    "https://drive.usercontent.google.com/download?id=10pgMGJGLBVCsH_tpl-OvWS444lPP5qHa&export=download&authuser=0";
+  assert.equal(
+    shouldIntercept({ id: 702, url: gdriveUrl, filename: "notes.docx", totalBytes: -1, fileSize: -1 }, migrated),
+    true
+  );
+  assert.equal(
+    shouldIntercept({ id: 703, url: gdriveUrl, filename: "", totalBytes: -1, fileSize: -1 }, migrated),
+    true
+  );
+});
+
+test("onDownloadCreated fallback timer intercepts Google Drive download if onDeterminingFilename never fires", async () => {
+  resetState();
+  const gdriveUrl =
+    "https://drive.usercontent.google.com/download?id=10pgMGJGLBVCsH_tpl-OvWS444lPP5qHa&export=download&authuser=0";
+  const forwarded = [];
+  const calls = [];
+
+  onDownloadCreated(
+    {
+      id: 704,
+      url: gdriveUrl,
+      filename: "",
+      referrer: "https://drive.google.com/",
+      totalBytes: -1,
+      fileSize: -1,
+      state: "in_progress"
+    },
+    {
+      fallbackDelayMs: 25,
+      getSettings: async () => ({ ...DEFAULT_SETTINGS }),
+      forwardDownload: async (req) => {
+        forwarded.push(req);
+        return { success: true, taskId: "task-gdrive-704", filename: req.filename };
+      },
+      downloadsApi: {
+        onDeterminingFilename: {},
+        search: async ({ id }) => [
+          {
+            id,
+            url: gdriveUrl,
+            finalUrl: gdriveUrl,
+            filename: "C:\\Users\\hongducdev\\Downloads\\GoogleDriveArchive.zip",
+            referrer: "https://drive.google.com/",
+            totalBytes: 2048000,
+            fileSize: 2048000,
+            state: "in_progress"
+          }
+        ],
+        pause: async (id) => calls.push(["pause", id]),
+        cancel: async (id) => calls.push(["cancel", id]),
+        erase: async (q) => calls.push(["erase", q.id]),
+        resume: async (id) => calls.push(["resume", id])
+      }
+    }
+  );
+
+  await new Promise((resolve) => setTimeout(resolve, 80));
+
+  assert.equal(forwarded.length, 1);
+  assert.equal(forwarded[0].url, gdriveUrl);
+  assert.equal(forwarded[0].filename, "GoogleDriveArchive.zip");
+  assert.equal(forwarded[0].size, 2048000);
+  assert.deepEqual(calls, [
+    ["pause", 704],
+    ["cancel", 704],
+    ["erase", 704]
+  ]);
 });

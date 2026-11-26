@@ -4,12 +4,20 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net/url"
 	"os"
 	"strings"
 
 	"magicdown/pkg/ipc"
 	"magicdown/pkg/version"
 )
+
+func safeURLHost(raw string) string {
+	if u, err := url.Parse(strings.TrimSpace(raw)); err == nil {
+		return u.Hostname()
+	}
+	return ""
+}
 
 // InboundMessage represents a message received from the browser extension.
 type InboundMessage struct {
@@ -155,6 +163,7 @@ func (h *Handler) HandleMessage(msgBytes []byte) ([]byte, error) {
 
 	case "download":
 		if err := ipc.ValidateHTTPURL(in.URL); err != nil {
+			LogEvent("WARN", "download_rejected", map[string]any{"error": err.Error()})
 			resp := OutboundMessage{
 				Success: false,
 				Action:  "download",
@@ -165,6 +174,7 @@ func (h *Handler) HandleMessage(msgBytes []byte) ([]byte, error) {
 
 		// Check if desktop app is running
 		if !h.ipcClient.IsAppRunning() {
+			LogEvent("WARN", "download_app_offline", map[string]any{"host": safeURLHost(in.URL)})
 			resp := OutboundMessage{
 				Success: false,
 				Action:  "download",
@@ -193,6 +203,7 @@ func (h *Handler) HandleMessage(msgBytes []byte) ([]byte, error) {
 			Subfolder:     in.Subfolder,
 		})
 		if err != nil {
+			LogEvent("ERROR", "download_forward_failed", map[string]any{"host": safeURLHost(in.URL), "error": err.Error()})
 			resp := OutboundMessage{
 				Success: false,
 				Action:  "download",
@@ -201,6 +212,7 @@ func (h *Handler) HandleMessage(msgBytes []byte) ([]byte, error) {
 			return json.Marshal(resp)
 		}
 
+		LogEvent("INFO", "download_forwarded", map[string]any{"host": safeURLHost(in.URL), "has_filename": strings.TrimSpace(in.Filename) != ""})
 		resp := OutboundMessage{
 			Success:  true,
 			Action:   "download",
