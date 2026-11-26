@@ -38,6 +38,10 @@ type WindowController interface {
 	Invalidate()
 }
 
+type nativeHandleProvider interface {
+	NativeHandle() uintptr
+}
+
 // FrameScheduleMode describes how the MyGo render loop should schedule the next frame.
 type FrameScheduleMode int
 
@@ -68,6 +72,7 @@ type App struct {
 	nativeStatusFn      func() nativemessaging.RegistrationStatus
 	detectBrowsersFn    func() []nativemessaging.BrowserInfo
 	integrateBrowsersFn func([]nativemessaging.BrowserInfo, string, string, bool) []nativemessaging.BrowserInstallResult
+	bringToForegroundFn func(uintptr) bool
 	nativeStatus        nativemessaging.RegistrationStatus
 	nativeRegMsg        string
 
@@ -167,6 +172,7 @@ func NewApp(eng *engine.Engine, srv *ipc.Server) *App {
 		nativeStatusFn:            nativemessaging.CheckRegistration,
 		detectBrowsersFn:          nativemessaging.DetectInstalledBrowsers,
 		integrateBrowsersFn:       nativemessaging.IntegrateBrowsers,
+		bringToForegroundFn:       bringWindowToForeground,
 		selectedBrowsers:          make(map[string]bool),
 		browserResults:            make(map[string]nativemessaging.BrowserInstallResult),
 		browserConnStates:         make(map[string]nativemessaging.ExtensionConnectionState),
@@ -311,8 +317,9 @@ func (a *App) HideToTray() {
 	}
 }
 
-// WakeFromTray restores and focuses the main window and resumes UI rendering.
-func (a *App) WakeFromTray() {
+// BringToForeground wakes the app if hidden in tray, restores it if minimized,
+// raises it above background windows (such as browsers), and invalidates the UI.
+func (a *App) BringToForeground() {
 	a.trayMu.Lock()
 	a.inTray = false
 	a.trayMu.Unlock()
@@ -320,8 +327,20 @@ func (a *App) WakeFromTray() {
 		a.winCtrl.Show()
 		a.winCtrl.Restore()
 		a.winCtrl.Focus()
+		if a.bringToForegroundFn != nil {
+			var hwnd uintptr
+			if hp, ok := a.winCtrl.(nativeHandleProvider); ok {
+				hwnd = hp.NativeHandle()
+			}
+			a.bringToForegroundFn(hwnd)
+		}
 		a.winCtrl.Invalidate()
 	}
+}
+
+// WakeFromTray restores and focuses the main window and resumes UI rendering.
+func (a *App) WakeFromTray() {
+	a.BringToForeground()
 }
 
 // HandleCloseRequest handles a window close action (title bar X or OS close event).
@@ -358,16 +377,13 @@ func (a *App) FrameScheduleMode() FrameScheduleMode {
 }
 
 // EnqueueIncomingDownload queues a download received over IPC so the UI opens
-// the Download Info Dialog on the next frame, waking the window if hidden in tray.
+// the Download Info Dialog on the next frame, waking and raising the window to
+// the foreground whether it is hidden in tray, minimized, or behind another app.
 func (a *App) EnqueueIncomingDownload(req ipc.AddDownloadRequest) {
 	a.pendingMu.Lock()
 	a.pendingIncoming = append(a.pendingIncoming, req)
 	a.pendingMu.Unlock()
-	if a.IsInTray() {
-		a.WakeFromTray()
-	} else if a.winCtrl != nil {
-		a.winCtrl.Invalidate()
-	}
+	a.BringToForeground()
 }
 
 func (a *App) popPendingIncoming() {
@@ -442,7 +458,9 @@ func (a *App) openIncomingDownloadDialog(req ipc.AddDownloadRequest) {
 	a.lastAutoTarget = a.inputFilename + "|" + a.inputURL
 	a.addError = ""
 	a.showSettingsModal = false
+	a.showOnboardingModal = false
 	a.showAddModal = true
+	a.BringToForeground()
 }
 
 // SetWindowController attaches the native MyGo window controller for custom title bar buttons.

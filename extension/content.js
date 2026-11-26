@@ -51,13 +51,17 @@
   const YT_PROBE_MSG = "magicdown:yt-probe:v1";
   const BILI_MSG = "magicdown:bili-playinfo:v1";
   const BILI_PROBE_MSG = "magicdown:bili-probe:v1";
+  const XHS_MSG = "magicdown:xhs-note:v1";
+  const XHS_PROBE_MSG = "magicdown:xhs-probe:v1";
   const YT = typeof window !== "undefined" && window.MagicDownYouTube ? window.MagicDownYouTube : null;
   const BILI = typeof window !== "undefined" && window.MagicDownBilibili ? window.MagicDownBilibili : null;
   const THUMB = typeof window !== "undefined" && window.MagicDownThumbnail ? window.MagicDownThumbnail : null;
   const isYouTubePage = Boolean(YT && YT.isYouTubeHost(location.hostname));
   const isBilibiliPage = Boolean(BILI && BILI.isBilibiliHost(location.hostname));
+  const isXiaohongshuPage = Boolean(THUMB && THUMB.isXiaohongshuHost && THUMB.isXiaohongshuHost(location.hostname));
   const ytPlayers = new Map(); // videoId -> parsed YouTube player entry
   const biliPlayers = new Map(); // videoId -> parsed Bilibili player entry
+  const xhsNotes = new Map(); // noteId -> { noteId, title, thumbnail }
   let latestYtEntry = null;
   let latestBiliEntry = null;
   let lastHref = location.href;
@@ -309,6 +313,33 @@
         }
         return;
       }
+      if (data.__mdSniff === XHS_MSG && Array.isArray(data.notes) && THUMB) {
+        let updated = false;
+        for (const rec of data.notes) {
+          if (!rec || !rec.noteId || !rec.url) continue;
+          const url = THUMB.normalizeThumbnailUrl(rec.url, location.href);
+          if (!url) continue;
+          const fmt = THUMB.detectImageFormat(url);
+          xhsNotes.set(String(rec.noteId), {
+            noteId: String(rec.noteId),
+            title: typeof rec.title === "string" ? rec.title : "",
+            thumbnail: {
+              url,
+              width: Number(rec.width) || 0,
+              height: Number(rec.height) || 0,
+              format: fmt.format,
+              ext: fmt.ext,
+              source: "xiaohongshu"
+            }
+          });
+          if (xhsNotes.size > 60) {
+            xhsNotes.delete(xhsNotes.keys().next().value);
+          }
+          updated = true;
+        }
+        if (updated) scheduleRefresh();
+        return;
+      }
       if (data.__mdSniff !== SNIFF_MSG || !Array.isArray(data.items)) return;
       for (const item of data.items) ingestSniff(item);
       if (data.replay) scheduleRefresh();
@@ -339,12 +370,16 @@
 
   function sanitizeTitleFilename(ext, preferredTitle) {
     const raw = (preferredTitle || document.title || "video")
+      .replace(/^\(\d+\)\s*/, "")
       .replace(/\s*-\s*YouTube\s*$/i, "")
       .replace(/_哔哩哔哩_bilibili\s*$/i, "")
+      .replace(/\s*-\s*小红书\s*$/i, "")
       .replace(/[<>:"/\\|?*\x00-\x1f]/g, " ")
+      .replace(/\.\.+/g, ".")
       .replace(/\s+/g, " ")
       .trim()
-      .slice(0, 80);
+      .slice(0, 80)
+      .replace(/^[\s.-]+|[\s.-]+$/g, "");
     const base = raw || "video";
     return `${base}.${ext}`;
   }
@@ -395,6 +430,13 @@
       }
       try {
         window.postMessage({ __mdSniff: BILI_PROBE_MSG }, "*");
+      } catch {
+        // ignore
+      }
+    }
+    if (isXiaohongshuPage) {
+      try {
+        window.postMessage({ __mdSniff: XHS_PROBE_MSG }, "*");
       } catch {
         // ignore
       }
@@ -1219,6 +1261,28 @@
       }
     }
 
+    if (isXiaohongshuPage && THUMB) {
+      const noteId = THUMB.extractXiaohongshuNoteId(location.href);
+      const xhsEntry = noteId ? xhsNotes.get(noteId) : null;
+      if (xhsEntry && xhsEntry.thumbnail && xhsEntry.thumbnail.url) {
+        return {
+          ...xhsEntry.thumbnail,
+          title: xhsEntry.title || document.title || "xiaohongshu",
+          referrer: location.href
+        };
+      }
+      const xhsDom = THUMB.extractXiaohongshuDomCover(activeVideo, document, location.href);
+      if (xhsDom && xhsDom.url) {
+        return {
+          ...xhsDom,
+          title: document.title || "xiaohongshu",
+          referrer: location.href
+        };
+      }
+      // On Xiaohongshu, avoid falling back to generic video poster/frame or avatar.
+      return null;
+    }
+
     // Facebook, Douyin, and generic video pages: <video poster>, container cover, or single-video og:image.
     if (THUMB) {
       const videoCount = collectVideoElements(document).length;
@@ -1521,6 +1585,13 @@
           // ignore
         }
       }
+      if (dropdownOpen && isXiaohongshuPage) {
+        try {
+          window.postMessage({ __mdSniff: XHS_PROBE_MSG }, "*");
+        } catch {
+          // ignore
+        }
+      }
       renderDropdown();
     });
 
@@ -1717,8 +1788,10 @@
           if (resp && resp.success) {
             dlPill.textContent = t("overlay.sent");
             dlPill.classList.add("sent");
+            dlPill.title = "";
           } else {
             dlPill.textContent = t("overlay.offline");
+            if (resp && resp.error) dlPill.title = String(resp.error);
           }
         } else {
           dlPill.textContent = t("overlay.sent");
@@ -1871,8 +1944,10 @@
           if (resp && resp.success) {
             dlPill.textContent = t("overlay.sent");
             dlPill.classList.add("sent");
+            dlPill.title = "";
           } else {
             dlPill.textContent = t("overlay.offline");
+            if (resp && resp.error) dlPill.title = String(resp.error);
           }
         } else {
           dlPill.textContent = t("overlay.sent");

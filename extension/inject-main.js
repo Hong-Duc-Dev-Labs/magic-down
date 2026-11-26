@@ -19,17 +19,21 @@
   const YT_PROBE_MSG = "magicdown:yt-probe:v1";
   const BILI_MSG = "magicdown:bili-playinfo:v1";
   const BILI_PROBE_MSG = "magicdown:bili-probe:v1";
+  const XHS_MSG = "magicdown:xhs-note:v1";
+  const XHS_PROBE_MSG = "magicdown:xhs-probe:v1";
   const MAX_ITEMS = 200;
   const MAX_URL = 4096;
   const MEDIA_PATH = /\.(?:mp4|m4s|m4v|m4a|m4p|webm|ts|m3u8|mpd|mov|mkv|mp3|aac)(?:$|[?#])/i;
   const RANGE_HINT = /(?:^|[?&])(?:bytestart|byteend|bytes|range)=/i;
   const IS_YOUTUBE = /(?:^|\.)(?:youtube\.com|youtube-nocookie\.com)$/i.test(location.hostname || "");
   const IS_BILIBILI = /(?:^|\.)bilibili\.com$/i.test(location.hostname || "");
+  const IS_XHS = /(?:^|\.)xiaohongshu\.com$/i.test(location.hostname || "");
 
   const items = [];
   const pending = [];
   const ytPayloads = new Map(); // videoId -> compact payload
   const biliPayloads = new Map(); // pageUrl -> compact payload
+  const xhsNotes = new Map(); // noteId -> { noteId, title, url, width, height }
   let flushTimer = 0;
   let lastFlush = 0;
   let seq = 0;
@@ -253,6 +257,146 @@
     }
   }
 
+  // --- Xiaohongshu (RedNote) outer post cover extraction ---------------------
+  function isXhsApiUrl(url) {
+    try {
+      const u = new URL(url, location.href);
+      const host = u.hostname.toLowerCase();
+      if (host !== "xiaohongshu.com" && !host.endsWith(".xiaohongshu.com")) return false;
+      return /\/api\/sns\/web\/v1\/(?:feed|homefeed|user_posted|search\/notes)(?:$|\?)/i.test(u.pathname);
+    } catch {
+      return false;
+    }
+  }
+
+  function unwrapXhsRef(val) {
+    if (val && typeof val === "object") {
+      if ("_rawValue" in val && val._rawValue && typeof val._rawValue === "object") return val._rawValue;
+      if ("value" in val && val.value && typeof val.value === "object" && !("note" in val) && !("imageList" in val) && !("image_list" in val)) {
+        return val.value;
+      }
+    }
+    return val;
+  }
+
+  function normalizeXhsCoverUrl(raw) {
+    if (typeof raw !== "string") return "";
+    let s = raw.trim();
+    if (!s) return "";
+    if (s.startsWith("//")) s = `https:${s}`;
+    if (!/^https?:\/\//i.test(s)) return "";
+    return s.slice(0, MAX_URL);
+  }
+
+  function pickXhsCoverFromImageObj(img) {
+    if (!img) return null;
+    if (typeof img === "string") {
+      const url = normalizeXhsCoverUrl(img);
+      return url ? { url, width: 0, height: 0 } : null;
+    }
+    if (typeof img !== "object") return null;
+    const width = Number(img.width) || 0;
+    const height = Number(img.height) || 0;
+    const urlDefault = normalizeXhsCoverUrl(img.urlDefault || img.url_default || "");
+    if (urlDefault) return { url: urlDefault, width, height };
+    const infoList = Array.isArray(img.infoList) ? img.infoList : (Array.isArray(img.info_list) ? img.info_list : []);
+    if (infoList.length > 0) {
+      const dft = infoList.find((it) => it && String(it.imageScene || it.image_scene || "").toUpperCase() === "WB_DFT" && it.url);
+      if (dft) {
+        const u = normalizeXhsCoverUrl(dft.url);
+        if (u) return { url: u, width, height };
+      }
+      for (const it of infoList) {
+        if (!it || typeof it.url !== "string") continue;
+        const u = normalizeXhsCoverUrl(it.url);
+        if (u) return { url: u, width, height };
+      }
+    }
+    for (const c of [img.urlPre, img.url_pre, img.url]) {
+      const u = normalizeXhsCoverUrl(c || "");
+      if (u) return { url: u, width, height };
+    }
+    return null;
+  }
+
+  function extractXhsNoteRecord(noteId, rawNote) {
+    const note = unwrapXhsRef(rawNote);
+    if (!note || typeof note !== "object") return null;
+    const list = Array.isArray(note.imageList) ? note.imageList : (Array.isArray(note.image_list) ? note.image_list : []);
+    const picked = (list.length > 0 ? pickXhsCoverFromImageObj(list[0]) : null) || (note.cover ? pickXhsCoverFromImageObj(note.cover) : null);
+    if (!picked || !picked.url) return null;
+    const id = String(noteId || note.noteId || note.note_id || note.id || "").slice(0, 48);
+    if (!id) return null;
+    const title = String(note.title || note.displayTitle || note.display_title || note.desc || "").trim().slice(0, 200);
+    return { noteId: id, title, url: picked.url, width: picked.width, height: picked.height };
+  }
+
+  function emitXhsNotes(records) {
+    if (!Array.isArray(records) || records.length === 0) return;
+    const batch = [];
+    for (const rec of records) {
+      if (!rec || !rec.noteId || !rec.url) continue;
+      xhsNotes.set(rec.noteId, rec);
+      if (xhsNotes.size > 60) {
+        xhsNotes.delete(xhsNotes.keys().next().value);
+      }
+      batch.push(rec);
+    }
+    if (batch.length > 0) {
+      try {
+        window.postMessage({ __mdSniff: XHS_MSG, notes: batch }, "*");
+      } catch {
+        // ignore
+      }
+    }
+  }
+
+  function probeXiaohongshuState() {
+    if (!IS_XHS) return;
+    try {
+      const st = unwrapXhsRef(window.__INITIAL_STATE__);
+      if (!st || typeof st !== "object") return;
+      const found = [];
+      const noteMod = unwrapXhsRef(st.note);
+      const detailMap = noteMod && typeof noteMod === "object" ? unwrapXhsRef(noteMod.noteDetailMap) : null;
+      if (detailMap && typeof detailMap === "object") {
+        for (const [key, val] of Object.entries(detailMap)) {
+          const entry = unwrapXhsRef(val);
+          const rec = extractXhsNoteRecord(key, entry && entry.note ? entry.note : entry);
+          if (rec) found.push(rec);
+        }
+      }
+      const feedMod = unwrapXhsRef(st.feed);
+      const feeds = feedMod && Array.isArray(unwrapXhsRef(feedMod.feeds)) ? unwrapXhsRef(feedMod.feeds) : [];
+      for (const item of feeds.slice(0, 40)) {
+        if (!item || typeof item !== "object") continue;
+        const rec = extractXhsNoteRecord(item.id || item.noteId || item.note_id, item.noteCard || item.note_card || item.note);
+        if (rec) found.push(rec);
+      }
+      emitXhsNotes(found);
+    } catch {
+      // ignore
+    }
+  }
+
+  function inspectXhsApiJson(obj) {
+    if (!obj || typeof obj !== "object") return;
+    try {
+      const data = obj.data && typeof obj.data === "object" ? obj.data : obj;
+      const list = Array.isArray(data.items) ? data.items : [];
+      const found = [];
+      for (const item of list.slice(0, 40)) {
+        if (!item || typeof item !== "object") continue;
+        const card = item.note_card || item.noteCard || item.note || item;
+        const rec = extractXhsNoteRecord(item.id || item.note_id || item.noteId, card);
+        if (rec) found.push(rec);
+      }
+      emitXhsNotes(found);
+    } catch {
+      // ignore
+    }
+  }
+
   function isMediaURL(value) {
     if (typeof value !== "string" || value.length === 0 || value.length > MAX_URL) return false;
     if (value.startsWith("blob:")) return true;
@@ -311,6 +455,16 @@
       }
       probeBilibiliPlayInfo();
     }
+    if (IS_XHS) {
+      if (xhsNotes.size > 0) {
+        try {
+          window.postMessage({ __mdSniff: XHS_MSG, replay: true, notes: Array.from(xhsNotes.values()) }, "*");
+        } catch {
+          // ignore
+        }
+      }
+      probeXiaohongshuState();
+    }
   }
 
   try {
@@ -326,6 +480,8 @@
           probeYouTubePlayers();
         } else if (data.__mdSniff === BILI_PROBE_MSG) {
           probeBilibiliPlayInfo();
+        } else if (data.__mdSniff === XHS_PROBE_MSG) {
+          probeXiaohongshuState();
         }
       },
       false
@@ -346,6 +502,13 @@
   if (IS_BILIBILI) {
     try {
       document.addEventListener("DOMContentLoaded", probeBilibiliPlayInfo, { passive: true });
+    } catch {
+      // ignore
+    }
+  }
+  if (IS_XHS) {
+    try {
+      document.addEventListener("DOMContentLoaded", probeXiaohongshuState, { passive: true });
     } catch {
       // ignore
     }
@@ -794,6 +957,17 @@
                 }
               }).catch(() => {});
             }
+            if (IS_XHS && url && isXhsApiUrl(url) && promise && typeof promise.then === "function") {
+              promise.then((resp) => {
+                try {
+                  if (resp && resp.ok && typeof resp.clone === "function") {
+                    resp.clone().json().then(inspectXhsApiJson).catch(() => {});
+                  }
+                } catch {
+                  // ignore
+                }
+              }).catch(() => {});
+            }
           } catch {
             // ignore
           }
@@ -877,6 +1051,26 @@
               }
             } else {
               this.__mdBiliPlayerXhr = false;
+            }
+            if (IS_XHS && isXhsApiUrl(safeUrl)) {
+              this.__mdXhsApiXhr = true;
+              if (!this.__mdXhsApiHooked) {
+                this.__mdXhsApiHooked = true;
+                this.addEventListener("load", () => {
+                  try {
+                    if (!this.__mdXhsApiXhr) return;
+                    if (this.responseType === "json" && this.response) {
+                      inspectXhsApiJson(this.response);
+                    } else if ((!this.responseType || this.responseType === "text") && this.responseText) {
+                      inspectXhsApiJson(JSON.parse(this.responseText));
+                    }
+                  } catch {
+                    // ignore
+                  }
+                });
+              }
+            } else {
+              this.__mdXhsApiXhr = false;
             }
           } catch {
             // ignore

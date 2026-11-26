@@ -156,3 +156,157 @@ test("buildThumbnailFilename sanitizes titles and appends -thumbnail.<ext>", () 
   );
   assert.equal(thumb.buildThumbnailFilename("", "png"), "video-thumbnail.png");
 });
+
+test("YouTube thumbnail filename and download payload never contain '..' or forbidden characters", () => {
+  const { buildDownloadPayload, sanitizeDownloadFilename } = require("./background.js");
+
+  const trickyTitles = [
+    "(3) Wait... What Happened Next?! - YouTube",
+    "Top 10.. Tricks / Hacks \\ Secrets: Part 1... - YouTube",
+    "...",
+    "A".repeat(70) + "... - YouTube"
+  ];
+
+  for (const title of trickyTitles) {
+    const filename = thumb.buildThumbnailFilename(title, "jpg");
+    assert.ok(!filename.includes(".."), `filename must not contain '..': ${filename}`);
+    assert.ok(!/[<>:"/\\|?*\x00-\x1f]/.test(filename), `filename must not contain forbidden chars: ${filename}`);
+    assert.ok(filename.endsWith("-thumbnail.jpg"), `filename must end with -thumbnail.jpg: ${filename}`);
+
+    const payload = buildDownloadPayload({
+      url: "https://i.ytimg.com/vi/dQw4w9WgXcQ/maxresdefault.jpg",
+      filename,
+      referrer: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+      headers: { Origin: "https://www.youtube.com", Referer: "https://www.youtube.com/watch?v=dQw4w9WgXcQ" }
+    });
+    assert.equal(payload.action, "download");
+    assert.equal(payload.url, "https://i.ytimg.com/vi/dQw4w9WgXcQ/maxresdefault.jpg");
+    assert.equal(payload.filename, filename);
+    assert.ok(!payload.filename.includes(".."));
+  }
+
+  assert.equal(sanitizeDownloadFilename("My Video...-thumbnail.jpg"), "My Video.-thumbnail.jpg");
+  assert.equal(sanitizeDownloadFilename("foo:bar?baz*..jpg"), "foo bar baz .jpg");
+});
+
+test("Xiaohongshu (RedNote) host detection and noteId extraction", () => {
+  assert.equal(thumb.isXiaohongshuHost("www.xiaohongshu.com"), true);
+  assert.equal(thumb.isXiaohongshuHost("xiaohongshu.com"), true);
+  assert.equal(thumb.isXiaohongshuHost("youtube.com"), false);
+
+  assert.equal(
+    thumb.extractXiaohongshuNoteId("https://www.xiaohongshu.com/explore/65a1b2c3000000001e03a1b2?xsec_token=abc"),
+    "65a1b2c3000000001e03a1b2"
+  );
+  assert.equal(
+    thumb.extractXiaohongshuNoteId("https://www.xiaohongshu.com/discovery/item/65a1b2c3000000001e03a1b2"),
+    "65a1b2c3000000001e03a1b2"
+  );
+  assert.equal(
+    thumb.extractXiaohongshuNoteId("https://www.xiaohongshu.com/user/profile/5f1234567890abcdef123456/65a1b2c3000000001e03a1b2"),
+    "65a1b2c3000000001e03a1b2"
+  );
+  assert.equal(thumb.extractXiaohongshuNoteId("https://www.xiaohongshu.com/explore"), "");
+});
+
+test("Xiaohongshu extractXiaohongshuInitialState extracts outer cover from noteDetailMap imageList[0]", () => {
+  const noteId = "65a1b2c3000000001e03a1b2";
+  const state = {
+    note: {
+      noteDetailMap: {
+        [noteId]: {
+          note: {
+            noteId,
+            title: "My RedNote Post - 小红书",
+            imageList: [
+              {
+                width: 1080,
+                height: 1440,
+                urlDefault: "http://sns-webpic-qc.xhscdn.com/20261126/cover01!nd_dft_wlteh_webp_3",
+                urlPre: "http://sns-webpic-qc.xhscdn.com/20261126/cover01!nd_prv_wlteh_jpg_3"
+              }
+            ]
+          }
+        }
+      }
+    }
+  };
+
+  const res = thumb.extractXiaohongshuInitialState(state, `https://www.xiaohongshu.com/explore/${noteId}`);
+  assert.ok(res);
+  assert.equal(res.noteId, noteId);
+  assert.equal(res.thumbnail.url, "http://sns-webpic-qc.xhscdn.com/20261126/cover01!nd_dft_wlteh_webp_3");
+  assert.equal(res.thumbnail.width, 1080);
+  assert.equal(res.thumbnail.height, 1440);
+  assert.equal(res.thumbnail.format, "WEBP");
+  assert.equal(res.thumbnail.ext, "webp");
+  assert.equal(res.thumbnail.source, "xiaohongshu");
+
+  // infoList prefers WB_DFT over WB_PRV when urlDefault is absent
+  const infoListCover = thumb.extractXiaohongshuCoverFromNote({
+    imageList: [
+      {
+        width: 720,
+        height: 960,
+        infoList: [
+          { imageScene: "WB_PRV", url: "https://sns-webpic-qc.xhscdn.com/prv!nd_prv_wlteh_jpg_3" },
+          { imageScene: "WB_DFT", url: "https://sns-webpic-qc.xhscdn.com/dft!nd_dft_wlteh_jpg_3" }
+        ]
+      }
+    ]
+  });
+  assert.equal(infoListCover.url, "https://sns-webpic-qc.xhscdn.com/dft!nd_dft_wlteh_jpg_3");
+  assert.equal(infoListCover.format, "JPG");
+});
+
+test("Xiaohongshu extractXiaohongshuFeedResponse parses /api/sns/web/v1/feed items", () => {
+  const items = thumb.extractXiaohongshuFeedResponse({
+    data: {
+      items: [
+        {
+          id: "65a1b2c3000000001e03a1b2",
+          note_card: {
+            title: "Feed Video Cover",
+            image_list: [
+              {
+                width: 1080,
+                height: 1920,
+                url_default: "https://sns-webpic-qc.xhscdn.com/feed-cover!nd_dft_wlteh_webp_3"
+              }
+            ]
+          }
+        }
+      ]
+    }
+  });
+  assert.equal(items.length, 1);
+  assert.equal(items[0].noteId, "65a1b2c3000000001e03a1b2");
+  assert.equal(items[0].title, "Feed Video Cover");
+  assert.equal(items[0].thumbnail.url, "https://sns-webpic-qc.xhscdn.com/feed-cover!nd_dft_wlteh_webp_3");
+  assert.equal(items[0].thumbnail.format, "WEBP");
+});
+
+test("Xiaohongshu extractXiaohongshuDomCover picks outer note card cover and skips avatars", () => {
+  const noteId = "65a1b2c3000000001e03a1b2";
+  const mockDoc = {
+    querySelectorAll(sel) {
+      if (sel === `a[href*="${noteId}"] img`) {
+        return [
+          { className: "author-avatar", src: "https://sns-avatar-qc.xhscdn.com/avatar/123.jpg", naturalWidth: 200, naturalHeight: 200 },
+          { className: "note-cover-img", src: "https://sns-webpic-qc.xhscdn.com/outer-cover!nd_dft_wlteh_jpg_3", naturalWidth: 1080, naturalHeight: 1440 }
+        ];
+      }
+      return [];
+    },
+    querySelector() {
+      return null;
+    }
+  };
+  const cover = thumb.extractXiaohongshuDomCover(null, mockDoc, `https://www.xiaohongshu.com/explore/${noteId}`);
+  assert.ok(cover);
+  assert.equal(cover.url, "https://sns-webpic-qc.xhscdn.com/outer-cover!nd_dft_wlteh_jpg_3");
+  assert.equal(cover.source, "xiaohongshu-dom");
+
+  // /explore homepage must not fall back to generic og:image
+  assert.equal(thumb.isSingleVideoPage("https://www.xiaohongshu.com/explore", 1), false);
+});

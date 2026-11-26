@@ -12,6 +12,7 @@ import (
 )
 
 type mockWindowController struct {
+	hwnd        uintptr
 	visible     bool
 	maximized   bool
 	minimized   int
@@ -23,16 +24,17 @@ type mockWindowController struct {
 	invalidated int
 }
 
-func (m *mockWindowController) Minimize()        { m.minimized++ }
-func (m *mockWindowController) ToggleMaximize()  { m.maximized = !m.maximized }
-func (m *mockWindowController) IsMaximized() bool { return m.maximized }
-func (m *mockWindowController) Close()           { m.closed++ }
-func (m *mockWindowController) Hide()            { m.visible = false; m.hidden++ }
-func (m *mockWindowController) Show()            { m.visible = true; m.shown++ }
-func (m *mockWindowController) Restore()         { m.restored++ }
-func (m *mockWindowController) Focus()           { m.focused++ }
-func (m *mockWindowController) IsVisible() bool  { return m.visible }
-func (m *mockWindowController) Invalidate()      { m.invalidated++ }
+func (m *mockWindowController) Minimize()            { m.minimized++ }
+func (m *mockWindowController) ToggleMaximize()      { m.maximized = !m.maximized }
+func (m *mockWindowController) IsMaximized() bool    { return m.maximized }
+func (m *mockWindowController) Close()               { m.closed++ }
+func (m *mockWindowController) Hide()                { m.visible = false; m.hidden++ }
+func (m *mockWindowController) Show()                { m.visible = true; m.shown++ }
+func (m *mockWindowController) Restore()             { m.restored++ }
+func (m *mockWindowController) Focus()               { m.focused++ }
+func (m *mockWindowController) IsVisible() bool      { return m.visible }
+func (m *mockWindowController) Invalidate()          { m.invalidated++ }
+func (m *mockWindowController) NativeHandle() uintptr { return m.hwnd }
 
 func TestTrayPowerSaveAndWakeOnIncomingDownload(t *testing.T) {
 	tempDir := t.TempDir()
@@ -176,5 +178,68 @@ func TestOnboardingFlowAndConfigPersistence(t *testing.T) {
 	app2 := NewApp(eng2, nil)
 	if app2.showOnboardingModal {
 		t.Fatalf("onboarding modal must not re-open once OnboardingCompleted is true")
+	}
+}
+
+func TestIncomingDownloadDialogBringsWindowToForegroundFromBackgroundOrTray(t *testing.T) {
+	tempDir := t.TempDir()
+	eng, err := engine.NewEngine(engine.DefaultConfig(tempDir, filepath.Join(tempDir, "state.json")))
+	if err != nil {
+		t.Fatalf("failed to init engine: %v", err)
+	}
+	defer eng.Close()
+
+	app := NewApp(eng, nil)
+	win := &mockWindowController{hwnd: 0xBEEF, visible: true}
+	app.SetWindowController(win)
+
+	var fgCalls []uintptr
+	app.bringToForegroundFn = func(hwnd uintptr) bool {
+		fgCalls = append(fgCalls, hwnd)
+		return true
+	}
+
+	// Case 1: App is NOT in tray (e.g. minimized to taskbar or behind browser).
+	// EnqueueIncomingDownload must still restore/show/focus and invoke OS bring-to-foreground.
+	app.EnqueueIncomingDownload(ipc.AddDownloadRequest{
+		URL:      "https://i.ytimg.com/vi/dQw4w9WgXcQ/maxresdefault.jpg",
+		Filename: "video-thumbnail.jpg",
+	})
+	if win.shown != 1 || win.restored != 1 || win.focused != 1 || win.invalidated != 1 {
+		t.Fatalf("expected Show/Restore/Focus/Invalidate from background, got shown=%d restored=%d focused=%d invalidated=%d",
+			win.shown, win.restored, win.focused, win.invalidated)
+	}
+	if len(fgCalls) != 1 || fgCalls[0] != 0xBEEF {
+		t.Fatalf("expected bringToForegroundFn(0xBEEF) once on enqueue, got %v", fgCalls)
+	}
+
+	// Rendering the next frame pops the incoming download into Download Info Dialog,
+	// clears onboarding/settings modals, and ensures foreground activation.
+	tester := ui.NewTester(app.View, 1120, 700)
+	tester.SetScale(1)
+	tester.Frame()
+
+	if !app.showAddModal || !app.inputFromExtension || app.showOnboardingModal {
+		t.Fatalf("expected Download Info Dialog open and onboarding hidden, got add=%v ext=%v onboarding=%v",
+			app.showAddModal, app.inputFromExtension, app.showOnboardingModal)
+	}
+	if len(fgCalls) < 2 {
+		t.Fatalf("expected openIncomingDownloadDialog to also invoke bringToForegroundFn, got %v", fgCalls)
+	}
+
+	// Case 2: App is hidden in tray and openIncomingDownloadDialog is triggered.
+	app.showAddModal = false
+	app.HideToTray()
+	if !app.IsInTray() || win.visible {
+		t.Fatalf("expected app hidden in tray")
+	}
+
+	app.openIncomingDownloadDialog(ipc.AddDownloadRequest{
+		URL:      "https://sns-webpic-qc.xhscdn.com/cover.webp",
+		Filename: "rednote-thumbnail.webp",
+	})
+	if app.IsInTray() || !win.visible || !app.showAddModal {
+		t.Fatalf("expected openIncomingDownloadDialog to wake from tray and open modal, inTray=%v visible=%v modal=%v",
+			app.IsInTray(), win.visible, app.showAddModal)
 	}
 }

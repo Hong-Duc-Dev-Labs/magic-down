@@ -98,7 +98,13 @@ function sanitizeDownloadFilename(rawFilename) {
   const parts = cleaned.replace(/\\/g, "/").split("/").filter(Boolean);
   let base = parts.length > 0 ? parts[parts.length - 1].trim() : "";
   if (!base || base === "." || base === "..") return "";
-  base = base.replace(/\.\.+/g, ".").replace(/^\.+/, "").trim();
+  base = base
+    .replace(/[<>:"|?*\x00-\x1f]/g, " ")
+    .replace(/\.\.+/g, ".")
+    .replace(/\s+/g, " ")
+    .replace(/^\.+/, "")
+    .replace(/[\s.]+$/, "")
+    .trim();
   if (!base || base === "." || base === "..") return "";
   return base;
 }
