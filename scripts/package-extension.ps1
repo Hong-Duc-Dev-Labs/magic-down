@@ -77,6 +77,7 @@ $RuntimeFiles = @(
     "popup.html",
     "popup.js",
     "thumbnail.js",
+    "x.js",
     "youtube.js"
 )
 $RuntimeDirs = @("icons")

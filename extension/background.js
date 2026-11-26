@@ -522,8 +522,13 @@ function isAllowedManifestFetch(rawUrl, sender) {
     /(?:^|\.)(?:youtube\.com|youtube-nocookie\.com)$/i.test(page.hostname) &&
     /(?:^|\.)(?:googlevideo\.com|youtube\.com)$/i.test(target.hostname)
   );
+  const isXManifest = Boolean(
+    page &&
+    /(?:^|\.)(?:x\.com|twitter\.com)$/i.test(page.hostname) &&
+    /(?:^|\.)twimg\.com$/i.test(target.hostname)
+  );
 
-  if (!isObserved && !sameSite && !isYouTubeManifest) {
+  if (!isObserved && !sameSite && !isYouTubeManifest && !isXManifest) {
     return { ok: false, error: "manifest URL not authorized for this tab" };
   }
 
@@ -956,6 +961,16 @@ function inferQualityFromUrl(rawUrl) {
       const height = Number.parseInt(generic[1], 10);
       return { quality: `${height}p`, height };
     }
+    const host = u.hostname.toLowerCase();
+    if (host === "video.twimg.com" || host.endsWith(".video.twimg.com")) {
+      const dimMatch = u.pathname.match(/\/(\d{3,4})x(\d{3,4})(?:\/|$)/i);
+      if (dimMatch) {
+        const shortSide = Math.min(Number.parseInt(dimMatch[1], 10), Number.parseInt(dimMatch[2], 10));
+        if (shortSide >= 144 && shortSide <= 4320) {
+          return { quality: `${shortSide}p`, height: shortSide };
+        }
+      }
+    }
   } catch {
     // ignore
   }
@@ -1033,6 +1048,23 @@ function isBilibiliMediaChunk(rawUrl) {
   return false;
 }
 
+function isXMediaSegment(rawUrl) {
+  try {
+    const u = new URL(rawUrl);
+    const host = u.hostname.toLowerCase();
+    if (host !== "video.twimg.com" && !host.endsWith(".video.twimg.com")) {
+      return false;
+    }
+    const path = u.pathname.toLowerCase();
+    if (/\.(?:m4s|ts|aac|cmfv|cmfa)$/i.test(path)) {
+      return true;
+    }
+  } catch {
+    // ignore
+  }
+  return false;
+}
+
 function classifyMediaResponse(url, headers) {
   // YouTube MSE players fetch byte-range/UMP chunks from googlevideo.com;
   // those are partial fragments (not full files) and are superseded by the
@@ -1043,6 +1075,11 @@ function classifyMediaResponse(url, headers) {
   // Bilibili MSE players fetch .m4s/DASH chunks from bilivideo.com/bilivideo.cn;
   // those are superseded by the __playinfo__ / playurl streams extracted in-page.
   if (isBilibiliMediaChunk(url)) {
+    return null;
+  }
+  // X / Twitter HLS/fMP4 players fetch .m4s/.ts/.aac segments from video.twimg.com;
+  // filter them out so they do not pollute detected video lists.
+  if (isXMediaSegment(url)) {
     return null;
   }
   const { url: mediaUrl, strippedRange } = normalizeMediaUrl(url);
@@ -1934,6 +1971,7 @@ if (typeof module !== "undefined" && module.exports) {
     parseFacebookEfg,
     isDashSegmentUrl,
     isBilibiliMediaChunk,
+    isXMediaSegment,
     inferQualityFromUrl,
     classifyMediaResponse,
     classifyFacebookAudioTrack,

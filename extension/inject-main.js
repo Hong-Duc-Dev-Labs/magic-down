@@ -21,6 +21,8 @@
   const BILI_PROBE_MSG = "magicdown:bili-probe:v1";
   const XHS_MSG = "magicdown:xhs-note:v1";
   const XHS_PROBE_MSG = "magicdown:xhs-probe:v1";
+  const X_MSG = "magicdown:x-media:v1";
+  const X_PROBE_MSG = "magicdown:x-probe:v1";
   const MAX_ITEMS = 200;
   const MAX_URL = 4096;
   const MEDIA_PATH = /\.(?:mp4|m4s|m4v|m4a|m4p|webm|ts|m3u8|mpd|mov|mkv|mp3|aac)(?:$|[?#])/i;
@@ -28,12 +30,14 @@
   const IS_YOUTUBE = /(?:^|\.)(?:youtube\.com|youtube-nocookie\.com)$/i.test(location.hostname || "");
   const IS_BILIBILI = /(?:^|\.)bilibili\.com$/i.test(location.hostname || "");
   const IS_XHS = /(?:^|\.)xiaohongshu\.com$/i.test(location.hostname || "");
+  const IS_X = /(?:^|\.)(?:x\.com|twitter\.com)$/i.test(location.hostname || "");
 
   const items = [];
   const pending = [];
   const ytPayloads = new Map(); // videoId -> compact payload
   const biliPayloads = new Map(); // pageUrl -> compact payload
   const xhsNotes = new Map(); // noteId -> { noteId, title, url, width, height }
+  const xMediaCache = new Map(); // tweetId:mediaKey -> compact X media entry
   let flushTimer = 0;
   let lastFlush = 0;
   let seq = 0;
@@ -397,6 +401,186 @@
     }
   }
 
+  // --- X / Twitter GraphQL & REST media extraction ---------------------------
+  function isXApiUrl(url) {
+    try {
+      const u = new URL(url, location.href);
+      const host = u.hostname.toLowerCase();
+      if (host !== "x.com" && !host.endsWith(".x.com") && host !== "twitter.com" && !host.endsWith(".twitter.com")) {
+        return false;
+      }
+      const p = u.pathname.toLowerCase();
+      return (
+        p.startsWith("/i/api/graphql/") ||
+        p.startsWith("/i/api/1.1/") ||
+        p.startsWith("/i/api/2/") ||
+        p.startsWith("/graphql/")
+      );
+    } catch {
+      return false;
+    }
+  }
+
+  function extractXTweetCtx(node) {
+    if (!node || typeof node !== "object") return null;
+    const target =
+      node.__typename === "TweetWithVisibilityResults" && node.tweet && typeof node.tweet === "object"
+        ? node.tweet
+        : node;
+    const legacy = target.legacy && typeof target.legacy === "object" ? target.legacy : target;
+    const tweetId = String(target.rest_id || legacy.id_str || legacy.id || "").trim();
+    const text = typeof legacy.full_text === "string"
+      ? legacy.full_text
+      : (typeof legacy.text === "string" ? legacy.text : "");
+    let screenName = "";
+    try {
+      const userObj =
+        (target.core && target.core.user_results && target.core.user_results.result) ||
+        target.user ||
+        null;
+      const userLegacy = userObj && (userObj.legacy || userObj.core || userObj);
+      if (userLegacy && typeof userLegacy.screen_name === "string") {
+        screenName = userLegacy.screen_name.trim().slice(0, 64);
+      }
+    } catch {
+      // ignore
+    }
+    if (!tweetId && !text) return null;
+    return { tweetId: tweetId.slice(0, 32), text: text.slice(0, 280), screenName };
+  }
+
+  function extractXMediaEntries(data) {
+    if (!data || typeof data !== "object") return [];
+    const found = [];
+    const seen = new Set();
+    const stack = [{ node: data, ctx: { tweetId: "", text: "", screenName: "" } }];
+    let guard = 0;
+
+    while (stack.length > 0 && guard < 80000) {
+      guard++;
+      const frame = stack.pop();
+      const node = frame && frame.node;
+      let ctx = frame ? frame.ctx : { tweetId: "", text: "", screenName: "" };
+      if (!node || typeof node !== "object") continue;
+
+      if (Array.isArray(node)) {
+        for (let i = node.length - 1; i >= 0; i--) {
+          stack.push({ node: node[i], ctx });
+        }
+        continue;
+      }
+
+      if (
+        node.rest_id ||
+        (node.legacy && (node.legacy.id_str || node.legacy.extended_entities)) ||
+        (node.id_str && (node.extended_entities || node.full_text || node.text))
+      ) {
+        const extracted = extractXTweetCtx(node);
+        if (extracted && extracted.tweetId) {
+          ctx = {
+            tweetId: extracted.tweetId,
+            text: extracted.text || ctx.text,
+            screenName: extracted.screenName || ctx.screenName
+          };
+        }
+      }
+
+      if (node.video_info && Array.isArray(node.video_info.variants) && node.video_info.variants.length > 0) {
+        const variants = [];
+        for (const v of node.video_info.variants.slice(0, 16)) {
+          if (!v || typeof v.url !== "string" || !/^https?:\/\//i.test(v.url)) continue;
+          variants.push({
+            url: v.url.slice(0, MAX_URL),
+            content_type: typeof v.content_type === "string" ? v.content_type.slice(0, 64) : "",
+            bitrate: Number(v.bitrate) || 0
+          });
+        }
+        if (variants.length > 0) {
+          const mediaId = String(node.id_str || node.id || "").slice(0, 32);
+          const mediaKey = String(node.media_key || "").slice(0, 48);
+          const posterUrl = typeof node.media_url_https === "string"
+            ? node.media_url_https.slice(0, MAX_URL)
+            : (typeof node.media_url === "string" ? node.media_url.slice(0, MAX_URL) : "");
+          const key = `${ctx.tweetId || "unknown"}:${mediaId || mediaKey || posterUrl || variants[0].url}`;
+          if (!seen.has(key)) {
+            seen.add(key);
+            found.push({
+              key,
+              tweetId: ctx.tweetId,
+              mediaId,
+              mediaKey,
+              posterUrl,
+              text: ctx.text,
+              screenName: ctx.screenName,
+              width: Number(node.original_info && node.original_info.width) || 0,
+              height: Number(node.original_info && node.original_info.height) || 0,
+              variants
+            });
+          }
+        }
+        continue;
+      }
+
+      const keys = Object.keys(node);
+      for (let i = keys.length - 1; i >= 0; i--) {
+        const k = keys[i];
+        if (k === "ext_media_color" || k === "features" || k === "clientEventInfo" || k === "feedbackInfo") {
+          continue;
+        }
+        const val = node[k];
+        if (val && typeof val === "object") stack.push({ node: val, ctx });
+      }
+    }
+    return found;
+  }
+
+  function emitXMediaEntries(entries) {
+    if (!Array.isArray(entries) || entries.length === 0) return;
+    const batch = [];
+    for (const rec of entries.slice(0, 40)) {
+      if (!rec || !rec.key || !Array.isArray(rec.variants) || rec.variants.length === 0) continue;
+      xMediaCache.set(rec.key, rec);
+      if (xMediaCache.size > 80) {
+        xMediaCache.delete(xMediaCache.keys().next().value);
+      }
+      batch.push(rec);
+    }
+    if (batch.length > 0) {
+      try {
+        window.postMessage({ __mdSniff: X_MSG, entries: batch }, "*");
+      } catch {
+        // ignore
+      }
+    }
+  }
+
+  function inspectXApiJson(obj) {
+    if (!obj || typeof obj !== "object") return;
+    try {
+      emitXMediaEntries(extractXMediaEntries(obj));
+    } catch {
+      // ignore
+    }
+  }
+
+  function inspectXApiText(text) {
+    if (!text || text.length > 8 * 1024 * 1024 || !text.includes("video_info")) return;
+    try {
+      emitXMediaEntries(extractXMediaEntries(JSON.parse(text)));
+    } catch {
+      // ignore non-JSON responses
+    }
+  }
+
+  function replayXMedia() {
+    if (!IS_X || xMediaCache.size === 0) return;
+    try {
+      window.postMessage({ __mdSniff: X_MSG, replay: true, entries: Array.from(xMediaCache.values()) }, "*");
+    } catch {
+      // ignore
+    }
+  }
+
   function isMediaURL(value) {
     if (typeof value !== "string" || value.length === 0 || value.length > MAX_URL) return false;
     if (value.startsWith("blob:")) return true;
@@ -465,6 +649,9 @@
       }
       probeXiaohongshuState();
     }
+    if (IS_X) {
+      replayXMedia();
+    }
   }
 
   try {
@@ -482,6 +669,8 @@
           probeBilibiliPlayInfo();
         } else if (data.__mdSniff === XHS_PROBE_MSG) {
           probeXiaohongshuState();
+        } else if (data.__mdSniff === X_PROBE_MSG) {
+          replayXMedia();
         }
       },
       false
@@ -968,6 +1157,17 @@
                 }
               }).catch(() => {});
             }
+            if (IS_X && url && isXApiUrl(url) && promise && typeof promise.then === "function") {
+              promise.then((resp) => {
+                try {
+                  if (resp && resp.ok && typeof resp.clone === "function") {
+                    resp.clone().text().then(inspectXApiText).catch(() => {});
+                  }
+                } catch {
+                  // ignore
+                }
+              }).catch(() => {});
+            }
           } catch {
             // ignore
           }
@@ -1071,6 +1271,26 @@
               }
             } else {
               this.__mdXhsApiXhr = false;
+            }
+            if (IS_X && isXApiUrl(safeUrl)) {
+              this.__mdXApiXhr = true;
+              if (!this.__mdXApiHooked) {
+                this.__mdXApiHooked = true;
+                this.addEventListener("load", () => {
+                  try {
+                    if (!this.__mdXApiXhr) return;
+                    if (this.responseType === "json" && this.response) {
+                      inspectXApiJson(this.response);
+                    } else if ((!this.responseType || this.responseType === "text") && typeof this.responseText === "string") {
+                      inspectXApiText(this.responseText);
+                    }
+                  } catch {
+                    // ignore
+                  }
+                });
+              }
+            } else {
+              this.__mdXApiXhr = false;
             }
           } catch {
             // ignore

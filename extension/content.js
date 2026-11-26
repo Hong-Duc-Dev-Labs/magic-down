@@ -53,14 +53,19 @@
   const BILI_PROBE_MSG = "magicdown:bili-probe:v1";
   const XHS_MSG = "magicdown:xhs-note:v1";
   const XHS_PROBE_MSG = "magicdown:xhs-probe:v1";
+  const X_MSG = "magicdown:x-media:v1";
+  const X_PROBE_MSG = "magicdown:x-probe:v1";
   const YT = typeof window !== "undefined" && window.MagicDownYouTube ? window.MagicDownYouTube : null;
   const BILI = typeof window !== "undefined" && window.MagicDownBilibili ? window.MagicDownBilibili : null;
+  const X = typeof window !== "undefined" && window.MagicDownX ? window.MagicDownX : null;
   const THUMB = typeof window !== "undefined" && window.MagicDownThumbnail ? window.MagicDownThumbnail : null;
   const isYouTubePage = Boolean(YT && YT.isYouTubeHost(location.hostname));
   const isBilibiliPage = Boolean(BILI && BILI.isBilibiliHost(location.hostname));
+  const isXPage = Boolean(X && X.isXHost(location.hostname));
   const isXiaohongshuPage = Boolean(THUMB && THUMB.isXiaohongshuHost && THUMB.isXiaohongshuHost(location.hostname));
   const ytPlayers = new Map(); // videoId -> parsed YouTube player entry
   const biliPlayers = new Map(); // videoId -> parsed Bilibili player entry
+  const xEntries = new Map(); // key -> parsed X media entry
   const xhsNotes = new Map(); // noteId -> { noteId, title, thumbnail }
   let latestYtEntry = null;
   let latestBiliEntry = null;
@@ -340,6 +345,23 @@
         if (updated) scheduleRefresh();
         return;
       }
+      if (data.__mdSniff === X_MSG && Array.isArray(data.entries) && X) {
+        let updated = false;
+        for (const rawEntry of data.entries) {
+          const parsed = X.buildXMediaEntry(rawEntry, {
+            pageUrl: location.href,
+            userAgent: navigator.userAgent
+          });
+          if (!parsed) continue;
+          xEntries.set(parsed.key, parsed);
+          if (xEntries.size > 80) {
+            xEntries.delete(xEntries.keys().next().value);
+          }
+          updated = true;
+        }
+        if (updated) scheduleRefresh();
+        return;
+      }
       if (data.__mdSniff !== SNIFF_MSG || !Array.isArray(data.items)) return;
       for (const item of data.items) ingestSniff(item);
       if (data.replay) scheduleRefresh();
@@ -374,6 +396,7 @@
       .replace(/\s*-\s*YouTube\s*$/i, "")
       .replace(/_哔哩哔哩_bilibili\s*$/i, "")
       .replace(/\s*-\s*小红书\s*$/i, "")
+      .replace(/\s*\/\s*(?:X|Twitter)\s*$/i, "")
       .replace(/[<>:"/\\|?*\x00-\x1f]/g, " ")
       .replace(/\.\.+/g, ".")
       .replace(/\s+/g, " ")
@@ -398,6 +421,20 @@
     if (videoId && biliPlayers.has(videoId)) return biliPlayers.get(videoId);
     if (!videoId) return latestBiliEntry;
     return latestBiliEntry && latestBiliEntry.videoId === videoId ? latestBiliEntry : null;
+  }
+
+  function currentXEntry(videoEl) {
+    if (!isXPage || !X) return null;
+    const targetVideo = videoEl || activeVideo;
+    const tweetId = X.extractTweetIdFromVideoElement(targetVideo, location.href);
+    const posterUrl = targetVideo
+      ? (targetVideo.poster || (typeof targetVideo.getAttribute === "function" ? targetVideo.getAttribute("poster") : "") || "")
+      : "";
+    return X.matchXEntryForVideo(xEntries, {
+      tweetId,
+      posterUrl,
+      pageUrl: location.href
+    });
   }
 
   function handleNavigationChange() {
@@ -437,6 +474,13 @@
     if (isXiaohongshuPage) {
       try {
         window.postMessage({ __mdSniff: XHS_PROBE_MSG }, "*");
+      } catch {
+        // ignore
+      }
+    }
+    if (isXPage) {
+      try {
+        window.postMessage({ __mdSniff: X_PROBE_MSG }, "*");
       } catch {
         // ignore
       }
@@ -1061,6 +1105,15 @@
       }
     }
 
+    const xEntry = currentXEntry();
+    if (xEntry && xEntry.variants.length > 0) {
+      for (const variant of xEntry.variants) {
+        const key = `${variant.url}|${variant.quality}|${variant.streamType || ""}`;
+        push(key, variant);
+      }
+      return Array.from(map.values());
+    }
+
     const planURLs = new Set();
     let manifestCount =
       (ytEntry && ytEntry.variants.length > 0 ? ytEntry.variants.length : 0) +
@@ -1229,6 +1282,21 @@
         return {
           ...thumb,
           title: (biliEntry && biliEntry.title) || document.title || "video",
+          referrer: reqHeaders.Referer,
+          headers: reqHeaders
+        };
+      }
+    }
+
+    if (isXPage && X) {
+      const xEntry = currentXEntry();
+      const rawPoster = activeVideo.poster || (typeof activeVideo.getAttribute === "function" ? activeVideo.getAttribute("poster") : "") || "";
+      const thumb = (xEntry && xEntry.thumbnail) || X.extractXThumbnail(null, rawPoster, null);
+      if (thumb && thumb.url) {
+        const reqHeaders = X.getXRequestHeaders(location.href, navigator.userAgent);
+        return {
+          ...thumb,
+          title: (xEntry && xEntry.title) || document.title || "video",
           referrer: reqHeaders.Referer,
           headers: reqHeaders
         };
@@ -1592,6 +1660,13 @@
           // ignore
         }
       }
+      if (dropdownOpen && isXPage && !currentXEntry()) {
+        try {
+          window.postMessage({ __mdSniff: X_PROBE_MSG }, "*");
+        } catch {
+          // ignore
+        }
+      }
       renderDropdown();
     });
 
@@ -1635,6 +1710,10 @@
     const biliEntry = currentBilibiliEntry();
     if (biliEntry && Array.isArray(biliEntry.mp3Variants) && biliEntry.mp3Variants.length > 0) {
       return biliEntry.mp3Variants;
+    }
+    const xEntry = currentXEntry();
+    if (xEntry && Array.isArray(xEntry.mp3Variants) && xEntry.mp3Variants.length > 0) {
+      return xEntry.mp3Variants;
     }
     if (!Array.isArray(videos) || videos.length === 0) return [];
     const audioTrack = videos.find((v) => v && v.streamType === "audio-only" && v.url);
@@ -1692,9 +1771,11 @@
     if (ddSubEl) {
       const ytCount = videos.filter((v) => v.source === "youtube").length;
       const biliCount = videos.filter((v) => v.source === "bilibili").length;
+      const xCount = videos.filter((v) => v.source === "x").length;
       const dashCount = videos.filter((v) => v.source === "dash").length;
       if (ytCount > 0) ddSubEl.textContent = ytCount === 1 ? t("overlay.sub_youtube_one") : t("overlay.sub_youtube", { n: ytCount });
       else if (biliCount > 0) ddSubEl.textContent = biliCount === 1 ? t("overlay.sub_bilibili_one") : t("overlay.sub_bilibili", { n: biliCount });
+      else if (xCount > 0) ddSubEl.textContent = xCount === 1 ? t("overlay.sub_x_one") : t("overlay.sub_x", { n: xCount });
       else if (dashCount > 0) ddSubEl.textContent = dashCount === 1 ? t("overlay.sub_dash_one") : t("overlay.sub_dash", { n: dashCount });
       else if (videos.some((v) => v.isHLS)) ddSubEl.textContent = t("overlay.sub_hls");
       else if (videos.length > 0) ddSubEl.textContent = t("overlay.header_sub");

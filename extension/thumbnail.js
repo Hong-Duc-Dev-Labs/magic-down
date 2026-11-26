@@ -71,6 +71,7 @@
       .replace(/_哔哩哔哩_bilibili\s*$/i, "")
       .replace(/\s*-\s*抖音\s*$/i, "")
       .replace(/\s*-\s*小红书\s*$/i, "")
+      .replace(/\s*\/\s*(?:X|Twitter)\s*$/i, "")
       .replace(/[<>:"/\\|?*\x00-\x1f]/g, " ")
       .replace(/\.\.+/g, ".")
       .replace(/\s+/g, " ")
@@ -137,6 +138,9 @@
       const path = u.pathname.toLowerCase();
 
       // Multi-video feed homepages where og:image is a generic site logo/banner.
+      if (host === "x.com" || host.endsWith(".x.com") || host === "twitter.com" || host.endsWith(".twitter.com")) {
+        return /\/(?:status|statuses)\/\d{5,25}(?:\/|$)/i.test(path);
+      }
       if (path === "/" || path === "" || path === "/feed" || path === "/home" || path === "/explore" || path === "/explore/") {
         if (
           host.endsWith("facebook.com") ||
