@@ -56,10 +56,12 @@ type Engine struct {
 	configPath  string
 	tasks       []*Task
 	tasksByID   map[string]*Task
-	httpClient  atomic.Pointer[http.Client]
-	limiter     *rateLimiter
-	onCompleted func(*Task)
-	ctx         context.Context
+	httpClient     atomic.Pointer[http.Client]
+	limiter        *rateLimiter
+	onCompleted    func(*Task)
+	onScheduleStop func(stopAction string)
+	scheduler      *Scheduler
+	ctx            context.Context
 	cancel      context.CancelFunc
 	subscribers map[chan *Task]struct{}
 	subMu       sync.RWMutex
@@ -83,9 +85,11 @@ type persistedConfig struct {
 	CloseToTray            *bool   `json:"close_to_tray,omitempty"`
 	OnboardingCompleted    *bool   `json:"onboarding_completed,omitempty"`
 	AutoCheckUpdates       *bool   `json:"auto_check_updates,omitempty"`
-	UpdateRepo             *string      `json:"update_repo,omitempty"`
-	Language               *string      `json:"language,omitempty"`
-	Proxy                  *ProxyConfig `json:"proxy,omitempty"`
+	UpdateRepo             *string         `json:"update_repo,omitempty"`
+	Language               *string         `json:"language,omitempty"`
+	Proxy                  *ProxyConfig    `json:"proxy,omitempty"`
+	Schedule               *ScheduleConfig `json:"schedule,omitempty"`
+	MonitorClipboard       *bool           `json:"monitor_clipboard,omitempty"`
 }
 
 // NewEngine initializes a new download engine.
@@ -135,7 +139,50 @@ func NewEngine(cfg Config) (*Engine, error) {
 		// Log or ignore if file doesn't exist yet
 	}
 
+	eng.scheduler = NewScheduler(
+		time.Now,
+		func() {
+			go eng.processQueue()
+		},
+		func(stopAction string) {
+			eng.PauseAll()
+			eng.mu.RLock()
+			fn := eng.onScheduleStop
+			eng.mu.RUnlock()
+			if fn != nil && stopAction != "" && stopAction != "none" {
+				go func() {
+					defer func() { _ = recover() }()
+					fn(stopAction)
+				}()
+			}
+		},
+	)
+	eng.startSchedulerLoop()
+
 	return eng, nil
+}
+
+func (e *Engine) startSchedulerLoop() {
+	go func() {
+		ticker := time.NewTicker(defaultScheduleTickInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-e.ctx.Done():
+				return
+			case <-ticker.C:
+				e.scheduler.Evaluate(e.Config().Schedule)
+			}
+		}
+	}()
+}
+
+// SetOnScheduleStop registers a callback invoked when the configured schedule
+// window exits with a non-empty StopAction ("sleep" or "shutdown").
+func (e *Engine) SetOnScheduleStop(fn func(stopAction string)) {
+	e.mu.Lock()
+	e.onScheduleStop = fn
+	e.mu.Unlock()
 }
 
 func defaultDownloadDir() string {
@@ -221,6 +268,64 @@ func (e *Engine) AddTaskOrFindDuplicate(req AddTaskRequest) (*Task, *Task, error
 	}
 
 	return snap, nil, nil
+}
+
+// AddTasksBatch adds up to MaxBatchURLs tasks under a single e.mu.Lock(),
+// triggering scheduleSave() once and processQueue() once to prevent a
+// goroutine storm or disk thrashing on bulk imports.
+func (e *Engine) AddTasksBatch(reqs []AddTaskRequest) ([]*Task, error) {
+	if len(reqs) == 0 {
+		return nil, errors.New("empty batch request")
+	}
+	if len(reqs) > MaxBatchURLs {
+		return nil, fmt.Errorf("batch exceeds maximum limit of %d URLs", MaxBatchURLs)
+	}
+
+	type preparedItem struct {
+		task      *Task
+		saveDir   string
+		autoStart bool
+	}
+	prepared := make([]preparedItem, 0, len(reqs))
+	for _, req := range reqs {
+		task, saveDir, err := e.prepareTask(req)
+		if err != nil {
+			return nil, err
+		}
+		prepared = append(prepared, preparedItem{
+			task:      task,
+			saveDir:   saveDir,
+			autoStart: req.AutoStart && !req.StartPaused,
+		})
+	}
+
+	snaps := make([]*Task, 0, len(prepared))
+	anyAutoStart := false
+
+	e.mu.Lock()
+	for _, item := range prepared {
+		if item.task.Filename != "" {
+			item.task.SavePath = UniqueFilePath(item.saveDir, item.task.Filename)
+			item.task.Filename = filepath.Base(item.task.SavePath)
+			item.task.PartPath = item.task.SavePath + ".magicpart"
+		}
+		e.tasks = append(e.tasks, item.task)
+		e.tasksByID[item.task.ID] = item.task
+		if item.autoStart {
+			anyAutoStart = true
+		}
+		snaps = append(snaps, item.task.Clone())
+	}
+	e.mu.Unlock()
+
+	for _, snap := range snaps {
+		e.notify(snap)
+	}
+	e.scheduleSave()
+	if anyAutoStart {
+		go e.processQueue()
+	}
+	return snaps, nil
 }
 
 func (e *Engine) prepareTask(req AddTaskRequest) (*Task, string, error) {
@@ -770,6 +875,9 @@ func (e *Engine) UpdateConfig(cfg Config) {
 
 	e.limiter.setRate(cfg.SpeedLimitKBps * 1024)
 	e.swapHTTPClient(cfg.Proxy)
+	if e.scheduler != nil {
+		e.scheduler.Evaluate(cfg.Schedule)
+	}
 	_ = os.MkdirAll(cfg.DownloadDir, 0755)
 	_ = e.saveConfig()
 	e.scheduleSave()
@@ -819,6 +927,8 @@ func (e *Engine) saveConfig() error {
 		UpdateRepo:             &cfg.UpdateRepo,
 		Language:               &cfg.Language,
 		Proxy:                  &cfg.Proxy,
+		Schedule:               &cfg.Schedule,
+		MonitorClipboard:       &cfg.MonitorClipboard,
 	}
 	data, err := json.MarshalIndent(pc, "", "  ")
 	if err != nil {
@@ -884,6 +994,12 @@ func (e *Engine) loadConfig() {
 	if pc.Proxy != nil {
 		e.config.Proxy = *pc.Proxy
 		e.config.Proxy.Mode = NormalizeProxyMode(e.config.Proxy.Mode)
+	}
+	if pc.Schedule != nil {
+		e.config.Schedule = *pc.Schedule
+	}
+	if pc.MonitorClipboard != nil {
+		e.config.MonitorClipboard = *pc.MonitorClipboard
 	}
 	e.limiter.setRate(e.config.SpeedLimitKBps * 1024)
 }

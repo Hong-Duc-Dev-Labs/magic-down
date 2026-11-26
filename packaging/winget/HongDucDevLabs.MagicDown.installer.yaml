@@ -1,0 +1,22 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.6.0.schema.json
+
+PackageIdentifier: HongDucDevLabs.MagicDown
+PackageVersion: 0.1.2
+InstallerLocale: en-US
+MinimumOSVersion: 10.0.19041.0
+InstallerType: inno
+Scope: user
+InstallModes:
+  - interactive
+  - silent
+  - silentWithProgress
+InstallerSwitches:
+  Silent: /VERYSILENT /NORESTART
+  SilentWithProgress: /SILENT /NORESTART
+UpgradeBehavior: install
+Installers:
+  - Architecture: x64
+    InstallerUrl: https://github.com/Hong-Duc-Dev-Labs/magic-down/releases/download/v0.1.2/MagicDown-Setup-v0.1.2.exe
+    InstallerSha256: REPLACE_WITH_RELEASE_SHA256
+ManifestType: installer
+ManifestVersion: 1.6.0

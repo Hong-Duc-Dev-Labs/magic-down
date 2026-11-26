@@ -150,6 +150,14 @@ type App struct {
 	powerCountdownDuration time.Duration
 	sessionCompletedAny    atomic.Bool
 
+	// Batch URL Pattern Import modal & Clipboard Monitor state
+	showBatchModal     bool
+	batchInputText     string
+	batchSaveDir       string
+	batchError         string
+	lastClipboardText  string
+	lastClipboardCheck time.Time
+
 	// Add / Download Info Dialog state
 	showAddModal       bool
 	inputFromExtension bool
@@ -188,6 +196,12 @@ type App struct {
 	settingMinimizeToTray   bool
 	settingCloseToTray      bool
 	settingAutoCheckUpdates bool
+	settingMonitorClipboard bool
+	settingScheduleEnabled  bool
+	settingScheduleStart    string
+	settingScheduleStop     string
+	settingScheduleDays     map[int]bool
+	settingScheduleAction   string
 	settingProxyMode        string
 	settingProxyHost        string
 	settingProxyPort        string
@@ -264,6 +278,12 @@ func NewApp(eng *engine.Engine, srv *ipc.Server) *App {
 		settingMinimizeToTray:     cfg.MinimizeToTray,
 		settingCloseToTray:        cfg.CloseToTray,
 		settingAutoCheckUpdates:   cfg.AutoCheckUpdates,
+		settingMonitorClipboard:   cfg.MonitorClipboard,
+		settingScheduleEnabled:    cfg.Schedule.Enabled,
+		settingScheduleStart:      defaultStr(cfg.Schedule.StartTime, "01:00"),
+		settingScheduleStop:       defaultStr(cfg.Schedule.StopTime, "06:00"),
+		settingScheduleDays:       daysSliceToMap(cfg.Schedule.DaysOfWeek),
+		settingScheduleAction:     defaultStr(cfg.Schedule.StopAction, "none"),
 		settingProxyMode:          engine.NormalizeProxyMode(cfg.Proxy.Mode),
 		settingProxyHost:          cfg.Proxy.Host,
 		settingProxyPort:          formatProxyPort(cfg.Proxy.Port),
@@ -491,7 +511,7 @@ func (a *App) EnqueueIncomingDownload(req ipc.AddDownloadRequest) {
 }
 
 func (a *App) popPendingIncoming() {
-	if a.showAddModal || a.showRefreshModal || a.detailsTaskID != "" || a.pendingDeleteTaskID != "" || a.pendingDuplicateTask != nil {
+	if a.showAddModal || a.showRefreshModal || a.showBatchModal || a.detailsTaskID != "" || a.pendingDeleteTaskID != "" || a.pendingDuplicateTask != nil {
 		return
 	}
 	a.pendingMu.Lock()
@@ -672,7 +692,7 @@ func (a *App) View(c *ui.Context) {
 		a.cancelPowerCountdown()
 		powerActive = false
 	}
-	anyModalOpen := a.showAddModal || a.showSettingsModal || a.showOnboardingModal || a.showRefreshModal || a.detailsTaskID != "" || a.pendingDeleteTaskID != "" || a.pendingDuplicateTask != nil || powerActive
+	anyModalOpen := a.showAddModal || a.showSettingsModal || a.showOnboardingModal || a.showRefreshModal || a.showBatchModal || a.detailsTaskID != "" || a.pendingDeleteTaskID != "" || a.pendingDuplicateTask != nil || powerActive
 	if c.Shortcut(ui.Cmd, ui.KeyN) && !anyModalOpen {
 		a.openAddModal()
 	}
@@ -686,11 +706,15 @@ func (a *App) View(c *ui.Context) {
 		a.showAddModal = false
 		a.showSettingsModal = false
 		a.closeRefreshModal()
+		a.closeBatchModal()
 		a.closeTaskDetails()
 		a.cancelDeleteTask()
 		a.cancelDuplicateModal()
 		a.cancelPowerCountdown()
 	}
+
+	// Opt-in Clipboard Monitor (polls lightly only when enabled and no modal open).
+	a.pollClipboardMonitor(c, anyModalOpen)
 
 	// Open Download Info Dialog for any incoming extension download.
 	a.popPendingIncoming()
@@ -772,6 +796,7 @@ func (a *App) View(c *ui.Context) {
 	a.renderRefreshModal(c, pal)
 	a.renderDuplicateModal(c, pal)
 	a.renderTaskDetailsModal(c, pal)
+	a.renderBatchModal(c, pal)
 	a.renderPowerCountdownModal(c, pal)
 }
 
@@ -901,6 +926,33 @@ func formatProxyPort(port int) string {
 	return strconv.Itoa(port)
 }
 
+func defaultStr(v, fallback string) string {
+	if strings.TrimSpace(v) == "" {
+		return fallback
+	}
+	return strings.TrimSpace(v)
+}
+
+func daysSliceToMap(days []int) map[int]bool {
+	m := make(map[int]bool, len(days))
+	for _, d := range days {
+		if d >= 0 && d <= 6 {
+			m[d] = true
+		}
+	}
+	return m
+}
+
+func daysMapToSlice(m map[int]bool) []int {
+	var out []int
+	for d := 0; d <= 6; d++ {
+		if m[d] {
+			out = append(out, d)
+		}
+	}
+	return out
+}
+
 func (a *App) openSettingsModal() {
 	cfg := a.engine.Config()
 	a.settingDownloadDir = cfg.DownloadDir
@@ -913,6 +965,12 @@ func (a *App) openSettingsModal() {
 	a.settingMinimizeToTray = cfg.MinimizeToTray
 	a.settingCloseToTray = cfg.CloseToTray
 	a.settingAutoCheckUpdates = cfg.AutoCheckUpdates
+	a.settingMonitorClipboard = cfg.MonitorClipboard
+	a.settingScheduleEnabled = cfg.Schedule.Enabled
+	a.settingScheduleStart = defaultStr(cfg.Schedule.StartTime, "01:00")
+	a.settingScheduleStop = defaultStr(cfg.Schedule.StopTime, "06:00")
+	a.settingScheduleDays = daysSliceToMap(cfg.Schedule.DaysOfWeek)
+	a.settingScheduleAction = defaultStr(cfg.Schedule.StopAction, "none")
 	a.settingProxyMode = engine.NormalizeProxyMode(cfg.Proxy.Mode)
 	a.settingProxyHost = cfg.Proxy.Host
 	a.settingProxyPort = formatProxyPort(cfg.Proxy.Port)
@@ -1114,7 +1172,10 @@ func (a *App) renderHeader(c *ui.Context, pal Palette, selected *engine.Task, co
 				a.statusMessage = i18n.Tf("msg.cleared_done", removed)
 			}
 
-			// Primary CTA
+			// Batch URL Import + Primary CTA
+			if toolbarButton(c, pal, iconDownload, i18n.T("toolbar.batch_import"), false, false) {
+				a.openBatchModal()
+			}
 			if primaryCTA(c, pal, iconPlus, i18n.T("toolbar.new_download")) {
 				a.openAddModal()
 			}
@@ -1905,6 +1966,92 @@ func (a *App) renderSettingsDownloadsTab(c *ui.Context, pal Palette) {
 
 	// Network Proxy Configuration
 	a.renderSettingsProxySection(c, pal)
+
+	// Queue Scheduler & Clipboard Monitor
+	a.renderSettingsSchedulerAndClipboard(c, pal)
+}
+
+func (a *App) renderSettingsSchedulerAndClipboard(c *ui.Context, pal Palette) {
+	// Queue Scheduler Card
+	ui.Column(c).Padding(10, 12).Radius(8).Background(pal.InputBg).Border(1, pal.Border).Gap(10).Children(func() {
+		ui.Row(c).AlignItems(ui.Center).Justify(ui.SpaceBetween).Children(func() {
+			ui.Column(c).Gap(2).Grow(1).Children(func() {
+				ui.Text(c, i18n.T("sched.title")).FontSize(12).FontWeight(600).TextColor(pal.TextPrimary)
+				ui.Text(c, i18n.T("sched.subtitle")).FontSize(11).TextColor(pal.TextMuted)
+			})
+			ui.Row(c).Gap(6).Children(func() {
+				if segmentOption(c, pal, i18n.T("settings.enabled"), a.settingScheduleEnabled) {
+					a.settingScheduleEnabled = true
+				}
+				if segmentOption(c, pal, i18n.T("settings.disabled"), !a.settingScheduleEnabled) {
+					a.settingScheduleEnabled = false
+				}
+			})
+		})
+
+		if a.settingScheduleEnabled {
+			ui.Row(c).Gap(10).Children(func() {
+				ui.Column(c).Gap(4).Grow(1).Children(func() {
+					ui.Text(c, i18n.T("sched.start_time")).FontSize(11).FontWeight(600).TextColor(pal.TextSecondary)
+					ui.TextInput(c, &a.settingScheduleStart).Placeholder("01:00").Background(pal.Card).Border(1, pal.Border).Radius(7)
+				})
+				ui.Column(c).Gap(4).Grow(1).Children(func() {
+					ui.Text(c, i18n.T("sched.stop_time")).FontSize(11).FontWeight(600).TextColor(pal.TextSecondary)
+					ui.TextInput(c, &a.settingScheduleStop).Placeholder("06:00").Background(pal.Card).Border(1, pal.Border).Radius(7)
+				})
+			})
+
+			ui.Column(c).Gap(4).Children(func() {
+				ui.Text(c, i18n.T("sched.days_label")).FontSize(11).FontWeight(600).TextColor(pal.TextSecondary)
+				ui.Row(c).Gap(4).Children(func() {
+					dayKeys := []string{"sched.day_0", "sched.day_1", "sched.day_2", "sched.day_3", "sched.day_4", "sched.day_5", "sched.day_6"}
+					if a.settingScheduleDays == nil {
+						a.settingScheduleDays = make(map[int]bool)
+					}
+					for idx, key := range dayKeys {
+						if segmentOption(c, pal, i18n.T(key), a.settingScheduleDays[idx]) {
+							a.settingScheduleDays[idx] = !a.settingScheduleDays[idx]
+						}
+					}
+				})
+			})
+
+			ui.Column(c).Gap(4).Children(func() {
+				ui.Text(c, i18n.T("sched.stop_action")).FontSize(11).FontWeight(600).TextColor(pal.TextSecondary)
+				ui.Row(c).Gap(6).Children(func() {
+					actions := []struct {
+						val   string
+						label string
+					}{
+						{"none", i18n.T("power.none")},
+						{"sleep", i18n.T("power.sleep")},
+						{"shutdown", i18n.T("power.shutdown")},
+					}
+					for _, act := range actions {
+						if segmentOption(c, pal, act.label, a.settingScheduleAction == act.val) {
+							a.settingScheduleAction = act.val
+						}
+					}
+				})
+			})
+		}
+	})
+
+	// Clipboard Monitor (Opt-in, default false)
+	ui.Row(c).Padding(10, 12).Radius(8).Background(pal.InputBg).Border(1, pal.Border).Gap(12).AlignItems(ui.Center).Justify(ui.SpaceBetween).Children(func() {
+		ui.Column(c).Gap(2).Grow(1).Children(func() {
+			ui.Text(c, i18n.T("clip.title")).FontSize(12).FontWeight(600).TextColor(pal.TextPrimary)
+			ui.Text(c, i18n.T("clip.subtitle")).FontSize(11).TextColor(pal.TextMuted)
+		})
+		ui.Row(c).Gap(6).Children(func() {
+			if segmentOption(c, pal, i18n.T("settings.enabled"), a.settingMonitorClipboard) {
+				a.settingMonitorClipboard = true
+			}
+			if segmentOption(c, pal, i18n.T("settings.disabled"), !a.settingMonitorClipboard) {
+				a.settingMonitorClipboard = false
+			}
+		})
+	})
 }
 
 func (a *App) buildSettingsProxyConfig() (engine.ProxyConfig, error) {
@@ -2380,6 +2527,19 @@ func (a *App) saveSettings() {
 		return
 	}
 
+	schedCfg := engine.ScheduleConfig{
+		Enabled:    a.settingScheduleEnabled,
+		StartTime:  strings.TrimSpace(a.settingScheduleStart),
+		StopTime:   strings.TrimSpace(a.settingScheduleStop),
+		DaysOfWeek: daysMapToSlice(a.settingScheduleDays),
+		StopAction: defaultStr(a.settingScheduleAction, "none"),
+	}
+	if err := schedCfg.Validate(); err != nil {
+		a.activeSettingsTab = settingsTabDownloads
+		a.settingsError = i18n.Tf("sched.err_invalid", err.Error())
+		return
+	}
+
 	if a.autostartSetter != nil {
 		if err := a.autostartSetter(a.settingLaunchAtStartup); err != nil {
 			a.activeSettingsTab = settingsTabGeneral
@@ -2399,8 +2559,10 @@ func (a *App) saveSettings() {
 	cfg.MinimizeToTray = a.settingMinimizeToTray
 	cfg.CloseToTray = a.settingCloseToTray
 	cfg.AutoCheckUpdates = a.settingAutoCheckUpdates
+	cfg.MonitorClipboard = a.settingMonitorClipboard
 	cfg.Language = string(a.language)
 	cfg.Proxy = proxyCfg
+	cfg.Schedule = schedCfg
 	a.engine.UpdateConfig(cfg)
 
 	a.settingMaxRetries = strconv.Itoa(retries)

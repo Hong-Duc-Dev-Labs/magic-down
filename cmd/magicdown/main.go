@@ -83,6 +83,9 @@ func main() {
 		notify.NotifyDownloadComplete(task.Filename)
 		appUI.HandleTaskCompleted(task)
 	})
+	eng.SetOnScheduleStop(func(stopAction string) {
+		appUI.HandleScheduleStop(stopAction)
+	})
 
 	// Keep the process alive in the system tray when windows are hidden/closed.
 	mygo.App.OnWindowAllClosed(func() {})

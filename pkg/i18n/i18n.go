@@ -133,6 +133,7 @@ var catalogs = map[Lang]map[string]string{
 		"toolbar.pause":              "Pause",
 		"toolbar.delete":             "Delete",
 		"toolbar.clear_done":         "Clear Done",
+		"toolbar.batch_import":       "Batch URLs",
 		"toolbar.new_download":       "New Download",
 
 		// Delete confirmation modal
@@ -242,6 +243,36 @@ var catalogs = map[Lang]map[string]string{
 		"power.countdown_body":          "All downloads have finished. Click Cancel to abort or start a new download.",
 		"power.cancel":                  "Cancel",
 		"power.run_now":                 "Execute Now",
+
+		// Batch URL Pattern Import
+		"batch.title":            "Batch URL Import",
+		"batch.subtitle":         "Paste multiple links or numeric/letter wildcards (up to 500 URLs)",
+		"batch.urls_label":       "URLs or Wildcard Patterns (one per line)",
+		"batch.urls_placeholder": "https://cdn.example.com/part_[01-20].zip",
+		"batch.wildcard_hint":    "Supports [01-20], [1-100], [a-z] wildcards and comments starting with #.",
+		"batch.preview_count":    "%d URL(s) ready to import",
+		"batch.preview_more":     "...and %d more",
+		"batch.start_btn":        "Start Batch",
+		"batch.err_empty":        "Enter at least one valid http:// or https:// URL.",
+		"msg.batch_added":        "Added %d batch download(s)",
+
+		// Queue Scheduler & Clipboard Monitor
+		"sched.title":       "Queue Scheduler",
+		"sched.subtitle":    "Automatically start queued downloads in a time window and pause when it ends",
+		"sched.start_time":  "Start Time (HH:MM)",
+		"sched.stop_time":   "Stop Time (HH:MM)",
+		"sched.days_label":  "Active Days (leave all off for every day)",
+		"sched.day_0":       "Sun",
+		"sched.day_1":       "Mon",
+		"sched.day_2":       "Tue",
+		"sched.day_3":       "Wed",
+		"sched.day_4":       "Thu",
+		"sched.day_5":       "Fri",
+		"sched.day_6":       "Sat",
+		"sched.stop_action": "When window ends",
+		"sched.err_invalid": "Invalid schedule: %s",
+		"clip.title":        "Clipboard Monitor (Opt-In)",
+		"clip.subtitle":     "Open Download Info Dialog automatically when copying direct file URLs",
 
 		// Empty states
 		"empty.no_downloads_title": "No downloads yet",
@@ -450,6 +481,7 @@ var catalogs = map[Lang]map[string]string{
 		"toolbar.pause":              "Tạm dừng",
 		"toolbar.delete":             "Xóa",
 		"toolbar.clear_done":         "Xóa đã xong",
+		"toolbar.batch_import":       "Nhập hàng loạt",
 		"toolbar.new_download":       "Thêm liên kết",
 
 		// Delete confirmation modal
@@ -559,6 +591,36 @@ var catalogs = map[Lang]map[string]string{
 		"power.countdown_body":          "Tất cả lượt tải đã hoàn tất. Bấm Hủy để dừng lại hoặc bắt đầu lượt tải mới.",
 		"power.cancel":                  "Hủy",
 		"power.run_now":                 "Thực hiện ngay",
+
+		// Batch URL Pattern Import
+		"batch.title":            "Nhập danh sách URL hàng loạt",
+		"batch.subtitle":         "Dán nhiều liên kết hoặc mẫu ký tự đại diện số/chữ (tối đa 500 URL)",
+		"batch.urls_label":       "Danh sách URL hoặc mẫu wildcard (mỗi dòng 1 mục)",
+		"batch.urls_placeholder": "https://cdn.example.com/part_[01-20].zip",
+		"batch.wildcard_hint":    "Hỗ trợ wildcard [01-20], [1-100], [a-z] và dòng chú thích bắt đầu bằng #.",
+		"batch.preview_count":    "%d URL sẵn sàng nhập",
+		"batch.preview_more":     "...và %d liên kết khác",
+		"batch.start_btn":        "Bắt đầu tải hàng loạt",
+		"batch.err_empty":        "Vui lòng nhập ít nhất một liên kết http:// hoặc https:// hợp lệ.",
+		"msg.batch_added":        "Đã thêm %d lượt tải hàng loạt",
+
+		// Queue Scheduler & Clipboard Monitor
+		"sched.title":       "Lịch trình hàng đợi (Scheduler)",
+		"sched.subtitle":    "Tự động chạy các mục đang chờ trong khung giờ và tạm dừng khi kết thúc",
+		"sched.start_time":  "Giờ bắt đầu (HH:MM)",
+		"sched.stop_time":   "Giờ kết thúc (HH:MM)",
+		"sched.days_label":  "Ngày hoạt động (bỏ chọn hết = mọi ngày)",
+		"sched.day_0":       "CN",
+		"sched.day_1":       "T2",
+		"sched.day_2":       "T3",
+		"sched.day_3":       "T4",
+		"sched.day_4":       "T5",
+		"sched.day_5":       "T6",
+		"sched.day_6":       "T7",
+		"sched.stop_action": "Khi hết khung giờ",
+		"sched.err_invalid": "Lịch trình không hợp lệ: %s",
+		"clip.title":        "Theo dõi bộ nhớ tạm (Tùy chọn)",
+		"clip.subtitle":     "Tự mở hộp thoại tải xuống khi sao chép liên kết tệp trực tiếp",
 
 		// Empty states
 		"empty.no_downloads_title": "Chưa có lượt tải nào",

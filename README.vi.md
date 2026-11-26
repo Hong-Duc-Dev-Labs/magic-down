@@ -23,8 +23,11 @@ Trình quản lý tải xuống tốc độ cao dành cho Windows lấy cảm h�
   - Tích hợp sẵn khả năng phát hiện và lập kế hoạch tải cho **X / Twitter**, **Facebook**, **Weibo**, **Bilibili**, **Douyin**, các luồng HLS (`.m3u8` bao gồm cả `#EXT-X-MAP`) và trình phát DASH/MSE.
 - **Tải ảnh thu nhỏ Video (Video Thumbnail Downloader)**
   - Trích xuất ảnh thu nhỏ độ phân giải cao chỉ với một cú nhấp chuột trên YouTube, Bilibili, Weibo, Facebook, Douyin và các trang HTML5 `<video>` tiêu chuẩn.
-- **Tải hàng loạt (Batch Download All)**
+- **Tải hàng loạt (Batch Download All) & Nhập URL theo mẫu Wildcard**
   - Quét toàn bộ trang web để tìm hình ảnh, video, âm thanh, tài liệu và tệp nén; lọc theo danh mục, kích thước hoặc từ khóa tìm kiếm, sau đó gửi tất cả mục đã chọn sang MagicDown trong một lần duy nhất.
+  - Nhập danh sách nhiều URL hoặc mẫu wildcard số/chữ (`part_[01-20].zip`, `vol_[a-z].tar.gz`, tối đa 500 URL) kèm xem trước trực tiếp.
+- **Lịch trình hàng đợi (Queue Scheduler) & Theo dõi bộ nhớ tạm (Tùy chọn)**
+  - Hẹn khung giờ tự động tải và tạm dừng (hỗ trợ qua đêm như `23:00 → 06:00`, lọc ngày trong tuần, tùy chọn Ngủ/Tắt máy khi hết khung giờ) cùng chế độ theo dõi bộ nhớ tạm (tắt mặc định) cho liên kết tệp trực tiếp.
 - **Hộp thoại thông tin tải xuống & Tự động phân loại**
   - Xem trước tên tệp, dung lượng ước tính, thư mục lưu và danh mục trước khi bắt đầu tải, kèm tính năng tự động sắp xếp vào các thư mục con (`Video`, `Music`, `Compressed`, `Documents`, `Programs`, `Other`).
 - **Khay hệ thống (System Tray), Tự khởi động & Thiết lập ban đầu**

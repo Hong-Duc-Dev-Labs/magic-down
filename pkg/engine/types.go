@@ -116,27 +116,39 @@ type ProxyConfig struct {
 	Password string `json:"password,omitempty"`
 }
 
+// ScheduleConfig defines an optional recurring download window for the queue
+// scheduler. Times use 24-hour "HH:MM" format; empty DaysOfWeek means every day.
+type ScheduleConfig struct {
+	Enabled    bool   `json:"enabled"`
+	StartTime  string `json:"start_time,omitempty"`
+	StopTime   string `json:"stop_time,omitempty"`
+	DaysOfWeek []int  `json:"days_of_week,omitempty"` // 0=Sun..6=Sat
+	StopAction string `json:"stop_action,omitempty"`  // "none" | "sleep" | "shutdown"
+}
+
 // DefaultMaxRetries is the retry budget used by DefaultConfig. A config value of
 // 0 disables retries entirely.
 const DefaultMaxRetries = 3
 
 // Config holds download engine configuration options.
 type Config struct {
-	MaxConcurrentDownloads int         `json:"max_concurrent_downloads"`
-	DefaultSegments        int         `json:"default_segments"`
-	MaxRetries             int         `json:"max_retries"`
-	SpeedLimitKBps         int64       `json:"speed_limit_kbps"` // 0 = unlimited
-	DownloadDir            string      `json:"download_dir"`
-	StateFilePath          string      `json:"state_file_path"`
-	AutoCategorize         bool        `json:"auto_categorize"`
-	LaunchAtStartup        bool        `json:"launch_at_startup"`
-	MinimizeToTray         bool        `json:"minimize_to_tray"`
-	CloseToTray            bool        `json:"close_to_tray"`
-	OnboardingCompleted    bool        `json:"onboarding_completed"`
-	AutoCheckUpdates       bool        `json:"auto_check_updates"`
-	UpdateRepo             string      `json:"update_repo,omitempty"`
-	Language               string      `json:"language,omitempty"`
-	Proxy                  ProxyConfig `json:"proxy,omitempty"`
+	MaxConcurrentDownloads int            `json:"max_concurrent_downloads"`
+	DefaultSegments        int            `json:"default_segments"`
+	MaxRetries             int            `json:"max_retries"`
+	SpeedLimitKBps         int64          `json:"speed_limit_kbps"` // 0 = unlimited
+	DownloadDir            string         `json:"download_dir"`
+	StateFilePath          string         `json:"state_file_path"`
+	AutoCategorize         bool           `json:"auto_categorize"`
+	LaunchAtStartup        bool           `json:"launch_at_startup"`
+	MinimizeToTray         bool           `json:"minimize_to_tray"`
+	CloseToTray            bool           `json:"close_to_tray"`
+	OnboardingCompleted    bool           `json:"onboarding_completed"`
+	AutoCheckUpdates       bool           `json:"auto_check_updates"`
+	UpdateRepo             string         `json:"update_repo,omitempty"`
+	Language               string         `json:"language,omitempty"`
+	Proxy                  ProxyConfig    `json:"proxy,omitempty"`
+	Schedule               ScheduleConfig `json:"schedule,omitempty"`
+	MonitorClipboard       bool           `json:"monitor_clipboard,omitempty"`
 }
 
 // DefaultConfig returns reasonable default configuration values.
@@ -154,5 +166,12 @@ func DefaultConfig(downloadDir, statePath string) Config {
 		OnboardingCompleted:    false,
 		AutoCheckUpdates:       true,
 		Proxy:                  ProxyConfig{Mode: ProxyModeSystem},
+		Schedule: ScheduleConfig{
+			Enabled:    false,
+			StartTime:  "01:00",
+			StopTime:   "06:00",
+			StopAction: "none",
+		},
+		MonitorClipboard: false,
 	}
 }

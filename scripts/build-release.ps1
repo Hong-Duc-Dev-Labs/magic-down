@@ -180,12 +180,37 @@ if (-not $SkipZip) {
     Compress-Archive -Path (Join-Path $StageDir "*") -DestinationPath $ZipPath -Force
     Remove-Item -Path $StageDir -Recurse -Force
 
+    # Compile Windows GUI Installer with Inno Setup (ISCC.exe) when installed
+    $SetupExe = Join-Path $OutDir "MagicDown-Setup-v$Version.exe"
+    $IsccCmd = Get-Command iscc -ErrorAction SilentlyContinue
+    $IsccPath = if ($IsccCmd) { $IsccCmd.Source } else { $null }
+    if (-not $IsccPath) {
+        foreach ($candidate in @(
+            "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+            "$env:ProgramFiles\Inno Setup 6\ISCC.exe",
+            "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe"
+        )) {
+            if ($candidate -and (Test-Path $candidate)) {
+                $IsccPath = $candidate
+                break
+            }
+        }
+    }
+    $IssScript = Join-Path $PSScriptRoot "installer.iss"
+    if ($IsccPath -and (Test-Path $IssScript)) {
+        Write-Host "  Building Inno Setup installer ($SetupExe)..." -ForegroundColor Cyan
+        & $IsccPath "/DAppVersion=$Version" $IssScript
+        if ($LASTEXITCODE -ne 0) { throw "ISCC.exe failed with exit code $LASTEXITCODE" }
+    } else {
+        Write-Host "  Skipping Inno Setup .exe installer (ISCC.exe not found in PATH or Program Files)." -ForegroundColor Yellow
+    }
+
     # Generate sha256sum-compatible checksums.txt
     $ChecksumsPath = Join-Path $OutDir "checksums.txt"
     $ChromeExtZip = Join-Path $OutDir "MagicDown-extension-chrome.zip"
     $EdgeExtZip = Join-Path $OutDir "MagicDown-extension-edge.zip"
     $lines = @()
-    foreach ($artifact in @($ZipPath, $GuiExe, $HostExe, $ChromeExtZip, $EdgeExtZip)) {
+    foreach ($artifact in @($ZipPath, $SetupExe, $GuiExe, $HostExe, $ChromeExtZip, $EdgeExtZip)) {
         if (Test-Path $artifact) {
             $hash = (Get-FileHash -Path $artifact -Algorithm SHA256).Hash.ToLowerInvariant()
             $name = Split-Path -Leaf $artifact
@@ -201,6 +226,9 @@ if (-not $SkipZip) {
     Write-Host "  GUI       : $GuiExe"
     Write-Host "  Host      : $HostExe"
     Write-Host "  Archive   : $ZipPath"
+    if (Test-Path $SetupExe) {
+        Write-Host "  Installer : $SetupExe"
+    }
     Write-Host "  ChromeExt : $ChromeExtZip"
     Write-Host "  EdgeExt   : $EdgeExtZip"
     Write-Host "  Checksums : $ChecksumsPath"

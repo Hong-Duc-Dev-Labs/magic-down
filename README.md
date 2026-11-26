@@ -23,8 +23,11 @@ A fast, IDM-inspired desktop download manager for Windows built in pure Go with 
   - Built-in detection and download plans for **X / Twitter**, **Facebook**, **Weibo**, **Bilibili**, **Douyin**, HLS (`.m3u8` including `#EXT-X-MAP`), and DASH/MSE players.
 - **Video Thumbnail Downloader**
   - One-click high-resolution thumbnail extraction across YouTube, Bilibili, Weibo, Facebook, Douyin, and standard HTML5 `<video>` pages.
-- **Batch Download All**
+- **Batch Download All & Batch URL Pattern Import**
   - Scan any web page for images, videos, audio, documents, and archives, filter by category/size/search, and send selected items in one batch to MagicDown.
+  - Import multi-line URL lists or numeric/letter wildcard patterns (`part_[01-20].zip`, `vol_[a-z].tar.gz`, up to 500 URLs) with live preview and single-lock bulk queueing.
+- **Queue Scheduler & Opt-In Clipboard Monitor**
+  - Schedule recurring download time windows (including overnight wrap-around like `23:00 → 06:00` and weekday filters) with optional post-window Sleep/Shutdown, plus an opt-in Clipboard Monitor (off by default) for direct file links.
 - **Download Info Dialog & Auto-Categorization**
   - Review filename, estimated size, save directory, and category before starting, with automatic subfolder sorting (`Video`, `Music`, `Compressed`, `Documents`, `Programs`, `Other`).
 - **System Tray, Autostart & Welcome Setup**

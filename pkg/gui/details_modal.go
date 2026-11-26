@@ -483,6 +483,21 @@ func (a *App) HandleTaskCompleted(_ *engine.Task) {
 	a.BringToForeground()
 }
 
+// HandleScheduleStop is invoked by the engine Scheduler when a configured time
+// window exits with a Sleep or Shutdown stop action.
+func (a *App) HandleScheduleStop(stopAction string) {
+	act := power.NormalizeAction(stopAction)
+	if act == power.ActionNone || a.powerCountdown == nil {
+		return
+	}
+	dur := a.powerCountdownDuration
+	if dur <= 0 {
+		dur = power.DefaultCountdownDuration
+	}
+	a.powerCountdown.Start(act, dur)
+	a.BringToForeground()
+}
+
 func (a *App) cancelPowerCountdown() {
 	if a.powerCountdown != nil {
 		a.powerCountdown.Cancel()

@@ -11,6 +11,8 @@ param(
     [string]$Version,
 
     [string]$GitHubRepo = "Hong-Duc-Dev-Labs/magic-down",
+    [ValidateSet("dev", "prod")]
+    [string]$Mode = "dev",
     [string]$Notes = "",
     [switch]$Draft,
     [switch]$Prerelease
@@ -27,10 +29,11 @@ if (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
     throw "GitHub CLI (gh) is required to publish releases."
 }
 
-Write-Host "Building release $Tag for $GitHubRepo..." -ForegroundColor Cyan
-& (Join-Path $PSScriptRoot "build-release.ps1") -OutDir $DistDir -Version $CleanVersion -GitHubRepo $GitHubRepo
+Write-Host "Building release $Tag (mode=$Mode) for $GitHubRepo..." -ForegroundColor Cyan
+& (Join-Path $PSScriptRoot "build-release.ps1") -OutDir $DistDir -Version $CleanVersion -GitHubRepo $GitHubRepo -Mode $Mode
 
 $ZipPath = Join-Path $DistDir "MagicDown-windows-amd64.zip"
+$SetupExe = Join-Path $DistDir "MagicDown-Setup-v$CleanVersion.exe"
 $GuiExe = Join-Path $DistDir "magicdown.exe"
 $ChecksumsPath = Join-Path $DistDir "checksums.txt"
 
@@ -40,11 +43,14 @@ foreach ($file in @($ZipPath, $GuiExe, $ChecksumsPath)) {
     }
 }
 
+$assets = @($ZipPath, $GuiExe, $ChecksumsPath)
+if (Test-Path $SetupExe) {
+    $assets += $SetupExe
+}
+
 $ghArgs = @(
-    "release", "create", $Tag,
-    $ZipPath,
-    $GuiExe,
-    $ChecksumsPath,
+    "release", "create", $Tag
+) + $assets + @(
     "--repo", $GitHubRepo,
     "--title", "MagicDown $Tag"
 )

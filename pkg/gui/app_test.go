@@ -644,3 +644,86 @@ func TestProxySettingsSaveLoadAndPostDownloadCountdown(t *testing.T) {
 		t.Fatalf("expected cancelled countdown not to execute sleep, got %d", slept)
 	}
 }
+
+func TestBatchModalSchedulerSettingsAndClipboardMonitor(t *testing.T) {
+	tempDir := t.TempDir()
+	eng, err := engine.NewEngine(engine.Config{
+		MaxConcurrentDownloads: 2,
+		DefaultSegments:        4,
+		DownloadDir:            tempDir,
+		StateFilePath:          filepath.Join(tempDir, "state.json"),
+		OnboardingCompleted:    true,
+	})
+	if err != nil {
+		t.Fatalf("NewEngine failed: %v", err)
+	}
+	defer eng.Close()
+
+	// Clipboard monitor must default to false (opt-in privacy invariant).
+	if eng.Config().MonitorClipboard {
+		t.Fatalf("expected MonitorClipboard to default to false")
+	}
+
+	// Verify URL matcher for clipboard monitor.
+	if !IsMonitorableDownloadURL("https://cdn.example.com/app/release-v1.zip", nil) {
+		t.Errorf("expected direct .zip URL to match clipboard monitor")
+	}
+	if IsMonitorableDownloadURL("https://example.com/articles/hello-world", nil) {
+		t.Errorf("expected non-file webpage URL not to match clipboard monitor")
+	}
+	if IsMonitorableDownloadURL("not a url\nhttps://example.com/a.zip", nil) {
+		t.Errorf("expected multiline text not to match clipboard monitor")
+	}
+
+	app := NewApp(eng, nil)
+	app.autostartSetter = func(bool) error { return nil }
+	tester := ui.NewTester(app.View, 1120, 700)
+	tester.SetScale(1)
+
+	// Batch URL modal preview & import.
+	app.openBatchModal()
+	app.batchInputText = "https://cdn.example.com/part_[01-05].zip"
+	app.batchSaveDir = tempDir
+	tester.Frame()
+	app.submitBatchImport(false)
+	if app.showBatchModal || app.batchError != "" {
+		t.Fatalf("expected batch import to succeed, open=%v err=%q", app.showBatchModal, app.batchError)
+	}
+	if got := len(eng.GetTasks()); got != 5 {
+		t.Fatalf("expected 5 batch tasks added, got %d", got)
+	}
+
+	// Scheduler & Clipboard Monitor settings save + validation.
+	app.openSettingsModal()
+	app.activeSettingsTab = settingsTabDownloads
+	app.settingScheduleEnabled = true
+	app.settingScheduleStart = "25:00" // invalid hour
+	app.settingScheduleStop = "06:00"
+	app.saveSettings()
+	if app.settingsError == "" {
+		t.Fatalf("expected validation error for invalid schedule start_time")
+	}
+
+	app.settingScheduleStart = "23:00"
+	app.settingScheduleStop = "06:00"
+	app.settingScheduleDays[int(time.Monday)] = true
+	app.settingScheduleAction = "sleep"
+	app.settingMonitorClipboard = true
+	tester.Frame()
+	app.saveSettings()
+	if app.settingsError != "" || app.showSettingsModal {
+		t.Fatalf("expected valid schedule & clipboard settings to save, err=%q open=%v", app.settingsError, app.showSettingsModal)
+	}
+	cfg := eng.Config()
+	if !cfg.Schedule.Enabled || cfg.Schedule.StartTime != "23:00" || cfg.Schedule.StopTime != "06:00" || !cfg.MonitorClipboard {
+		t.Fatalf("unexpected saved schedule/clipboard config: %+v / clip=%v", cfg.Schedule, cfg.MonitorClipboard)
+	}
+
+	// HandleScheduleStop starts cancelable countdown.
+	app.powerCountdownDuration = 300 * time.Millisecond
+	app.HandleScheduleStop("sleep")
+	if active, act, _ := app.powerCountdown.State(); !active || act != power.ActionSleep {
+		t.Fatalf("expected HandleScheduleStop to start sleep countdown, got active=%v act=%q", active, act)
+	}
+	app.cancelPowerCountdown()
+}

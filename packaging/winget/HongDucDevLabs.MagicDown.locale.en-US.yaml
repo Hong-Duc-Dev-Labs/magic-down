@@ -1,0 +1,26 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.6.0.schema.json
+
+PackageIdentifier: HongDucDevLabs.MagicDown
+PackageVersion: 0.1.2
+PackageLocale: en-US
+Publisher: HongDucDevLabs
+PublisherUrl: https://github.com/Hong-Duc-Dev-Labs/magic-down
+PublisherSupportUrl: https://github.com/Hong-Duc-Dev-Labs/magic-down/issues
+PackageName: MagicDown
+PackageUrl: https://github.com/Hong-Duc-Dev-Labs/magic-down
+License: MIT
+ShortDescription: Fast, IDM-inspired multi-segment Windows download manager with GPU native UI.
+Description: >-
+  MagicDown is a pure-Go Windows download manager featuring dynamic work-stealing
+  multi-segment acceleration, expired link refresh, duplicate detection, live
+  segment visualization, per-task speed limits, proxy support, SHA-256/MD5
+  checksum verification, queue scheduling, batch URL pattern imports, and a
+  Manifest V3 Chromium browser extension.
+Tags:
+  - download-manager
+  - downloader
+  - multi-segment
+  - youtube-downloader
+  - go
+ManifestType: defaultLocale
+ManifestVersion: 1.6.0
