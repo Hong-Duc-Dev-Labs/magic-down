@@ -105,8 +105,31 @@ if (Test-Path (Join-Path $RepoRoot "config\extension-ids.json")) {
     Copy-Item -Path (Join-Path $RepoRoot "config\extension-ids.json") -Destination (Join-Path $ConfigOutDir "extension-ids.json") -Force
 }
 
-# Package clean Chrome & Edge Store extension ZIPs
-& (Join-Path $PSScriptRoot "package-extension.ps1") -OutDir $OutDir -Version $Version
+# Bundle unpacked extension/ folder (keeping manifest.json "key" for deterministic Extension ID, excluding *.test.js)
+$SrcExtDir = Join-Path $RepoRoot "extension"
+$OutExtDir = Join-Path $OutDir "extension"
+if (Test-Path $OutExtDir) {
+    Remove-Item -Path $OutExtDir -Recurse -Force
+}
+if (Test-Path $SrcExtDir) {
+    New-Item -ItemType Directory -Force -Path $OutExtDir | Out-Null
+    Get-ChildItem -Path $SrcExtDir -Recurse -File | Where-Object {
+        $_.Name -notmatch '\.test\.js$' -and $_.Name -ne '.DS_Store' -and $_.Name -ne 'Thumbs.db' -and $_.Extension -notin @('.map', '.log')
+    } | ForEach-Object {
+        $relPath = $_.FullName.Substring($SrcExtDir.Length).TrimStart('\', '/')
+        $destFile = Join-Path $OutExtDir $relPath
+        $destParent = Split-Path -Parent $destFile
+        if (-not (Test-Path $destParent)) {
+            New-Item -ItemType Directory -Force -Path $destParent | Out-Null
+        }
+        Copy-Item -Path $_.FullName -Destination $destFile -Force
+    }
+    # Verify bundled manifest.json retains the fixed public "key"
+    $bundledManifest = Get-Content -Path (Join-Path $OutExtDir "manifest.json") -Raw | ConvertFrom-Json
+    if (-not $bundledManifest.key) {
+        throw "Bundled unpacked extension/manifest.json is missing required 'key' field"
+    }
+}
 
 # Generate reference Native Messaging manifests for the selected mode
 $ManifestOutDir = Join-Path $OutDir "manifests"
@@ -146,6 +169,9 @@ if (-not $SkipZip) {
     Copy-Item -Path (Join-Path $OutDir "install.ps1") -Destination (Join-Path $StageDir "install.ps1") -Force
     Copy-Item -Path (Join-Path $OutDir "uninstall.ps1") -Destination (Join-Path $StageDir "uninstall.ps1") -Force
     Copy-Item -Path $ConfigOutDir -Destination (Join-Path $StageDir "config") -Recurse -Force
+    if (Test-Path $OutExtDir) {
+        Copy-Item -Path $OutExtDir -Destination (Join-Path $StageDir "extension") -Recurse -Force
+    }
 
     $ZipPath = Join-Path $OutDir "MagicDown-windows-amd64.zip"
     if (Test-Path $ZipPath) {

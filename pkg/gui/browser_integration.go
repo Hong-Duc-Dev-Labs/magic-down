@@ -2,6 +2,8 @@ package gui
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/egoist/mygo/ui"
@@ -38,8 +40,22 @@ func (a *App) browserIntegrationStatuses() []nativemessaging.BrowserIntegrationS
 	return nativemessaging.BuildBrowserIntegrationStatuses(a.detectedBrowsers, cfg, merged)
 }
 
-func (a *App) installExtensionForBrowser(st nativemessaging.BrowserIntegrationStatus) {
-	// Ensure Native Messaging Host is registered for this browser first (never open --load-extension).
+func (a *App) resolvedExtensionDir() string {
+	if strings.TrimSpace(a.extensionDir) != "" {
+		return a.extensionDir
+	}
+	if resolved := nativemessaging.ResolveExtensionDir(); resolved != "" {
+		a.extensionDir = resolved
+		return resolved
+	}
+	if localAppData := strings.TrimSpace(os.Getenv("LOCALAPPDATA")); localAppData != "" {
+		return filepath.Join(localAppData, "Programs", "MagicDown", "extension")
+	}
+	return `%LOCALAPPDATA%\Programs\MagicDown\extension`
+}
+
+func (a *App) installExtensionForBrowser(c *ui.Context, st nativemessaging.BrowserIntegrationStatus) {
+	// 1. Ensure Native Messaging Host is registered for this browser first.
 	if !st.HostValid && a.integrateBrowsersFn != nil {
 		results := a.integrateBrowsersFn([]nativemessaging.BrowserInfo{st.Browser}, "", "", false)
 		for _, r := range results {
@@ -56,16 +72,15 @@ func (a *App) installExtensionForBrowser(st nativemessaging.BrowserIntegrationSt
 		a.refreshBrowsers()
 	}
 
-	if strings.TrimSpace(st.StoreURL) == "" {
-		a.browserConnStates[st.Browser.ID] = nativemessaging.ExtensionConnectionState{
-			Waiting: true,
-		}
-		a.nativeRegMsg = i18n.Tf("browser.store_url_missing", st.Browser.Name)
-		return
+	// 2. Copy the unpacked extension folder path to the clipboard.
+	extDir := a.resolvedExtensionDir()
+	if c != nil && extDir != "" {
+		c.WriteClipboard(extDir)
 	}
 
-	if a.openStoreURLFn != nil {
-		if err := a.openStoreURLFn(st.Browser, st.StoreURL); err != nil {
+	// 3. Open the browser's extensions page (chrome://extensions / edge://extensions).
+	if a.openExtensionsPageFn != nil {
+		if err := a.openExtensionsPageFn(st.Browser); err != nil {
 			a.browserConnStates[st.Browser.ID] = nativemessaging.ExtensionConnectionState{
 				LastError: err.Error(),
 			}
@@ -74,10 +89,12 @@ func (a *App) installExtensionForBrowser(st nativemessaging.BrowserIntegrationSt
 		}
 	}
 
+	// 4. Show concise 3-step Load unpacked guide and wait for real HELLO/WELCOME handshake.
+	a.installGuideBrowserID = st.Browser.ID
 	a.browserConnStates[st.Browser.ID] = nativemessaging.ExtensionConnectionState{
 		Waiting: true,
 	}
-	a.nativeRegMsg = i18n.Tf("browser.store_opened", st.Browser.Name)
+	a.nativeRegMsg = i18n.Tf("browser.unpacked_opened", st.Browser.Name)
 }
 
 func (a *App) reconnectBrowser(st nativemessaging.BrowserIntegrationStatus) {
@@ -162,7 +179,7 @@ func (a *App) renderBrowserIntegrationSection(c *ui.Context, pal Palette) {
 					ui.Row(c).Gap(6).AlignItems(ui.Center).Children(func() {
 						if curSt.Browser.Family == nativemessaging.BrowserFamilyChromium {
 							if toolbarButton(c, pal, nil, i18n.T("browser.btn_install"), false, false) {
-								a.installExtensionForBrowser(curSt)
+								a.installExtensionForBrowser(c, curSt)
 							}
 							if toolbarButton(c, pal, nil, i18n.T("browser.btn_reconnect"), false, false) {
 								a.reconnectBrowser(curSt)
@@ -177,6 +194,22 @@ func (a *App) renderBrowserIntegrationSection(c *ui.Context, pal Palette) {
 						}
 					})
 				})
+
+				if a.installGuideBrowserID == curSt.Browser.ID && curSt.State != nativemessaging.StateConnected {
+					extDir := a.resolvedExtensionDir()
+					ui.Column(c).Gap(4).Padding(8, 10).Radius(6).Background(pal.InputBg).Border(1, pal.Accent).Children(func() {
+						ui.Row(c).AlignItems(ui.Center).Justify(ui.SpaceBetween).Gap(8).Children(func() {
+							ui.Text(c, i18n.Tf("browser.guide_title", curSt.Browser.Name)).FontSize(11).FontWeight(600).TextColor(pal.TextPrimary)
+							if toolbarButton(c, pal, nil, i18n.T("onboarding.copy_path"), false, false) {
+								c.WriteClipboard(extDir)
+								a.nativeRegMsg = i18n.T("onboarding.copied_path")
+							}
+						})
+						ui.Text(c, i18n.T("browser.guide_step1")).FontSize(10).TextColor(pal.TextSecondary)
+						ui.Text(c, i18n.T("browser.guide_step2")).FontSize(10).TextColor(pal.TextSecondary)
+						ui.Text(c, i18n.Tf("browser.guide_step3", extDir)).FontSize(10).TextColor(pal.TextSecondary)
+					})
+				}
 
 				if a.troubleshootBrowserID == curSt.Browser.ID {
 					ui.Column(c).Gap(3).Padding(8, 10).Radius(6).Background(pal.InputBg).Border(1, pal.Border).Children(func() {

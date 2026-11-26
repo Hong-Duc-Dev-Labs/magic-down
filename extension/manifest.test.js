@@ -2,6 +2,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
+const crypto = require("node:crypto");
 
 const repoRoot = path.resolve(__dirname, "..");
 const manifestPath = path.join(__dirname, "manifest.json");
@@ -43,4 +44,24 @@ test("config/extension-ids.json separates chrome/edge dev and prod IDs without g
     assert.equal(entry.prod, "", `${browser}.prod must remain empty placeholder until Store submission`);
     assert.ok(entry.store_url_template.includes("{id}"), `${browser}.store_url_template must include {id}`);
   }
+});
+
+test("extension/manifest.json public key derives the exact Extension ID in config/extension-ids.json", () => {
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+  const cfg = JSON.parse(fs.readFileSync(extConfigPath, "utf8"));
+
+  assert.equal(typeof manifest.key, "string", "manifest.json must contain a fixed public key for deterministic Load unpacked ID");
+  assert.ok(manifest.key.trim().length > 0, "manifest.json key must not be empty");
+
+  const der = Buffer.from(manifest.key, "base64");
+  const digest = crypto.createHash("sha256").update(der).digest();
+  let derivedId = "";
+  for (let i = 0; i < 16; i++) {
+    derivedId += String.fromCharCode(97 + (digest[i] >> 4));
+    derivedId += String.fromCharCode(97 + (digest[i] & 0x0f));
+  }
+
+  assert.match(derivedId, EXT_ID_RE);
+  assert.equal(derivedId, cfg.browsers.chrome.dev, "derived ID must match chrome.dev in config/extension-ids.json");
+  assert.equal(derivedId, cfg.browsers.edge.dev, "derived ID must match edge.dev in config/extension-ids.json");
 });

@@ -77,7 +77,9 @@ type App struct {
 	browserResults        map[string]nativemessaging.BrowserInstallResult
 	browserConnStates     map[string]nativemessaging.ExtensionConnectionState
 	troubleshootBrowserID string
+	installGuideBrowserID string
 	openStoreURLFn        func(nativemessaging.BrowserInfo, string) error
+	openExtensionsPageFn  func(nativemessaging.BrowserInfo) error
 	extensionDir          string
 
 	darkMode       bool
@@ -169,6 +171,7 @@ func NewApp(eng *engine.Engine, srv *ipc.Server) *App {
 		browserResults:            make(map[string]nativemessaging.BrowserInstallResult),
 		browserConnStates:         make(map[string]nativemessaging.ExtensionConnectionState),
 		openStoreURLFn:            nativemessaging.OpenStoreURL,
+		openExtensionsPageFn:      nativemessaging.OpenExtensionsPage,
 		extensionDir:              nativemessaging.ResolveExtensionDir(),
 		darkMode:                  true,
 		filterStatus:              "All",

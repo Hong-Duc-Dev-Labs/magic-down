@@ -138,3 +138,26 @@ func OpenStoreURL(b BrowserInfo, storeURL string) error {
 	}
 	return os.ErrInvalid
 }
+
+// OpenExtensionsPage opens the browser's native extensions management page
+// (e.g. chrome://extensions, edge://extensions) so the user can Load unpacked.
+func OpenExtensionsPage(b BrowserInfo) error {
+	extURL := strings.TrimSpace(b.ExtensionsURL)
+	if extURL == "" {
+		if strings.EqualFold(strings.TrimSpace(b.ID), "edge") {
+			extURL = "edge://extensions"
+		} else {
+			extURL = "chrome://extensions"
+		}
+	}
+	if b.Installed && strings.TrimSpace(b.ExecutablePath) != "" {
+		cmd := exec.Command(b.ExecutablePath, extURL)
+		if err := cmd.Start(); err == nil {
+			return nil
+		}
+	}
+	if runtime.GOOS == "windows" {
+		return exec.Command("rundll32", "url.dll,FileProtocolHandler", extURL).Start()
+	}
+	return os.ErrInvalid
+}

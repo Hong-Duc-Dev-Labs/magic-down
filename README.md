@@ -1,90 +1,123 @@
 # MagicDown
 
-A fast, IDM-inspired desktop download manager built in pure Go with **MyGo Native UI** (GPU-rendered, no webview) and a **Chrome/Edge Manifest V3** browser extension connected via Native Messaging.
+A fast, IDM-inspired desktop download manager for Windows built in pure Go with **MyGo Native UI** (GPU-rendered, zero webview) and a **Manifest V3 Chromium Browser Extension** connected via Native Messaging with real-time `HELLO/WELCOME` handshake verification.
 
-## Features (MVP)
+---
 
-- **Multi-Segment Download Engine (`pkg/engine`)**
-  - Automatic HTTP/HTTPS range probing (`Accept-Ranges`, `Content-Length`, `Content-Disposition`) with seamless fallback to single-stream download when range requests are unsupported.
-  - Configurable concurrent segments (default `8`), real-time speed/ETA/progress tracking, and atomic file completion (`.magicpart` -> final file).
-  - Pause, Resume, Cancel, Delete, and persisted JSON state so paused/queued downloads survive app restarts.
-  - Automatic retry with exponential backoff (500ms → 10s) for transient network, 5xx, 408 and 429 failures; retried segments resume from the bytes already written. Configurable `max_retries` (default `3`, `0` disables retries), with a live retry counter per task.
-  - One shared token bucket for a global speed limit (`speed_limit_kbps`, `0` = unlimited) enforced across every segment and HLS fragment; raising or lowering it applies to running downloads within ~250ms.
-  - Download queue with configurable max concurrent active downloads (default `3`).
-  - Browser media plans: a job can carry byte ranges of one URL (single-file DASH, e.g. Facebook) or a list of separate segment URLs (DASH `.m4s`/`.ts`, e.g. Weibo), which are fetched concurrently and concatenated in order. HLS `#EXT-X-MAP` init sections are included, so fMP4 HLS output is playable.
-  - Tunable settings persist to `config.json` next to the state file.
-- **Desktop App (`cmd/magicdown`, `pkg/gui`)**
-  - Pure Go **MyGo Native UI** (`github.com/egoist/mygo` v0.10.0) with IDM-inspired toolbar, status sidebar, download list, Add URL modal, and Settings modal (concurrency, segments, retries, speed limit).
-  - Windows toast notification when a download completes (no cgo; hidden PowerShell fallback to a tray balloon).
-  - Built-in localhost HTTP IPC server (`127.0.0.1:28888`) receiving jobs from the Native Messaging host.
-- **Native Messaging Host (`cmd/magicdown-host`, `pkg/nativemessaging`)**
-  - Implements Chrome/Edge 4-byte little-endian length-prefixed JSON stdio protocol and forwards jobs to the desktop app IPC.
-  - Also available as a subcommand: `magicdown.exe host`.
-- **Chrome / Edge Extension (`extension/`)**
-  - Manifest V3 extension that intercepts browser downloads (with enable/disable toggle and configurable file-type filter in popup) and forwards URL, filename, referrer, and cookies to MagicDown.
-  - Right-click context menu: **Download with MagicDown**.
-  - Floating video tag with a quality menu for plain `<video>`, HLS, and MSE/`blob:` players. A tiny MAIN-world sniffer reports `URL.createObjectURL`, `addSourceBuffer`, `fetch`/XHR/`sendBeacon` and resource-timing URLs; DASH/MPD manifests are parsed (SegmentTemplate `$Number$`/`$Time$`, SegmentList, SegmentBase byte ranges) into a real quality list and a downloadable plan. Players with no resolvable manifest show an explicit reason (MSE without manifest / DRM / not loaded yet) instead of a dead tag.
-  - Popup showing desktop app connection status, interception toggle, extension filter, and quick URL sender.
+## Features
 
-## Project Structure
+- **Multi-Segment Download Engine**
+  - Automatic HTTP/HTTPS range probing (`Accept-Ranges`, `Content-Length`, `Content-Disposition`) with seamless single-stream fallback.
+  - Configurable concurrent segments (default `8`), real-time speed/ETA/progress tracking, atomic `.magicpart` completion, and global speed limit (`speed_limit_kbps`).
+  - **Pause, Resume, Cancel, Delete**, persistent queue with configurable max concurrent downloads (default `3`), and automatic exponential-backoff retries.
+- **YouTube MP4 & MP3 Downloads**
+  - Floating video detector with quality selector for **MP4** (H.264/avc1 preferred, automatic video+audio muxing via FFmpeg) and **MP3** audio extraction at **320 / 192 / 128 kbps**.
+- **Social & Streaming Video Support**
+  - Built-in detection and download plans for **Facebook**, **Weibo**, **Bilibili**, **Douyin**, HLS (`.m3u8` including `#EXT-X-MAP`), and DASH/MSE players.
+- **Video Thumbnail Downloader**
+  - One-click high-resolution thumbnail extraction across YouTube, Bilibili, Weibo, Facebook, Douyin, and standard HTML5 `<video>` pages.
+- **Batch Download All**
+  - Scan any web page for images, videos, audio, documents, and archives, filter by category/size/search, and send selected items in one batch to MagicDown.
+- **Download Info Dialog & Auto-Categorization**
+  - Review filename, estimated size, save directory, and category before starting, with automatic subfolder sorting (`Video`, `Music`, `Compressed`, `Documents`, `Programs`, `Other`).
+- **System Tray, Autostart & Welcome Setup**
+  - GPU/CPU-optimized System Tray mode (pauses UI rendering while hidden in tray, wakes instantly on incoming downloads), optional **Launch at Windows Startup**, and a guided first-run **Welcome Setup**.
+- **Bilingual UI (English & Tiếng Việt)**
+  - Instant switching between English and Vietnamese across both the Desktop App and Browser Extension.
+- **GitHub Auto-Updater**
+  - Built-in release checker and verified SHA-256 self-updater from GitHub Releases.
+- **Secure Native Messaging & Browser Integration**
+  - Localhost IPC with per-user auth token, `HELLO/WELCOME` handshake verification, automatic reconnect, and live 7-state Browser Integration diagnostics.
 
-```text
-MagicDown/
-├── cmd/
-│   ├── magicdown/        # Desktop app (MyGo Native UI + IPC + `host` subcommand)
-│   └── magicdown-host/   # Standalone Native Messaging host executable
-├── pkg/
-│   ├── engine/           # Multi-segment downloader, queue, persistence, tests
-│   ├── gui/              # MyGo Native UI views, modals, formatting helpers, tests
-│   ├── ipc/              # Localhost HTTP IPC server & client, tests
-│   └── nativemessaging/  # 4-byte LE stdio framing & message handler, tests
-├── extension/            # Chrome/Edge Manifest V3 browser extension
-└── scripts/
-    ├── install-host.ps1  # Register Native Messaging host in HKCU (Chrome & Edge)
-    └── uninstall-host.ps1
-```
+---
 
-## Quick Start (Windows)
+## Installing the Desktop App (Windows)
 
-### 1. Build & Run the Desktop App
+### Option 1: From GitHub Releases (Recommended)
+
+1. Download `MagicDown-windows-amd64.zip` from the latest [GitHub Release](../../releases).
+2. Extract the archive to a temporary folder.
+3. Run the installer script in PowerShell:
 
 ```powershell
-# Run all tests (with race detector)
-go test -race ./...
+powershell -ExecutionPolicy Bypass -File .\install.ps1 -LaunchAfterInstall
+```
 
-# Build desktop app and native messaging host
-go build -o magicdown.exe ./cmd/magicdown
-go build -o magicdown-host.exe ./cmd/magicdown-host
+This installs MagicDown to `%LOCALAPPDATA%\Programs\MagicDown` (including the bundled `extension/` folder), creates Start Menu & Desktop shortcuts, registers the Native Messaging Host for Chrome, Edge, and detected Chromium browsers, and adds an Apps & Features uninstall entry.
 
-# Launch MagicDown desktop app
-.\magicdown.exe
+### Option 2: Build & Install from Source
+
+Requires **Go 1.22+** on Windows:
+
+```powershell
+.\scripts\install.ps1 -LaunchAfterInstall
 ```
 
 Optional flags:
-- `-port 28888` — Local IPC port (default `28888`).
-- `-dir C:\Path\To\Downloads` — Default download directory (defaults to `%USERPROFILE%\Downloads\MagicDown`).
+- `-EnableAutostart` — Start MagicDown minimized to System Tray with Windows.
+- `-NoDesktopShortcut` — Skip creating a Desktop shortcut.
+- `-SkipBuild` — Install prebuilt binaries from `dist/`.
 
-### 2. Load the Unpacked Browser Extension (Chrome / Edge)
-
-1. Open `chrome://extensions` (Chrome) or `edge://extensions` (Edge).
-2. Enable **Developer mode**.
-3. Click **Load unpacked** and select the `extension/` folder in this repository.
-   - `extension/manifest.json` includes a fixed public `"key"`, so the unpacked extension always gets the deterministic Extension ID: `cndchhhjghchjigecgkjclembafgjaje`.
-
-### 3. Register the Native Messaging Host
-
-Run the PowerShell script (defaults to `cndchhhjghchjigecgkjclembafgjaje`):
+To uninstall later, use Windows **Apps & Features** or run:
 
 ```powershell
-.\scripts\install-host.ps1
+& "$env:LOCALAPPDATA\Programs\MagicDown\uninstall.ps1"
 ```
 
-(You can also pass `-ExtensionId <custom-32-char-id>` or `-Rebuild` if needed.)
+---
 
-This writes `%LOCALAPPDATA%\MagicDown\com.magicdown.downloader.json` and registers it under `HKCU:\Software\Google\Chrome\NativeMessagingHosts\com.magicdown.downloader` and `HKCU:\Software\Microsoft\Edge\NativeMessagingHosts\com.magicdown.downloader`.
+## Installing the Browser Extension (Load Unpacked)
 
-To unregister later:
+MagicDown bundles a ready-to-load Manifest V3 extension at:
+
+```text
+%LOCALAPPDATA%\Programs\MagicDown\extension
+```
+
+Supported Chromium browsers: **Google Chrome**, **Microsoft Edge**, **Dia**, **Brave**, **Vivaldi**, **Opera / Opera GX**, and **Cốc Cốc**.
+
+> **Deterministic Extension ID:** `extension/manifest.json` includes a fixed public `"key"`, so loading it unpacked on any machine and any Chromium browser always produces the exact same Extension ID (`cndchhhjghchjigecgkjclembafgjaje`) matching the registered Native Messaging Host `allowed_origins`.
+
+### Step-by-Step Setup
+
+#### Fastest Way (Directly from MagicDown Settings)
+1. Open **MagicDown → Settings → Browser Integration**.
+2. Click **Install Extension** next to your browser.
+   - MagicDown automatically registers the Native Messaging Host, copies `%LOCALAPPDATA%\Programs\MagicDown\extension` to your clipboard, and opens your browser's Extensions page.
+3. Follow the 3 steps shown in the browser:
+   1. Enable **Developer mode** (top-right toggle).
+   2. Click **Load unpacked**.
+   3. Paste the copied path (`%LOCALAPPDATA%\Programs\MagicDown\extension`) and select the folder.
+
+#### Manual Way
+1. Open your browser's Extensions page:
+   - Chrome / Dia: `chrome://extensions`
+   - Edge: `edge://extensions`
+   - Brave: `brave://extensions`
+   - Vivaldi: `vivaldi://extensions`
+   - Opera: `opera://extensions`
+   - Cốc Cốc: `coccoc://extensions`
+2. Enable **Developer mode**.
+3. Click **Load unpacked** and select `%LOCALAPPDATA%\Programs\MagicDown\extension`.
+
+### Verifying Connection
+
+Once loaded, the extension immediately connects to `magicdown-host.exe` and performs a `HELLO/WELCOME` handshake with the MagicDown desktop app:
+- In **MagicDown → Settings → Browser Integration**, your browser status automatically changes from **Waiting for Connection** to **Connected**.
+- Clicking the **MagicDown** toolbar icon in your browser also shows **Connected**.
+
+---
+
+## Development & Testing
 
 ```powershell
-.\scripts\uninstall-host.ps1
+# Run all Go tests
+go test ./...
+
+# Run all Browser Extension tests (Node.js 18+)
+node --test extension/*.test.js
+
+# Build Windows GUI binary (no console window) and Native Messaging Host
+go build -ldflags="-s -w -H=windowsgui" -o dist/magicdown.exe ./cmd/magicdown
+go build -ldflags="-s -w" -o dist/magicdown-host.exe ./cmd/magicdown-host
 ```
