@@ -18,7 +18,7 @@
         </div>
         <div class="brand-text">
           <span class="brand-name">MagicDown</span>
-          <span class="brand-version">v1.0</span>
+          <span id="brandVersion" class="brand-version">v0.1.1</span>
         </div>
       </div>
 
@@ -31,7 +31,7 @@
           </svg>
         </button>
 
-        <button id="langToggleBtn" class="icon-btn" title="Switch Language (VI / EN)" aria-label="Switch language" style="font-size:11px;font-weight:700;padding:0 7px;width:auto;min-width:28px;">EN</button>
+        <button id="langToggleBtn" class="icon-btn lang-btn" title="Switch Language (VI / EN)" aria-label="Switch language">EN</button>
 
         <button id="themeToggleBtn" class="icon-btn" title="Toggle Dark / Light Mode" aria-label="Toggle theme">
           <svg id="iconSun" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -50,11 +50,11 @@
       <section class="card control-card">
         <div class="control-row">
           <div class="control-info">
-            <div class="control-title" data-i18n="popup.intercept_title">Auto-Intercept Downloads</div>
+            <div id="interceptTitle" class="control-title" data-i18n="popup.intercept_title">Auto-Intercept Downloads</div>
             <div class="control-sub" data-i18n="popup.intercept_sub">Accelerate matching browser downloads</div>
           </div>
           <label class="switch">
-            <input type="checkbox" id="interceptToggle" />
+            <input type="checkbox" id="interceptToggle" aria-labelledby="interceptTitle" />
             <span class="slider"></span>
           </label>
         </div>
@@ -63,11 +63,11 @@
 
         <div class="control-row" id="excludeSiteRow">
           <div class="control-info">
-            <div class="control-title" data-i18n="popup.exclude_title">Exclude Current Site</div>
+            <div id="excludeSiteTitle" class="control-title" data-i18n="popup.exclude_title">Exclude Current Site</div>
             <div class="control-sub mono" id="currentSiteLabel" data-i18n="popup.exclude_none">No active web page</div>
           </div>
           <label class="switch">
-            <input type="checkbox" id="excludeSiteToggle" />
+            <input type="checkbox" id="excludeSiteToggle" aria-labelledby="excludeSiteTitle" />
             <span class="slider"></span>
           </label>
         </div>
@@ -101,7 +101,7 @@
       </section>
 
       <!-- Inline Toast Feedback -->
-      <div id="toast" class="toast hidden" role="status"></div>
+      <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
 
       <!-- Detected Videos on Active Tab (shown when videos found) -->
       <section id="detectedVideosCard" class="card detected-card hidden">
