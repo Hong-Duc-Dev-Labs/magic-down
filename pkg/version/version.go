@@ -9,7 +9,7 @@ import "strings"
 //	-X magicdown/pkg/version.BuildDate=2026-11-25T12:00:00Z
 //	-X magicdown/pkg/version.GitHubRepo=owner/repo
 var (
-	Version    = "0.1.2"
+	Version    = "0.1.3"
 	Commit     = "dev"
 	BuildDate  = "unknown"
 	GitHubRepo = "Hong-Duc-Dev-Labs/magic-down"
