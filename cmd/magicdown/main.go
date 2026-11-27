@@ -79,6 +79,7 @@ func main() {
 	defer ipcServer.Stop()
 
 	appUI := gui.NewApp(eng, ipcServer)
+	defer appUI.Close()
 	ipcServer.SetOnIncomingDownload(appUI.EnqueueIncomingDownload)
 	eng.SetOnTaskCompleted(func(task *engine.Task) {
 		notify.NotifyDownloadComplete(task.Filename)
@@ -97,6 +98,9 @@ func main() {
 	})
 
 	hideOnLaunch := *startMinimized || *startTray || *startAutostart
+	if hideOnLaunch {
+		appUI.PrepareHiddenLaunch()
+	}
 
 	var tray *mygo.Tray
 	mygo.App.WhenReady(func() {

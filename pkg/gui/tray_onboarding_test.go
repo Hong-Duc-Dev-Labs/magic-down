@@ -5,6 +5,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/egoist/mygo/ui"
 
@@ -340,5 +341,162 @@ func TestBringToForegroundAndInvalidateDispatchToUIThreadAndRaceFree(t *testing.
 	}
 	if win.invalidated.Load() < 20 {
 		t.Fatalf("expected at least 20 invalidations on UI thread, got %d", win.invalidated.Load())
+	}
+}
+
+func TestTraySuppressesInvalidateAndTrimsMemoryWhenIdle(t *testing.T) {
+	tempDir := t.TempDir()
+	eng, err := engine.NewEngine(engine.DefaultConfig(tempDir, filepath.Join(tempDir, "state.json")))
+	if err != nil {
+		t.Fatalf("failed to init engine: %v", err)
+	}
+	defer eng.Close()
+
+	app := NewApp(eng, nil)
+	defer app.Close()
+
+	win := &mockWindowController{visible: true}
+	app.SetWindowController(win)
+
+	var trimCount atomic.Int32
+	app.trimDelay = 25 * time.Millisecond
+	app.trimCooldown = 120 * time.Millisecond
+	app.trimMemoryFn = func() { trimCount.Add(1) }
+
+	// Hide to tray while idle -> invalidateUI() must be completely suppressed.
+	app.HideToTray()
+	beforeInv := win.invalidated
+	app.invalidateUI()
+	app.invalidateUI()
+	if win.invalidated != beforeInv {
+		t.Fatalf("expected invalidateUI() to be suppressed while in tray, got %d -> %d", beforeInv, win.invalidated)
+	}
+
+	// After debounce delay, idle memory trim must fire once.
+	deadline := time.Now().Add(300 * time.Millisecond)
+	for time.Now().Before(deadline) && trimCount.Load() == 0 {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if trimCount.Load() != 1 {
+		t.Fatalf("expected idle memory trim to fire once, got %d", trimCount.Load())
+	}
+
+	// Wake from tray restores invalidation immediately.
+	app.WakeFromTray()
+	if app.IsInTray() || win.invalidated <= beforeInv {
+		t.Fatalf("expected WakeFromTray to resume UI invalidations")
+	}
+
+	// Rapid hide within cooldown must NOT re-trigger trim.
+	app.HideToTray()
+	time.Sleep(45 * time.Millisecond)
+	if trimCount.Load() != 1 {
+		t.Fatalf("expected cooldown to suppress rapid memory trim, got %d", trimCount.Load())
+	}
+
+	// Wait past cooldown, hide, then wake before debounce -> trim must be cancelled.
+	app.WakeFromTray()
+	time.Sleep(130 * time.Millisecond)
+	app.HideToTray()
+	time.Sleep(5 * time.Millisecond)
+	app.WakeFromTray()
+	time.Sleep(45 * time.Millisecond)
+	if trimCount.Load() != 1 {
+		t.Fatalf("expected WakeFromTray before debounce to cancel trim, got %d", trimCount.Load())
+	}
+
+	// When engine has a queued/non-idle task, hiding to tray must skip memory trim.
+	_, err = eng.AddTask(engine.AddTaskRequest{
+		URL:       "https://example.com/busy.zip",
+		Filename:  "busy.zip",
+		AutoStart: false,
+	})
+	if err != nil {
+		t.Fatalf("AddTask failed: %v", err)
+	}
+	app.HideToTray()
+	time.Sleep(45 * time.Millisecond)
+	if trimCount.Load() != 1 {
+		t.Fatalf("expected memory trim to be skipped while engine is not idle, got %d", trimCount.Load())
+	}
+}
+
+func TestOptInClipboardMonitorSequenceGatedAndWorksInTray(t *testing.T) {
+	tempDir := t.TempDir()
+	eng, err := engine.NewEngine(engine.DefaultConfig(tempDir, filepath.Join(tempDir, "state.json")))
+	if err != nil {
+		t.Fatalf("failed to init engine: %v", err)
+	}
+	defer eng.Close()
+
+	app := NewApp(eng, nil)
+	defer app.Close()
+
+	win := &mockWindowController{visible: true}
+	app.SetWindowController(win)
+	app.trimMemoryFn = func() {}
+
+	// Default MonitorClipboard == false -> zero background goroutine.
+	if app.isClipboardMonitorRunning() {
+		t.Fatalf("expected clipboard monitor NOT to run when disabled")
+	}
+
+	var seq atomic.Uint32
+	seq.Store(10)
+	var readCalls atomic.Int32
+	var clipMu sync.Mutex
+	clipText := "https://example.com/old-before-enable.zip"
+
+	app.clipPollInterval = 15 * time.Millisecond
+	app.clipSeqFn = func() (uint32, bool) { return seq.Load(), true }
+	app.clipReadFn = func() (string, error) {
+		readCalls.Add(1)
+		clipMu.Lock()
+		defer clipMu.Unlock()
+		return clipText, nil
+	}
+
+	// Enable Clipboard Monitor and hide to tray.
+	cfg := eng.Config()
+	cfg.MonitorClipboard = true
+	eng.UpdateConfig(cfg)
+	app.syncClipboardMonitor()
+	if !app.isClipboardMonitorRunning() {
+		t.Fatalf("expected clipboard monitor goroutine to start when enabled")
+	}
+	app.HideToTray()
+
+	// Unchanged sequence number must cause ZERO clipboard reads.
+	time.Sleep(60 * time.Millisecond)
+	if got := readCalls.Load(); got != 0 {
+		t.Fatalf("expected 0 clipboard reads when sequence number unchanged, got %d", got)
+	}
+	if !app.IsInTray() {
+		t.Fatalf("expected app to remain in tray when clipboard unchanged")
+	}
+
+	// Changing clipboard sequence with a downloadable URL wakes the app from tray.
+	clipMu.Lock()
+	clipText = "https://cdn.example.com/installer-v2.zip"
+	clipMu.Unlock()
+	seq.Store(11)
+
+	deadline := time.Now().Add(400 * time.Millisecond)
+	for time.Now().Before(deadline) && app.IsInTray() {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if app.IsInTray() {
+		t.Fatalf("expected clipboard download URL to wake app from tray")
+	}
+	if got := readCalls.Load(); got != 1 {
+		t.Fatalf("expected exactly 1 clipboard read on sequence change, got %d", got)
+	}
+
+	// Disabling MonitorClipboard stops the background goroutine cleanly.
+	cfg.MonitorClipboard = false
+	eng.UpdateConfig(cfg)
+	app.syncClipboardMonitor()
+	if app.isClipboardMonitorRunning() {
+		t.Fatalf("expected clipboard monitor goroutine to stop when disabled")
 	}
 }

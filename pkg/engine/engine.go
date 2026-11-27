@@ -58,10 +58,13 @@ type Engine struct {
 	tasksByID   map[string]*Task
 	httpClient     atomic.Pointer[http.Client]
 	limiter        *rateLimiter
-	onCompleted    func(*Task)
-	onScheduleStop func(stopAction string)
-	scheduler      *Scheduler
-	ctx            context.Context
+	onCompleted       func(*Task)
+	onScheduleStop    func(stopAction string)
+	scheduler         *Scheduler
+	schedWake         chan struct{}
+	schedTickInterval atomic.Int64
+	schedTicks        atomic.Int64
+	ctx               context.Context
 	cancel      context.CancelFunc
 	subscribers map[chan *Task]struct{}
 	subMu       sync.RWMutex
@@ -119,15 +122,17 @@ func NewEngine(cfg Config) (*Engine, error) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	eng := &Engine{
-		config:      cfg,
-		configPath:  filepath.Join(filepath.Dir(cfg.StateFilePath), "config.json"),
-		tasks:       make([]*Task, 0),
-		tasksByID:   make(map[string]*Task),
-		limiter:     newRateLimiter(cfg.SpeedLimitKBps * 1024),
-		ctx:         ctx,
-		cancel:      cancel,
-		subscribers: make(map[chan *Task]struct{}),
+		config:            cfg,
+		configPath:        filepath.Join(filepath.Dir(cfg.StateFilePath), "config.json"),
+		tasks:             make([]*Task, 0),
+		tasksByID:         make(map[string]*Task),
+		limiter:           newRateLimiter(cfg.SpeedLimitKBps * 1024),
+		schedWake:         make(chan struct{}, 1),
+		ctx:               ctx,
+		cancel:            cancel,
+		subscribers:       make(map[chan *Task]struct{}),
 	}
+	eng.schedTickInterval.Store(int64(defaultScheduleTickInterval))
 
 	// Persisted settings override the defaults, then ensure the final directory.
 	eng.loadConfig()
@@ -164,17 +169,56 @@ func NewEngine(cfg Config) (*Engine, error) {
 
 func (e *Engine) startSchedulerLoop() {
 	go func() {
-		ticker := time.NewTicker(defaultScheduleTickInterval)
-		defer ticker.Stop()
+		var ticker *time.Ticker
+		var tickCh <-chan time.Time
+		stopTicker := func() {
+			if ticker != nil {
+				ticker.Stop()
+				ticker = nil
+				tickCh = nil
+			}
+		}
+		defer stopTicker()
+
+		syncTicker := func() {
+			schedCfg := e.Config().Schedule
+			if !schedCfg.Enabled {
+				stopTicker()
+				return
+			}
+			if ticker == nil {
+				interval := time.Duration(e.schedTickInterval.Load())
+				if interval <= 0 {
+					interval = defaultScheduleTickInterval
+				}
+				ticker = time.NewTicker(interval)
+				tickCh = ticker.C
+			}
+		}
+
+		syncTicker()
 		for {
 			select {
 			case <-e.ctx.Done():
 				return
-			case <-ticker.C:
+			case <-e.schedWake:
+				syncTicker()
+			case <-tickCh:
+				e.schedTicks.Add(1)
 				e.scheduler.Evaluate(e.Config().Schedule)
 			}
 		}
 	}()
+}
+
+func (e *Engine) wakeSchedulerLoop() {
+	if e.schedWake == nil {
+		return
+	}
+	select {
+	case e.schedWake <- struct{}{}:
+	default:
+	}
 }
 
 // SetOnScheduleStop registers a callback invoked when the configured schedule
@@ -878,6 +922,7 @@ func (e *Engine) UpdateConfig(cfg Config) {
 	if e.scheduler != nil {
 		e.scheduler.Evaluate(cfg.Schedule)
 	}
+	e.wakeSchedulerLoop()
 	_ = os.MkdirAll(cfg.DownloadDir, 0755)
 	_ = e.saveConfig()
 	e.scheduleSave()

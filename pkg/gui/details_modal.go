@@ -471,6 +471,9 @@ func (a *App) HandleTaskCompleted(_ *engine.Task) {
 	a.sessionCompletedAny.Store(true)
 	act := a.PostDownloadAction()
 	if act == power.ActionNone || a.engine == nil || a.powerCountdown == nil {
+		if a.IsInTray() && (a.engine == nil || a.engine.IsIdle()) {
+			a.scheduleIdleMemoryTrim()
+		}
 		return
 	}
 	if !a.engine.IsIdle() {

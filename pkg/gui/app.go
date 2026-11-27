@@ -76,9 +76,15 @@ type App struct {
 	maximized bool
 
 	// Tray & power-save state
-	trayMu   sync.RWMutex
-	inTray   bool
-	quitting bool
+	trayMu       sync.RWMutex
+	inTray       bool
+	quitting     bool
+	trimMu       sync.Mutex
+	trimTimer    *time.Timer
+	lastTrimAt   time.Time
+	trimDelay    time.Duration
+	trimCooldown time.Duration
+	trimMemoryFn func()
 
 	// Injectable OS hooks (default to real Windows implementations, overridable in tests)
 	autostartGetter     func() (bool, error)
@@ -151,13 +157,20 @@ type App struct {
 	powerCountdownDuration time.Duration
 	sessionCompletedAny    atomic.Bool
 
-	// Batch URL Pattern Import modal & Clipboard Monitor state
+	// Batch URL Pattern Import modal & Opt-In Background Clipboard Monitor state
 	showBatchModal     bool
 	batchInputText     string
 	batchSaveDir       string
 	batchError         string
-	lastClipboardText  string
-	lastClipboardCheck time.Time
+	clipMu             sync.Mutex
+	clipStop           chan struct{}
+	clipDone           chan struct{}
+	clipSeqInitialized bool
+	clipLastSeq        uint32
+	clipLastText       string
+	clipPollInterval   time.Duration
+	clipSeqFn          func() (uint32, bool)
+	clipReadFn         func() (string, error)
 
 	// Add / Download Info Dialog state
 	showAddModal       bool
@@ -253,6 +266,12 @@ func NewApp(eng *engine.Engine, srv *ipc.Server) *App {
 		language:                  lang,
 		autostartGetter:           autostart.IsEnabled,
 		autostartSetter:           autostart.SetEnabled,
+		trimDelay:                 2 * time.Second,
+		trimCooldown:              30 * time.Second,
+		trimMemoryFn:              trimProcessMemory,
+		clipPollInterval:          750 * time.Millisecond,
+		clipSeqFn:                 clipboardSequenceNumber,
+		clipReadFn:                readClipboardText,
 		nativeRegFn:               func() (string, error) { return nativemessaging.RegisterHost("", nativemessaging.DefaultExtensionID) },
 		nativeStatusFn:            nativemessaging.CheckRegistration,
 		detectBrowsersFn:          nativemessaging.DetectInstalledBrowsers,
@@ -314,6 +333,7 @@ func NewApp(eng *engine.Engine, srv *ipc.Server) *App {
 			app.invalidateUI()
 		})
 	}
+	app.syncClipboardMonitor()
 	return app
 }
 
@@ -332,6 +352,7 @@ func (a *App) SetLanguage(lang i18n.Lang) {
 		if cfg.Language != string(norm) {
 			cfg.Language = string(norm)
 			a.engine.UpdateConfig(cfg)
+	a.syncClipboardMonitor()
 		}
 	}
 	if a.onLanguageChange != nil {
@@ -418,6 +439,20 @@ func (a *App) IsQuitting() bool {
 	return a.quitting
 }
 
+// PrepareHiddenLaunch marks the app as starting hidden in the system tray before
+// the window or startup background checks run, avoiding any initial GPU/UI wakeups.
+func (a *App) PrepareHiddenLaunch() {
+	a.trayMu.Lock()
+	a.inTray = true
+	a.trayMu.Unlock()
+}
+
+// Close stops background UI helpers (clipboard monitor, idle memory trim timer).
+func (a *App) Close() {
+	a.cancelIdleMemoryTrim()
+	a.stopClipboardMonitor()
+}
+
 // HideToTray hides the main window and suspends GPU/UI frame scheduling.
 func (a *App) HideToTray() {
 	a.trayMu.Lock()
@@ -426,12 +461,14 @@ func (a *App) HideToTray() {
 	a.dispatchWindowAction(func(ctrl WindowController) {
 		ctrl.Hide()
 	})
+	a.scheduleIdleMemoryTrim()
 }
 
 // BringToForeground wakes the app if hidden in tray, restores it if minimized,
 // raises it above background windows (such as browsers), and invalidates the UI.
 // Window API calls are marshalled onto the UI thread when supported.
 func (a *App) BringToForeground() {
+	a.cancelIdleMemoryTrim()
 	a.trayMu.Lock()
 	a.inTray = false
 	a.trayMu.Unlock()
@@ -449,6 +486,57 @@ func (a *App) BringToForeground() {
 		}
 		ctrl.Invalidate()
 	})
+}
+
+func (a *App) scheduleIdleMemoryTrim() {
+	if a.trimMemoryFn == nil {
+		return
+	}
+	if a.engine != nil && !a.engine.IsIdle() {
+		return
+	}
+	a.trimMu.Lock()
+	defer a.trimMu.Unlock()
+
+	cooldown := a.trimCooldown
+	if cooldown > 0 && !a.lastTrimAt.IsZero() && time.Since(a.lastTrimAt) < cooldown {
+		return
+	}
+	if a.trimTimer != nil {
+		a.trimTimer.Stop()
+	}
+	delay := a.trimDelay
+	if delay < 0 {
+		delay = 0
+	}
+	a.trimTimer = time.AfterFunc(delay, func() {
+		if !a.IsInTray() {
+			return
+		}
+		if a.engine != nil && !a.engine.IsIdle() {
+			return
+		}
+		a.trimMu.Lock()
+		if a.trimCooldown > 0 && !a.lastTrimAt.IsZero() && time.Since(a.lastTrimAt) < a.trimCooldown {
+			a.trimMu.Unlock()
+			return
+		}
+		a.lastTrimAt = time.Now()
+		fn := a.trimMemoryFn
+		a.trimMu.Unlock()
+		if fn != nil {
+			fn()
+		}
+	})
+}
+
+func (a *App) cancelIdleMemoryTrim() {
+	a.trimMu.Lock()
+	if a.trimTimer != nil {
+		a.trimTimer.Stop()
+		a.trimTimer = nil
+	}
+	a.trimMu.Unlock()
 }
 
 // WakeFromTray restores and focuses the main window and resumes UI rendering.
@@ -717,9 +805,6 @@ func (a *App) View(c *ui.Context) {
 		a.cancelPowerCountdown()
 	}
 
-	// Opt-in Clipboard Monitor (polls lightly only when enabled and no modal open).
-	a.pollClipboardMonitor(c, anyModalOpen)
-
 	// Open Download Info Dialog for any incoming extension download.
 	a.popPendingIncoming()
 
@@ -985,6 +1070,7 @@ func (a *App) setLaunchAtStartupImmediate(desired bool) {
 	cfg := a.engine.Config()
 	cfg.LaunchAtStartup = desired
 	a.engine.UpdateConfig(cfg)
+	a.syncClipboardMonitor()
 	if desired {
 		a.statusMessage = i18n.T("msg.startup_enabled")
 	} else {
@@ -2311,6 +2397,9 @@ func (a *App) StartAutoUpdateCheck() {
 }
 
 func (a *App) invalidateUI() {
+	if a.IsInTray() {
+		return
+	}
 	a.dispatchWindowAction(func(ctrl WindowController) {
 		ctrl.Invalidate()
 	})
@@ -2608,6 +2697,7 @@ func (a *App) saveSettings() {
 	cfg.Proxy = proxyCfg
 	cfg.Schedule = schedCfg
 	a.engine.UpdateConfig(cfg)
+	a.syncClipboardMonitor()
 
 	a.settingMaxRetries = strconv.Itoa(retries)
 	a.settingSpeedLimit = strconv.FormatInt(speedKBps, 10)
@@ -2734,6 +2824,7 @@ func (a *App) skipOnboarding() {
 	cfg := a.engine.Config()
 	cfg.OnboardingCompleted = true
 	a.engine.UpdateConfig(cfg)
+	a.syncClipboardMonitor()
 	a.showOnboardingModal = false
 }
 
@@ -2762,6 +2853,7 @@ func (a *App) completeOnboarding() {
 	cfg.OnboardingCompleted = true
 	cfg.Language = string(a.language)
 	a.engine.UpdateConfig(cfg)
+	a.syncClipboardMonitor()
 
 	a.onboardingError = ""
 	a.statusMessage = i18n.T("msg.setup_complete")

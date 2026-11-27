@@ -126,3 +126,52 @@ func TestSchedulerDoesNotOverrideManuallyPausedTasks(t *testing.T) {
 		t.Fatalf("scheduler window entry must not override manually Paused task, got %s", snap.Status)
 	}
 }
+
+func TestSchedulerLoopIdleZeroTicksAndWakeOnConfig(t *testing.T) {
+	tempDir := t.TempDir()
+	eng, err := NewEngine(Config{
+		MaxConcurrentDownloads: 2,
+		DefaultSegments:        4,
+		DownloadDir:            tempDir,
+		StateFilePath:          filepath.Join(tempDir, "state.json"),
+	})
+	if err != nil {
+		t.Fatalf("NewEngine failed: %v", err)
+	}
+	defer eng.Close()
+
+	eng.schedTickInterval.Store(int64(15 * time.Millisecond))
+
+	// With Schedule.Enabled == false, scheduler loop must sleep with zero ticks.
+	time.Sleep(60 * time.Millisecond)
+	if ticks := eng.schedTicks.Load(); ticks != 0 {
+		t.Fatalf("expected 0 scheduler ticks while disabled, got %d", ticks)
+	}
+
+	// Enabling schedule via UpdateConfig must immediately wake the loop and start ticking.
+	cfg := eng.Config()
+	cfg.Schedule = ScheduleConfig{
+		Enabled:   true,
+		StartTime: "00:00",
+		StopTime:  "23:59",
+	}
+	eng.UpdateConfig(cfg)
+
+	deadline := time.Now().Add(300 * time.Millisecond)
+	for time.Now().Before(deadline) && eng.schedTicks.Load() == 0 {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if eng.schedTicks.Load() == 0 {
+		t.Fatalf("expected scheduler loop to tick after enabling Schedule")
+	}
+
+	// Disabling schedule must stop the ticker and return to zero wakeups.
+	cfg.Schedule.Enabled = false
+	eng.UpdateConfig(cfg)
+	time.Sleep(35 * time.Millisecond)
+	afterDisable := eng.schedTicks.Load()
+	time.Sleep(60 * time.Millisecond)
+	if got := eng.schedTicks.Load(); got != afterDisable {
+		t.Fatalf("expected scheduler ticks to stop after disabling (before=%d, after=%d)", afterDisable, got)
+	}
+}

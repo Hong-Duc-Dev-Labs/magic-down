@@ -59,23 +59,120 @@ func IsMonitorableDownloadURL(raw string, exts []string) bool {
 	return false
 }
 
-// pollClipboardMonitor lightly polls the OS clipboard when opt-in monitoring is
-// enabled and no modal is open, debounced by last-seen text and 500ms interval.
-func (a *App) pollClipboardMonitor(c *ui.Context, anyModalOpen bool) {
-	if anyModalOpen || a.engine == nil || !a.engine.Config().MonitorClipboard {
+// syncClipboardMonitor ensures the background clipboard watcher goroutine runs
+// ONLY when opt-in MonitorClipboard is enabled in config. When disabled, zero
+// goroutines or tickers run. When enabled, it works both while visible and
+// while hidden in the System Tray, gating clipboard reads behind the lock-free
+// Windows GetClipboardSequenceNumber counter.
+func (a *App) syncClipboardMonitor() {
+	enabled := a.engine != nil && a.engine.Config().MonitorClipboard
+	if !enabled {
+		a.stopClipboardMonitor()
 		return
 	}
-	now := time.Now()
-	if !a.lastClipboardCheck.IsZero() && now.Sub(a.lastClipboardCheck) < 500*time.Millisecond {
-		return
-	}
-	a.lastClipboardCheck = now
 
-	clip := strings.TrimSpace(c.ReadClipboard())
-	if clip == "" || clip == a.lastClipboardText {
+	a.clipMu.Lock()
+	if a.clipStop != nil {
+		a.clipMu.Unlock()
 		return
 	}
-	a.lastClipboardText = clip
+	stopCh := make(chan struct{})
+	doneCh := make(chan struct{})
+	a.clipStop = stopCh
+	a.clipDone = doneCh
+	a.clipSeqInitialized = false
+	interval := a.clipPollInterval
+	if interval <= 0 {
+		interval = 750 * time.Millisecond
+	}
+	a.clipMu.Unlock()
+
+	go func() {
+		defer close(doneCh)
+		// Seed initial sequence number so enabling Clipboard Monitor never
+		// triggers on stale clipboard contents copied earlier.
+		a.checkClipboardOnce()
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stopCh:
+				return
+			case <-ticker.C:
+				a.checkClipboardOnce()
+			}
+		}
+	}()
+}
+
+func (a *App) stopClipboardMonitor() {
+	a.clipMu.Lock()
+	stopCh := a.clipStop
+	doneCh := a.clipDone
+	a.clipStop = nil
+	a.clipDone = nil
+	a.clipSeqInitialized = false
+	a.clipMu.Unlock()
+
+	if stopCh != nil {
+		close(stopCh)
+	}
+	if doneCh != nil {
+		<-doneCh
+	}
+}
+
+func (a *App) isClipboardMonitorRunning() bool {
+	a.clipMu.Lock()
+	running := a.clipStop != nil
+	a.clipMu.Unlock()
+	return running
+}
+
+func (a *App) checkClipboardOnce() {
+	if a.engine == nil || !a.engine.Config().MonitorClipboard {
+		return
+	}
+	seqFn := a.clipSeqFn
+	readFn := a.clipReadFn
+	if seqFn == nil || readFn == nil {
+		return
+	}
+	seq, ok := seqFn()
+	if !ok {
+		return
+	}
+
+	a.clipMu.Lock()
+	if !a.clipSeqInitialized {
+		a.clipLastSeq = seq
+		a.clipSeqInitialized = true
+		a.clipMu.Unlock()
+		return
+	}
+	if seq == a.clipLastSeq {
+		a.clipMu.Unlock()
+		return
+	}
+	a.clipLastSeq = seq
+	a.clipMu.Unlock()
+
+	raw, err := readFn()
+	if err != nil {
+		return
+	}
+	clip := strings.TrimSpace(raw)
+	if clip == "" {
+		return
+	}
+
+	a.clipMu.Lock()
+	if clip == a.clipLastText {
+		a.clipMu.Unlock()
+		return
+	}
+	a.clipLastText = clip
+	a.clipMu.Unlock()
 
 	if !IsMonitorableDownloadURL(clip, DefaultClipboardExtensions) {
 		return
