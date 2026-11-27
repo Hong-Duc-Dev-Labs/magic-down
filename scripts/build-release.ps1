@@ -32,7 +32,7 @@ try {
         if ($LASTEXITCODE -eq 0 -and $tag) {
             $Version = $tag.Trim()
         } else {
-            $Version = "0.1.3"
+            $Version = "0.1.4"
         }
     }
     $Version = $Version.TrimStart("v", "V")

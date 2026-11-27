@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "MagicDown Integration",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "minimum_chrome_version": "111",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEArfHNX3x5KHlQndpPhibPKwvkY2v4QRGA9OdbnxeukNXkQdWTS0dEXBV0CAfd7zMgOuBCI+nh68fsQ2hGekKf8DQLEsHf971D62urAQMhhTtv3oWWJbqA1kHxsSdgKTj6YJDOcZQhpnyZHB61SuxGXPsVfnLXNHDCkEbxETW2YxACgyT3L7QhaQy3LiLRJEVSbI+UNSGaGybs83oXB8h8SGa7yVskfimxCiQyI+qKtOUHdDBLebGhCLBBJtfzvMzgITbhYyU5pOs6GHXLhqmfWovBTYEdX0naChH/3h4GN3BGbMqfsnqC4XIKSEqv060LIAS6M+r3c4KWd+hEuTYdYQIDAQAB",
   "description": "Intercept browser downloads, convert right-clicked images, and detect page videos with MagicDown.",
