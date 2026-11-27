@@ -81,6 +81,7 @@ type App struct {
 	quitting bool
 
 	// Injectable OS hooks (default to real Windows implementations, overridable in tests)
+	autostartGetter     func() (bool, error)
 	autostartSetter     func(bool) error
 	nativeRegFn         func() (string, error)
 	nativeStatusFn      func() nativemessaging.RegistrationStatus
@@ -193,6 +194,7 @@ type App struct {
 	settingSpeedLimit       string
 	settingAutoCategorize   bool
 	settingLaunchAtStartup  bool
+	autostartSyncedValue    bool
 	settingMinimizeToTray   bool
 	settingCloseToTray      bool
 	settingAutoCheckUpdates bool
@@ -249,6 +251,7 @@ func NewApp(eng *engine.Engine, srv *ipc.Server) *App {
 		engine:                    eng,
 		ipcServer:                 srv,
 		language:                  lang,
+		autostartGetter:           autostart.IsEnabled,
 		autostartSetter:           autostart.SetEnabled,
 		nativeRegFn:               func() (string, error) { return nativemessaging.RegisterHost("", nativemessaging.DefaultExtensionID) },
 		nativeStatusFn:            nativemessaging.CheckRegistration,
@@ -955,6 +958,40 @@ func daysMapToSlice(m map[int]bool) []int {
 	return out
 }
 
+func (a *App) syncLaunchAtStartup(fallback bool) bool {
+	if a.autostartGetter == nil {
+		return fallback
+	}
+	enabled, err := a.autostartGetter()
+	if err != nil {
+		return fallback
+	}
+	return enabled
+}
+
+func (a *App) setLaunchAtStartupImmediate(desired bool) {
+	if desired == a.settingLaunchAtStartup {
+		return
+	}
+	if a.autostartSetter != nil {
+		if err := a.autostartSetter(desired); err != nil {
+			a.settingsError = i18n.Tf("settings.err_startup", err.Error())
+			return
+		}
+	}
+	a.settingLaunchAtStartup = desired
+	a.autostartSyncedValue = desired
+	a.settingsError = ""
+	cfg := a.engine.Config()
+	cfg.LaunchAtStartup = desired
+	a.engine.UpdateConfig(cfg)
+	if desired {
+		a.statusMessage = i18n.T("msg.startup_enabled")
+	} else {
+		a.statusMessage = i18n.T("msg.startup_disabled")
+	}
+}
+
 func (a *App) openSettingsModal() {
 	cfg := a.engine.Config()
 	a.settingDownloadDir = cfg.DownloadDir
@@ -963,7 +1000,8 @@ func (a *App) openSettingsModal() {
 	a.settingMaxRetries = strconv.Itoa(cfg.MaxRetries)
 	a.settingSpeedLimit = strconv.FormatInt(cfg.SpeedLimitKBps, 10)
 	a.settingAutoCategorize = cfg.AutoCategorize
-	a.settingLaunchAtStartup = cfg.LaunchAtStartup
+	a.settingLaunchAtStartup = a.syncLaunchAtStartup(cfg.LaunchAtStartup)
+	a.autostartSyncedValue = a.settingLaunchAtStartup
 	a.settingMinimizeToTray = cfg.MinimizeToTray
 	a.settingCloseToTray = cfg.CloseToTray
 	a.settingAutoCheckUpdates = cfg.AutoCheckUpdates
@@ -1002,7 +1040,7 @@ func (a *App) OpenOnboardingModal() {
 	cfg := a.engine.Config()
 	a.onboardingDownloadDir = cfg.DownloadDir
 	a.onboardingAutoCategorize = cfg.AutoCategorize
-	a.onboardingLaunchAtStartup = cfg.LaunchAtStartup
+	a.onboardingLaunchAtStartup = a.syncLaunchAtStartup(cfg.LaunchAtStartup)
 	a.onboardingRunInTray = cfg.CloseToTray || cfg.MinimizeToTray
 	a.onboardingError = ""
 	a.nativeRegMsg = ""
@@ -1853,12 +1891,13 @@ func (a *App) renderSettingsGeneralTab(c *ui.Context, pal Palette) {
 	// Launch at Windows Startup
 	ui.Column(c).Gap(6).Children(func() {
 		ui.Text(c, i18n.T("settings.launch_startup")).FontSize(12).FontWeight(600).TextColor(pal.TextSecondary)
+		ui.Text(c, i18n.T("settings.launch_startup_hint")).FontSize(11).TextColor(pal.TextMuted)
 		ui.Row(c).Gap(8).Children(func() {
 			if segmentOption(c, pal, i18n.T("settings.enabled"), a.settingLaunchAtStartup) {
-				a.settingLaunchAtStartup = true
+				a.setLaunchAtStartupImmediate(true)
 			}
 			if segmentOption(c, pal, i18n.T("settings.disabled"), !a.settingLaunchAtStartup) {
-				a.settingLaunchAtStartup = false
+				a.setLaunchAtStartupImmediate(false)
 			}
 		})
 	})
@@ -2544,12 +2583,13 @@ func (a *App) saveSettings() {
 		return
 	}
 
-	if a.autostartSetter != nil {
+	if a.autostartSetter != nil && a.settingLaunchAtStartup != a.autostartSyncedValue {
 		if err := a.autostartSetter(a.settingLaunchAtStartup); err != nil {
 			a.activeSettingsTab = settingsTabGeneral
 			a.settingsError = i18n.Tf("settings.err_startup", err.Error())
 			return
 		}
+		a.autostartSyncedValue = a.settingLaunchAtStartup
 	}
 
 	cfg := a.engine.Config()

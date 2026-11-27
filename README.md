@@ -31,7 +31,7 @@ A fast, IDM-inspired desktop download manager for Windows built in pure Go with 
 - **Download Info Dialog & Auto-Categorization**
   - Review filename, estimated size, save directory, and category before starting, with automatic subfolder sorting (`Video`, `Music`, `Compressed`, `Documents`, `Programs`, `Other`).
 - **System Tray, Autostart & Welcome Setup**
-  - GPU/CPU-optimized System Tray mode (pauses UI rendering while hidden in tray, wakes instantly on incoming downloads), optional **Launch at Windows Startup**, and a guided first-run **Welcome Setup**.
+  - GPU/CPU-optimized System Tray mode (pauses UI rendering while hidden in tray, wakes instantly on incoming downloads), optional **Launch at Windows Startup** (starts silently in the tray via `--minimized`, configurable in Settings with live Windows Registry sync or during installation), and a guided first-run **Welcome Setup**.
 - **Bilingual UI (English & Tiếng Việt)**
   - Instant switching between English and Vietnamese across both the Desktop App and Browser Extension.
 - **GitHub Auto-Updater**

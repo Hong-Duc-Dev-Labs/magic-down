@@ -31,7 +31,7 @@ Trình quản lý tải xuống tốc độ cao dành cho Windows lấy cảm h�
 - **Hộp thoại thông tin tải xuống & Tự động phân loại**
   - Xem trước tên tệp, dung lượng ước tính, thư mục lưu và danh mục trước khi bắt đầu tải, kèm tính năng tự động sắp xếp vào các thư mục con (`Video`, `Music`, `Compressed`, `Documents`, `Programs`, `Other`).
 - **Khay hệ thống (System Tray), Tự khởi động & Thiết lập ban đầu**
-  - Chế độ Khay hệ thống tối ưu hóa GPU/CPU (tạm dừng render giao diện khi ẩn xuống khay và đánh thức ngay lập tức khi có lượt tải mới), tùy chọn **Khởi động cùng Windows** và **Hướng dẫn thiết lập lần đầu (Welcome Setup)**.
+  - Chế độ Khay hệ thống tối ưu hóa GPU/CPU (tạm dừng render giao diện khi ẩn xuống khay và đánh thức ngay lập tức khi có lượt tải mới), tùy chọn **Khởi động cùng Windows** (tự khởi chạy ẩn dưới khay hệ thống qua `--minimized`, đồng bộ trực tiếp với Windows Registry trong Cài đặt hoặc chọn ngay khi cài đặt) và **Hướng dẫn thiết lập lần đầu (Welcome Setup)**.
 - **Giao diện song ngữ (Tiếng Việt & English)**
   - Chuyển đổi tức thì giữa Tiếng Việt và Tiếng Anh trên cả Ứng dụng Desktop lẫn Tiện ích trình duyệt.
 - **Tự động cập nhật qua GitHub (GitHub Auto-Updater)**

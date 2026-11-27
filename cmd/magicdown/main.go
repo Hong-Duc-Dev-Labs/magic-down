@@ -39,6 +39,7 @@ func main() {
 	downloadDir := flag.String("dir", "", "Default download directory")
 	startMinimized := flag.Bool("minimized", false, "Start hidden in the system tray")
 	startTray := flag.Bool("tray", false, "Start hidden in the system tray (alias for --minimized)")
+	startAutostart := flag.Bool("autostart", false, "Start hidden in the system tray (alias for --minimized)")
 	flag.Parse()
 
 	// Single-instance enforcement: if another MagicDown desktop instance is already
@@ -95,7 +96,7 @@ func main() {
 		appUI.WakeFromTray()
 	})
 
-	hideOnLaunch := *startMinimized || *startTray
+	hideOnLaunch := *startMinimized || *startTray || *startAutostart
 
 	var tray *mygo.Tray
 	mygo.App.WhenReady(func() {
@@ -105,6 +106,7 @@ func main() {
 			Height:            700,
 			MinWidth:          920,
 			MinHeight:         580,
+			Hidden:            hideOnLaunch,
 			TitleBarStyle:     mygo.TitleBarHidden,
 			TitleBarHeight:    38,
 			HideWindowButtons: true,
@@ -177,7 +179,11 @@ func main() {
 		}
 
 		if hideOnLaunch {
-			appUI.HideToTray()
+			if trayErr == nil {
+				appUI.HideToTray()
+			} else {
+				appUI.WakeFromTray()
+			}
 		}
 	})
 

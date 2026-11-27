@@ -9,12 +9,13 @@ import (
 )
 
 const (
-	hkeyCurrentUser   = uintptr(0x80000001)
-	keyQueryValue     = 0x0001
-	keySetValue       = 0x0002
-	regSZ             = 1
-	errFileNotFound   = syscall.Errno(2)
-	errMoreData       = syscall.Errno(234)
+	hkeyCurrentUser = uintptr(0x80000001)
+	keyQueryValue   = 0x0001
+	keySetValue     = 0x0002
+	regSZ           = 1
+	regExpandSZ     = 2
+	errFileNotFound = syscall.Errno(2)
+	errMoreData     = syscall.Errno(234)
 )
 
 var (
@@ -79,20 +80,32 @@ func (s *windowsRunStore) Get(name string) (string, bool, error) {
 	if bufSize == 0 {
 		return "", true, nil
 	}
-
-	buf := make([]uint16, (bufSize+1)/2)
-	r1, _, _ = procRegQueryValueEx.Call(
-		hKey,
-		uintptr(unsafe.Pointer(valNamePtr)),
-		0,
-		uintptr(unsafe.Pointer(&valType)),
-		uintptr(unsafe.Pointer(&buf[0])),
-		uintptr(unsafe.Pointer(&bufSize)),
-	)
-	if r1 != 0 && syscall.Errno(r1) != errMoreData {
-		return "", false, fmt.Errorf("RegQueryValueExW read failed: %w", syscall.Errno(r1))
+	if valType != regSZ && valType != regExpandSZ {
+		return "", false, fmt.Errorf("unexpected registry value type %d for %q", valType, name)
 	}
-	return syscall.UTF16ToString(buf), true, nil
+
+	var buf []uint16
+	for attempt := 0; attempt < 3; attempt++ {
+		buf = make([]uint16, (bufSize+1)/2)
+		r1, _, _ = procRegQueryValueEx.Call(
+			hKey,
+			uintptr(unsafe.Pointer(valNamePtr)),
+			0,
+			uintptr(unsafe.Pointer(&valType)),
+			uintptr(unsafe.Pointer(&buf[0])),
+			uintptr(unsafe.Pointer(&bufSize)),
+		)
+		if r1 == 0 {
+			if valType != regSZ && valType != regExpandSZ {
+				return "", false, fmt.Errorf("unexpected registry value type %d for %q", valType, name)
+			}
+			return syscall.UTF16ToString(buf), true, nil
+		}
+		if syscall.Errno(r1) != errMoreData {
+			return "", false, fmt.Errorf("RegQueryValueExW read failed: %w", syscall.Errno(r1))
+		}
+	}
+	return "", false, fmt.Errorf("RegQueryValueExW read failed after retries: %w", errMoreData)
 }
 
 func (s *windowsRunStore) Set(name, value string) error {

@@ -51,7 +51,7 @@ func DefaultManager() *Manager {
 
 // FormatCommand builds the startup command line for the executable.
 func FormatCommand(exePath string, minimized bool) string {
-	cleaned := strings.TrimSpace(exePath)
+	cleaned := strings.TrimSpace(strings.Trim(strings.TrimSpace(exePath), `"`))
 	if cleaned == "" {
 		return ""
 	}
@@ -85,8 +85,11 @@ func ParseCommand(raw string) (exePath string, minimized bool) {
 		}
 	}
 	for _, arg := range strings.Fields(rest) {
-		if arg == "--minimized" || arg == "-minimized" || arg == "--tray" || arg == "-tray" {
+		switch arg {
+		case "--minimized", "-minimized", "--tray", "-tray", "--autostart", "-autostart":
 			minimized = true
+		}
+		if minimized {
 			break
 		}
 	}

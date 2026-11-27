@@ -1,7 +1,9 @@
 package gui
 
 import (
+	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/egoist/mygo/ui"
@@ -242,5 +244,77 @@ func TestBrowserIntegrationInvalidatesUIAndShowsConnectedForChromeEdgeDia(t *tes
 		if !st.Connection.Connected {
 			t.Fatalf("expected %s Connection.Connected=true after HELLO, got %+v", browserID, st.Connection)
 		}
+	}
+}
+
+func TestSettingsLaunchAtStartupSyncAndImmediateToggle(t *testing.T) {
+	tempDir := t.TempDir()
+	eng, err := engine.NewEngine(engine.DefaultConfig(tempDir, filepath.Join(tempDir, "state.json")))
+	if err != nil {
+		t.Fatalf("failed to init engine: %v", err)
+	}
+	defer eng.Close()
+
+	app := NewApp(eng, nil)
+
+	// Simulate registry already enabled externally (e.g. via Inno Setup installer)
+	// while config.json still has LaunchAtStartup=false.
+	regEnabled := true
+	var setCalls []bool
+	var setErr error
+	app.autostartGetter = func() (bool, error) { return regEnabled, nil }
+	app.autostartSetter = func(enabled bool) error {
+		setCalls = append(setCalls, enabled)
+		if setErr != nil {
+			return setErr
+		}
+		regEnabled = enabled
+		return nil
+	}
+
+	app.openSettingsModal()
+	if !app.settingLaunchAtStartup {
+		t.Fatalf("expected openSettingsModal to sync LaunchAtStartup=true from OS registry")
+	}
+
+	// Saving unrelated settings must NOT spuriously write to the registry.
+	app.settingSpeedLimit = "256"
+	app.saveSettings()
+	if len(setCalls) != 0 {
+		t.Fatalf("expected no autostartSetter calls when autostart unchanged, got %v", setCalls)
+	}
+	if !eng.Config().LaunchAtStartup {
+		t.Fatalf("expected saved config to retain synced LaunchAtStartup=true")
+	}
+
+	// Immediate toggle to false updates registry and config immediately.
+	app.openSettingsModal()
+	app.setLaunchAtStartupImmediate(false)
+	if app.settingsError != "" || app.settingLaunchAtStartup || regEnabled {
+		t.Fatalf("expected immediate disable to succeed: err=%q setting=%v reg=%v", app.settingsError, app.settingLaunchAtStartup, regEnabled)
+	}
+	if eng.Config().LaunchAtStartup {
+		t.Fatalf("expected config LaunchAtStartup=false after immediate toggle")
+	}
+	if len(setCalls) != 1 || setCalls[0] != false {
+		t.Fatalf("expected single autostartSetter(false) call, got %v", setCalls)
+	}
+
+	// Registry failure keeps UI/config state unchanged and surfaces a clear error.
+	setErr = errors.New("registry write denied")
+	app.setLaunchAtStartupImmediate(true)
+	if app.settingLaunchAtStartup || regEnabled {
+		t.Fatalf("expected state to remain false on registry failure")
+	}
+	if !strings.Contains(app.settingsError, "registry write denied") {
+		t.Fatalf("expected settingsError to include registry error, got %q", app.settingsError)
+	}
+
+	// Clearing error and toggling back to true succeeds immediately.
+	setErr = nil
+	app.setLaunchAtStartupImmediate(true)
+	if app.settingsError != "" || !app.settingLaunchAtStartup || !regEnabled || !eng.Config().LaunchAtStartup {
+		t.Fatalf("expected immediate enable to succeed: err=%q setting=%v reg=%v cfg=%v",
+			app.settingsError, app.settingLaunchAtStartup, regEnabled, eng.Config().LaunchAtStartup)
 	}
 }
