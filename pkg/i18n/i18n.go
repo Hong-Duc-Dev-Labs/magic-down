@@ -381,6 +381,24 @@ var catalogs = map[Lang]map[string]string{
 		"update.progress":         "Downloading... %s",
 		"update.progress_total":   "Downloading... %s / %s (%.0f%%)",
 
+		// YouTube (yt-dlp)
+		"ytdlp.section_title":           "YouTube (yt-dlp)",
+		"ytdlp.section_sub":             "Required for downloading YouTube videos (including SABR streams)",
+		"ytdlp.checking":                "Checking yt-dlp status...",
+		"ytdlp.installed":               "Installed (%s)",
+		"ytdlp.installed_no_ver":        "Installed",
+		"ytdlp.not_installed":           "Not installed — required for YouTube SABR video downloads",
+		"ytdlp.btn_install":             "Install yt-dlp",
+		"ytdlp.btn_update":              "Update yt-dlp",
+		"ytdlp.btn_installing":          "Installing...",
+		"ytdlp.stage_downloading":       "Downloading yt-dlp... %s",
+		"ytdlp.stage_downloading_total": "Downloading yt-dlp... %s / %s (%.0f%%)",
+		"ytdlp.stage_verifying":         "Verifying SHA-256 checksum...",
+		"ytdlp.stage_installing":        "Installing yt-dlp...",
+		"ytdlp.install_ok":              "yt-dlp installed (%s)",
+		"ytdlp.install_ok_no_ver":       "yt-dlp installed successfully",
+		"ytdlp.install_err":             "Failed to install yt-dlp: %s",
+
 		// Welcome / Onboarding Modal
 		"onboarding.title":                "Welcome to MagicDown",
 		"onboarding.subtitle":             "Quick setup for downloads, startup, system tray, and browser integration",
@@ -731,6 +749,24 @@ var catalogs = map[Lang]map[string]string{
 		"update.download_install": "Tải & Cài đặt bản mới",
 		"update.progress":         "Đang tải... %s",
 		"update.progress_total":   "Đang tải... %s / %s (%.0f%%)",
+
+		// YouTube (yt-dlp)
+		"ytdlp.section_title":           "YouTube (yt-dlp)",
+		"ytdlp.section_sub":             "Cần thiết để tải video YouTube (bao gồm luồng SABR)",
+		"ytdlp.checking":                "Đang kiểm tra trạng thái yt-dlp...",
+		"ytdlp.installed":               "Đã cài đặt (%s)",
+		"ytdlp.installed_no_ver":        "Đã cài đặt",
+		"ytdlp.not_installed":           "Chưa cài đặt — cần thiết để tải video YouTube SABR",
+		"ytdlp.btn_install":             "Cài đặt yt-dlp",
+		"ytdlp.btn_update":              "Cập nhật yt-dlp",
+		"ytdlp.btn_installing":          "Đang cài đặt...",
+		"ytdlp.stage_downloading":       "Đang tải yt-dlp... %s",
+		"ytdlp.stage_downloading_total": "Đang tải yt-dlp... %s / %s (%.0f%%)",
+		"ytdlp.stage_verifying":         "Đang xác minh mã băm SHA-256...",
+		"ytdlp.stage_installing":        "Đang cài đặt yt-dlp...",
+		"ytdlp.install_ok":              "Đã cài đặt yt-dlp (%s)",
+		"ytdlp.install_ok_no_ver":       "Đã cài đặt yt-dlp thành công",
+		"ytdlp.install_err":             "Cài đặt yt-dlp thất bại: %s",
 
 		// Welcome / Onboarding Modal
 		"onboarding.title":               "Chào mừng đến với MagicDown",

@@ -241,6 +241,21 @@ type App struct {
 	updateDownloaded   int64
 	updateTotal        int64
 
+	// YouTube (yt-dlp) status & installer state (protected by ytdlpMu)
+	checkYTDLPStatusFn func(context.Context) engine.YTDLPStatus
+	installYTDLPFn     func(context.Context, engine.YTDLPProgressFunc) (engine.YTDLPStatus, error)
+	ytdlpMu            sync.Mutex
+	ytdlpChecked       bool
+	ytdlpChecking      bool
+	ytdlpInstalling    bool
+	ytdlpStatus        engine.YTDLPStatus
+	ytdlpStage         string
+	ytdlpDownloaded    int64
+	ytdlpTotal         int64
+	ytdlpMessage       string
+	ytdlpMessageOK     bool
+	ytdlpMessageErr    bool
+
 	// First-run Welcome / Onboarding modal state
 	showOnboardingModal       bool
 	onboardingDownloadDir     string
@@ -1118,6 +1133,7 @@ func (a *App) openSettingsModal() {
 	a.activeSettingsTab = settingsTabGeneral
 	a.refreshNativeStatus()
 	a.refreshDetectedBrowsers()
+	a.refreshYTDLPStatusAsync()
 	a.cancelDeleteTask()
 	a.cancelDuplicateModal()
 	a.closeRefreshModal()
@@ -1909,6 +1925,8 @@ func (a *App) renderSettingsModal(c *ui.Context, pal Palette) {
 						if item.tab == settingsTabBrowser {
 							a.refreshNativeStatus()
 							a.refreshDetectedBrowsers()
+						} else if item.tab == settingsTabUpdates {
+							a.refreshYTDLPStatusAsync()
 						}
 					}
 				}
@@ -2375,6 +2393,9 @@ func (a *App) renderSettingsUpdatesTab(c *ui.Context, pal Palette) {
 
 	// Software Updates status & action card
 	a.renderUpdateCard(c, pal)
+
+	// YouTube (yt-dlp) status & one-click installer card
+	a.renderYTDLPCard(c, pal)
 }
 
 func (a *App) registerNativeMessaging() {
@@ -2622,6 +2643,208 @@ func (a *App) renderUpdateCard(c *ui.Context, pal Palette) {
 				progressLabel = i18n.Tf("update.progress_total", FormatBytes(downloaded), FormatBytes(total), pct*100)
 			}
 			ui.Text(c, progressLabel).FontSize(11).FontFeatures("tnum").TextColor(pal.TextMuted)
+		}
+	})
+}
+
+func (a *App) refreshYTDLPStatusAsync() {
+	a.ytdlpMu.Lock()
+	if a.ytdlpChecking || a.ytdlpInstalling {
+		a.ytdlpMu.Unlock()
+		return
+	}
+	a.ytdlpChecking = true
+	a.ytdlpMu.Unlock()
+	a.invalidateUI()
+
+	checkFn := a.checkYTDLPStatusFn
+	if checkFn == nil {
+		checkFn = engine.CheckYTDLPStatus
+	}
+
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+		defer cancel()
+		st := checkFn(ctx)
+
+		a.ytdlpMu.Lock()
+		a.ytdlpChecking = false
+		a.ytdlpChecked = true
+		a.ytdlpStatus = st
+		a.ytdlpMu.Unlock()
+		a.invalidateUI()
+	}()
+}
+
+func (a *App) triggerYTDLPInstall() {
+	a.ytdlpMu.Lock()
+	if a.ytdlpInstalling {
+		a.ytdlpMu.Unlock()
+		return
+	}
+	a.ytdlpInstalling = true
+	a.ytdlpStage = engine.YTDLPStageDownloading
+	a.ytdlpDownloaded = 0
+	a.ytdlpTotal = 0
+	a.ytdlpMessage = ""
+	a.ytdlpMessageOK = false
+	a.ytdlpMessageErr = false
+	a.ytdlpMu.Unlock()
+	a.invalidateUI()
+
+	installFn := a.installYTDLPFn
+	if installFn == nil {
+		installFn = a.engine.InstallYTDLP
+	}
+
+	go func() {
+		st, err := installFn(context.Background(), func(downloaded, total int64, stage string) {
+			a.ytdlpMu.Lock()
+			a.ytdlpDownloaded = downloaded
+			a.ytdlpTotal = total
+			if stage != "" {
+				a.ytdlpStage = stage
+			}
+			a.ytdlpMu.Unlock()
+			a.invalidateUI()
+		})
+
+		a.ytdlpMu.Lock()
+		a.ytdlpInstalling = false
+		a.ytdlpStage = ""
+		if err != nil {
+			a.ytdlpMessageErr = true
+			a.ytdlpMessageOK = false
+			a.ytdlpMessage = i18n.Tf("ytdlp.install_err", err.Error())
+		} else {
+			a.ytdlpChecked = true
+			a.ytdlpStatus = st
+			a.ytdlpMessageOK = true
+			a.ytdlpMessageErr = false
+			if st.Version != "" {
+				a.ytdlpMessage = i18n.Tf("ytdlp.install_ok", st.Version)
+			} else {
+				a.ytdlpMessage = i18n.T("ytdlp.install_ok_no_ver")
+			}
+		}
+		a.ytdlpMu.Unlock()
+		a.invalidateUI()
+	}()
+}
+
+func shortenYTDLPPath(p string) string {
+	clean := filepath.Clean(strings.TrimSpace(p))
+	if clean == "" || clean == "." {
+		return ""
+	}
+	if localAppData := strings.TrimSpace(os.Getenv("LOCALAPPDATA")); localAppData != "" {
+		cleanBase := filepath.Clean(localAppData)
+		if len(clean) >= len(cleanBase) && strings.EqualFold(clean[:len(cleanBase)], cleanBase) {
+			rest := clean[len(cleanBase):]
+			if rest == "" || rest[0] == filepath.Separator || rest[0] == '/' {
+				return "%LOCALAPPDATA%" + rest
+			}
+		}
+	}
+	if home, err := os.UserHomeDir(); err == nil && strings.TrimSpace(home) != "" {
+		cleanHome := filepath.Clean(home)
+		if len(clean) >= len(cleanHome) && strings.EqualFold(clean[:len(cleanHome)], cleanHome) {
+			rest := clean[len(cleanHome):]
+			if rest == "" || rest[0] == filepath.Separator || rest[0] == '/' {
+				return "~" + rest
+			}
+		}
+	}
+	return clean
+}
+
+func (a *App) renderYTDLPCard(c *ui.Context, pal Palette) {
+	a.ytdlpMu.Lock()
+	checked := a.ytdlpChecked
+	checking := a.ytdlpChecking
+	installing := a.ytdlpInstalling
+	st := a.ytdlpStatus
+	stage := a.ytdlpStage
+	downloaded := a.ytdlpDownloaded
+	total := a.ytdlpTotal
+	msg := a.ytdlpMessage
+	msgOK := a.ytdlpMessageOK
+	msgErr := a.ytdlpMessageErr
+	a.ytdlpMu.Unlock()
+
+	ui.Column(c).Padding(12, 14).Radius(8).Background(pal.InputBg).Border(1, pal.Border).Gap(10).Children(func() {
+		ui.Row(c).AlignItems(ui.Center).Justify(ui.SpaceBetween).Gap(12).Children(func() {
+			ui.Column(c).Gap(2).Grow(1).Children(func() {
+				ui.Text(c, i18n.T("ytdlp.section_title")).FontSize(13).FontWeight(600).TextColor(pal.TextPrimary)
+				switch {
+				case checking && !checked:
+					ui.Text(c, i18n.T("ytdlp.checking")).FontSize(11).TextColor(pal.TextSecondary)
+				case st.Installed:
+					label := i18n.T("ytdlp.installed_no_ver")
+					if st.Version != "" {
+						label = i18n.Tf("ytdlp.installed", st.Version)
+					}
+					ui.Text(c, label).FontSize(11).FontWeight(500).TextColor(pal.Success)
+				default:
+					ui.Text(c, i18n.T("ytdlp.not_installed")).FontSize(11).TextColor(pal.Warning)
+				}
+			})
+
+			switch {
+			case installing:
+				toolbarButton(c, pal, iconDownload, i18n.T("ytdlp.btn_installing"), true, false)
+			case st.Installed:
+				if toolbarButton(c, pal, iconRefresh, i18n.T("ytdlp.btn_update"), checking, false) {
+					a.triggerYTDLPInstall()
+				}
+			case checking && !checked:
+				toolbarButton(c, pal, iconDownload, i18n.T("ytdlp.btn_install"), true, false)
+			default:
+				if primaryCTA(c, pal, iconDownload, i18n.T("ytdlp.btn_install")) {
+					a.triggerYTDLPInstall()
+				}
+			}
+		})
+
+		if st.Installed && st.Path != "" {
+			ui.Text(c, shortenYTDLPPath(st.Path)).FontSize(11).TextColor(pal.TextMuted).SingleLine().Ellipsis("...")
+		}
+
+		if installing {
+			pct := 0.0
+			var progressLabel string
+			switch stage {
+			case engine.YTDLPStageVerifying:
+				pct = 1.0
+				progressLabel = i18n.T("ytdlp.stage_verifying")
+			case engine.YTDLPStageInstalling:
+				pct = 1.0
+				progressLabel = i18n.T("ytdlp.stage_installing")
+			default:
+				if total > 0 {
+					pct = float64(downloaded) / float64(total)
+					if pct > 1 {
+						pct = 1
+					}
+					progressLabel = i18n.Tf("ytdlp.stage_downloading_total", FormatBytes(downloaded), FormatBytes(total), pct*100)
+				} else {
+					progressLabel = i18n.Tf("ytdlp.stage_downloading", FormatBytes(downloaded))
+				}
+			}
+			ui.Progress(c, pct).
+				Height(6).
+				Radius(999).
+				Background(pal.TrackBg).
+				TextColor(pal.Accent)
+			ui.Text(c, progressLabel).FontSize(11).FontFeatures("tnum").TextColor(pal.TextMuted)
+		} else if msg != "" {
+			msgColor := pal.TextSecondary
+			if msgErr {
+				msgColor = pal.Danger
+			} else if msgOK {
+				msgColor = pal.Success
+			}
+			ui.Text(c, msg).FontSize(11).TextColor(msgColor)
 		}
 	})
 }

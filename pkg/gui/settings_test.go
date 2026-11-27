@@ -1,10 +1,13 @@
 package gui
 
 import (
+	"context"
 	"errors"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/egoist/mygo/ui"
 
@@ -173,7 +176,7 @@ func TestSettingsModalTabsRenderAllLocalesAndViewports(t *testing.T) {
 }
 
 type fakeInvalidateWinCtrl struct {
-	invalidations int
+	invalidations atomic.Int32
 }
 
 func (f *fakeInvalidateWinCtrl) Minimize()         {}
@@ -185,7 +188,7 @@ func (f *fakeInvalidateWinCtrl) Show()             {}
 func (f *fakeInvalidateWinCtrl) Restore()          {}
 func (f *fakeInvalidateWinCtrl) Focus()            {}
 func (f *fakeInvalidateWinCtrl) IsVisible() bool   { return true }
-func (f *fakeInvalidateWinCtrl) Invalidate()       { f.invalidations++ }
+func (f *fakeInvalidateWinCtrl) Invalidate()       { f.invalidations.Add(1) }
 
 func TestBrowserIntegrationInvalidatesUIAndShowsConnectedForChromeEdgeDia(t *testing.T) {
 	tempDir := t.TempDir()
@@ -227,8 +230,8 @@ func TestBrowserIntegrationInvalidatesUIAndShowsConnectedForChromeEdgeDia(t *tes
 		}
 	}
 
-	if win.invalidations < 3 {
-		t.Fatalf("expected UI invalidations on each HELLO handshake, got %d", win.invalidations)
+	if win.invalidations.Load() < 3 {
+		t.Fatalf("expected UI invalidations on each HELLO handshake, got %d", win.invalidations.Load())
 	}
 
 	statuses := app.browserIntegrationStatuses()
@@ -317,4 +320,133 @@ func TestSettingsLaunchAtStartupSyncAndImmediateToggle(t *testing.T) {
 		t.Fatalf("expected immediate enable to succeed: err=%q setting=%v reg=%v cfg=%v",
 			app.settingsError, app.settingLaunchAtStartup, regEnabled, eng.Config().LaunchAtStartup)
 	}
+}
+
+func TestSettingsYTDLPStatusAndInstallUI(t *testing.T) {
+	prevLang := i18n.CurrentLang()
+	defer i18n.SetLang(prevLang)
+
+	tempDir := t.TempDir()
+	t.Setenv("LOCALAPPDATA", tempDir)
+	eng, err := engine.NewEngine(engine.DefaultConfig(tempDir, filepath.Join(tempDir, "state.json")))
+	if err != nil {
+		t.Fatalf("failed to init engine: %v", err)
+	}
+	defer eng.Close()
+
+	app := NewApp(eng, nil)
+	win := &fakeInvalidateWinCtrl{}
+	app.SetWindowController(win)
+
+	checkDone := make(chan struct{})
+	app.checkYTDLPStatusFn = func(ctx context.Context) engine.YTDLPStatus {
+		defer close(checkDone)
+		return engine.YTDLPStatus{Installed: false}
+	}
+
+	app.openSettingsModal()
+	select {
+	case <-checkDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for async yt-dlp status check")
+	}
+
+	// Wait briefly for the goroutine to release ytdlpMu and store status.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		app.ytdlpMu.Lock()
+		checked := app.ytdlpChecked
+		checking := app.ytdlpChecking
+		app.ytdlpMu.Unlock()
+		if checked && !checking {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// Trigger install with progress updates and verify duplicate click guard.
+	var installCalls atomic.Int32
+	installStarted := make(chan struct{})
+	installRelease := make(chan struct{})
+	installedPath := filepath.Join(tempDir, "MagicDown", "bin", "yt-dlp.exe")
+
+	app.installYTDLPFn = func(ctx context.Context, onProgress engine.YTDLPProgressFunc) (engine.YTDLPStatus, error) {
+		installCalls.Add(1)
+		if onProgress != nil {
+			onProgress(512*1024, 1024*1024, engine.YTDLPStageDownloading)
+		}
+		close(installStarted)
+		<-installRelease
+		if onProgress != nil {
+			onProgress(1024*1024, 1024*1024, engine.YTDLPStageVerifying)
+			onProgress(1024*1024, 1024*1024, engine.YTDLPStageInstalling)
+		}
+		return engine.YTDLPStatus{
+			Installed: true,
+			Path:      installedPath,
+			Version:   "2026.11.01",
+			Managed:   true,
+		}, nil
+	}
+
+	app.triggerYTDLPInstall()
+	select {
+	case <-installStarted:
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for yt-dlp install to start")
+	}
+
+	// Duplicate trigger while installing must be ignored.
+	app.triggerYTDLPInstall()
+	if got := installCalls.Load(); got != 1 {
+		t.Fatalf("expected concurrent triggerYTDLPInstall to be ignored, got %d calls", got)
+	}
+
+	// Render installing state across locales without panic.
+	app.activeSettingsTab = settingsTabUpdates
+	for _, lang := range []i18n.Lang{i18n.LangEN, i18n.LangVI} {
+		app.SetLanguage(lang)
+		tester := ui.NewTester(app.View, 1120, 700)
+		tester.SetScale(1)
+		tester.Frame()
+	}
+
+	close(installRelease)
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		app.ytdlpMu.Lock()
+		installing := app.ytdlpInstalling
+		st := app.ytdlpStatus
+		ok := app.ytdlpMessageOK
+		app.ytdlpMu.Unlock()
+		if !installing && st.Installed && ok {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	app.ytdlpMu.Lock()
+	finalSt := app.ytdlpStatus
+	finalOK := app.ytdlpMessageOK
+	app.ytdlpMu.Unlock()
+	if !finalSt.Installed || finalSt.Version != "2026.11.01" || !finalOK {
+		t.Fatalf("expected installed yt-dlp status after install, got st=%+v ok=%v", finalSt, finalOK)
+	}
+
+	// Verify shortened path helper formats %LOCALAPPDATA% cleanly.
+	if short := shortenYTDLPPath(installedPath); !strings.HasPrefix(short, "%LOCALAPPDATA%") {
+		t.Errorf("expected shortened path to start with %%LOCALAPPDATA%%, got %q", short)
+	}
+
+	// Render installed and error states cleanly.
+	tester := ui.NewTester(app.View, 1120, 700)
+	tester.SetScale(1)
+	tester.Frame()
+
+	app.ytdlpMu.Lock()
+	app.ytdlpMessageOK = false
+	app.ytdlpMessageErr = true
+	app.ytdlpMessage = i18n.Tf("ytdlp.install_err", "SHA-256 mismatch")
+	app.ytdlpMu.Unlock()
+	tester.Frame()
 }

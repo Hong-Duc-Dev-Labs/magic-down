@@ -14,7 +14,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -101,27 +100,19 @@ func FindYTDLP() (string, error) {
 }
 
 func findYTDLPDefault() (string, error) {
-	binName := "yt-dlp"
-	if runtime.GOOS == "windows" {
-		binName = "yt-dlp.exe"
+	binName := ytdlpBinaryName()
+
+	// 1. MagicDown managed bin directory (%LOCALAPPDATA%\MagicDown\bin\yt-dlp.exe)
+	// Checked first so an in-app install/update overrides any older bundled binary.
+	if managedPath, err := ManagedYTDLPPath(); err == nil && managedPath != "" {
+		if info, statErr := os.Stat(managedPath); statErr == nil && !info.IsDir() {
+			return managedPath, nil
+		}
 	}
 
-	// 1. Next to current executable (same directory as magicdown.exe / magicdown-host.exe)
+	// 2. Next to current executable (same directory as magicdown.exe / magicdown-host.exe)
 	if exe, err := os.Executable(); err == nil {
 		candidate := filepath.Join(filepath.Dir(exe), binName)
-		if info, statErr := os.Stat(candidate); statErr == nil && !info.IsDir() {
-			return candidate, nil
-		}
-	}
-
-	// 2. MagicDown local bin directory (%LOCALAPPDATA%\MagicDown\bin\yt-dlp.exe)
-	if localAppData := strings.TrimSpace(os.Getenv("LOCALAPPDATA")); localAppData != "" {
-		candidate := filepath.Join(localAppData, "MagicDown", "bin", binName)
-		if info, statErr := os.Stat(candidate); statErr == nil && !info.IsDir() {
-			return candidate, nil
-		}
-	} else if home, err := os.UserHomeDir(); err == nil && home != "" {
-		candidate := filepath.Join(home, ".local", "share", "magicdown", "bin", binName)
 		if info, statErr := os.Stat(candidate); statErr == nil && !info.IsDir() {
 			return candidate, nil
 		}
