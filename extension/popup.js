@@ -383,10 +383,20 @@ function renderDetectedVideos(videos) {
         showToast(t("popup.toast_preview_video"), "success");
         return;
       }
-      const resp = await chrome.runtime.sendMessage({
+      const payload = {
         type: "download",
         url: v.url
-      });
+      };
+      if (v.ytdlpFormat) payload.ytdlpFormat = v.ytdlpFormat;
+      if (v.targetFormat) payload.targetFormat = v.targetFormat;
+      if (v.outputFormat) payload.outputFormat = v.outputFormat;
+      if (v.audioBitrate) payload.audioBitrate = v.audioBitrate;
+      if (v.size > 0) payload.size = v.size;
+      if (v.title) {
+        const ext = v.ext || String(v.format || "mp4").toLowerCase();
+        payload.filename = `${v.title}.${ext}`;
+      }
+      const resp = await chrome.runtime.sendMessage(payload);
       if (resp && resp.success) {
         showToast(t("popup.toast_video_sent"), "success");
         await loadState();

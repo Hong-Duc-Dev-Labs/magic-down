@@ -75,6 +75,7 @@ type Task struct {
 	TargetFormat    string            `json:"target_format,omitempty"`
 	OutputFormat    string            `json:"output_format,omitempty"`
 	AudioBitrate    string            `json:"audio_bitrate,omitempty"`
+	YTDLPFormat     string            `json:"ytdlp_format,omitempty"`
 	SpeedLimitKBps  int64             `json:"speed_limit_kbps,omitempty"` // 0 = use global limit only
 	NumSegments     int               `json:"num_segments"`
 	Segments        []*Segment        `json:"segments"`

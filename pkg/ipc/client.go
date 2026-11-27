@@ -182,6 +182,44 @@ func (c *Client) SendHello(req HelloRequest) (*WelcomeResponse, error) {
 	return &welcome, nil
 }
 
+// ResolveYouTube asks the desktop app to resolve a YouTube URL via yt-dlp.
+func (c *Client) ResolveYouTube(rawURL string) (*ResolveYouTubeResponse, error) {
+	data, err := json.Marshal(ResolveYouTubeRequest{URL: rawURL})
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal resolve request: %w", err)
+	}
+	req, err := http.NewRequest(http.MethodPost, c.baseURL+"/youtube/resolve", bytes.NewReader(data))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if tok := c.resolveToken(); tok != "" {
+		req.Header.Set(TokenHeader, tok)
+	}
+	resolveClient := &http.Client{
+		Timeout:   30 * time.Second,
+		Transport: c.httpClient.Transport,
+	}
+	resp, err := resolveClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		bodySnippet, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
+		msg := strings.TrimSpace(string(bodySnippet))
+		if msg != "" {
+			return nil, fmt.Errorf("server returned status: %d (%s)", resp.StatusCode, msg)
+		}
+		return nil, fmt.Errorf("server returned status: %d", resp.StatusCode)
+	}
+	var out ResolveYouTubeResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, fmt.Errorf("failed to decode resolve response: %w", err)
+	}
+	return &out, nil
+}
+
 // SendDisconnect notifies the Desktop App that a browser's Native Messaging host disconnected.
 func (c *Client) SendDisconnect(browser string) error {
 	payload, _ := json.Marshal(map[string]string{"browser": browser})

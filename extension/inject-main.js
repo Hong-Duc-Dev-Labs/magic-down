@@ -77,7 +77,10 @@
         typeof streamingData.hlsManifestUrl === "string" ? streamingData.hlsManifestUrl.slice(0, MAX_URL) : "";
       const dashManifestUrl =
         typeof streamingData.dashManifestUrl === "string" ? streamingData.dashManifestUrl.slice(0, MAX_URL) : "";
-      if (formats.length === 0 && adaptiveFormats.length === 0 && !hlsManifestUrl && !dashManifestUrl) return;
+      const hasServerAbr = Boolean(
+        typeof streamingData.serverAbrStreamingUrl === "string" && streamingData.serverAbrStreamingUrl.trim()
+      );
+      if (formats.length === 0 && adaptiveFormats.length === 0 && !hlsManifestUrl && !dashManifestUrl && !hasServerAbr) return;
 
       const rawThumbs = videoDetails && videoDetails.thumbnail && Array.isArray(videoDetails.thumbnail.thumbnails)
         ? videoDetails.thumbnail.thumbnails
@@ -97,6 +100,7 @@
         isLive: Boolean(videoDetails && videoDetails.isLiveContent),
         hlsManifestUrl,
         dashManifestUrl,
+        hasServerAbr,
         formats,
         adaptiveFormats,
         thumbnails

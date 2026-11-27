@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 
+	"magicdown/pkg/engine"
 	"magicdown/pkg/ipc"
 	"magicdown/pkg/version"
 )
@@ -38,6 +39,7 @@ type InboundMessage struct {
 	TargetFormat     string                   `json:"target_format,omitempty"`
 	OutputFormat     string                   `json:"output_format,omitempty"`
 	AudioBitrate     string                   `json:"audio_bitrate,omitempty"`
+	YTDLPFormat      string                   `json:"ytdlp_format,omitempty"`
 	Plan             json.RawMessage          `json:"plan,omitempty"`
 	AutoStart        bool                     `json:"auto_start,omitempty"`
 	SkipDialog       bool                     `json:"skip_dialog,omitempty"`
@@ -58,8 +60,10 @@ type OutboundMessage struct {
 	Filename        string `json:"filename,omitempty"`
 	Added           int    `json:"added,omitempty"`
 	Failed          int    `json:"failed,omitempty"`
-	AppRunning      bool   `json:"app_running,omitempty"`
-	Error           string `json:"error,omitempty"`
+	AppRunning      bool                         `json:"app_running,omitempty"`
+	YTDLPMissing    bool                         `json:"ytdlp_missing,omitempty"`
+	YouTube         *engine.YouTubeResolveResult `json:"youtube,omitempty"`
+	Error           string                       `json:"error,omitempty"`
 }
 
 // Handler processes native messaging messages and talks to the IPC client.
@@ -237,6 +241,7 @@ func (h *Handler) HandleMessage(msgBytes []byte) ([]byte, error) {
 			TargetFormat:  in.TargetFormat,
 			OutputFormat:  in.OutputFormat,
 			AudioBitrate:  in.AudioBitrate,
+			YTDLPFormat:   in.YTDLPFormat,
 			Plan:          in.Plan,
 			AutoStart:     true, // default to starting automatically from browser
 			SkipDialog:    in.SkipDialog,
@@ -259,6 +264,44 @@ func (h *Handler) HandleMessage(msgBytes []byte) ([]byte, error) {
 			Message:  "Download added to MagicDown",
 			TaskID:   taskResp.Task.ID,
 			Filename: taskResp.Task.Filename,
+		}
+		return json.Marshal(resp)
+
+	case "resolve_youtube":
+		if _, _, err := engine.ValidateYouTubeURL(in.URL); err != nil {
+			resp := OutboundMessage{
+				Success: false,
+				Action:  "resolve_youtube",
+				Error:   err.Error(),
+			}
+			return json.Marshal(resp)
+		}
+		if !h.ipcClient.IsAppRunning() {
+			resp := OutboundMessage{
+				Success:    false,
+				Action:     "resolve_youtube",
+				AppRunning: false,
+				Error:      "MagicDown desktop app is not running. Please open MagicDown first.",
+			}
+			return json.Marshal(resp)
+		}
+		res, err := h.ipcClient.ResolveYouTube(in.URL)
+		if err != nil {
+			resp := OutboundMessage{
+				Success:    false,
+				Action:     "resolve_youtube",
+				AppRunning: true,
+				Error:      "failed to resolve YouTube video: " + err.Error(),
+			}
+			return json.Marshal(resp)
+		}
+		resp := OutboundMessage{
+			Success:      res.Success,
+			Action:       "resolve_youtube",
+			AppRunning:   true,
+			YTDLPMissing: res.YTDLPMissing,
+			YouTube:      res.YouTube,
+			Error:        res.Error,
 		}
 		return json.Marshal(resp)
 

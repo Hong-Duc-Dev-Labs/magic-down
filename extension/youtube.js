@@ -279,6 +279,116 @@
     return null;
   }
 
+  function canonicalYouTubeUrl(rawUrl, fallbackVideoId) {
+    const id = extractYouTubeVideoId(rawUrl) || (typeof fallbackVideoId === "string" ? fallbackVideoId.trim() : "");
+    if (!id || !/^[A-Za-z0-9_-]{6,20}$/.test(id)) return "";
+    try {
+      if (rawUrl) {
+        const u = new URL(rawUrl);
+        const parts = u.pathname.split("/").filter(Boolean);
+        if (parts[0] === "shorts") {
+          return `https://www.youtube.com/shorts/${id}`;
+        }
+      }
+    } catch {
+      // ignore malformed URL
+    }
+    return `https://www.youtube.com/watch?v=${id}`;
+  }
+
+  function resolveYouTubeAnchorRect(videoRect, containerRect, viewportW, viewportH) {
+    const rectVisibleArea = (r) => {
+      if (!r || !Number.isFinite(r.width) || !Number.isFinite(r.height)) return 0;
+      const x = Math.max(0, Math.min(r.right, viewportW) - Math.max(r.left, 0));
+      const y = Math.max(0, Math.min(r.bottom, viewportH) - Math.max(r.top, 0));
+      return x * y;
+    };
+    const isValidContainer =
+      containerRect &&
+      containerRect.width >= 160 &&
+      containerRect.height >= 90 &&
+      rectVisibleArea(containerRect) > 0;
+
+    if (!isValidContainer) return videoRect || null;
+
+    // YouTube shifts <video> to negative top (e.g. top: -height + 68) when
+    // paused/pre-play/ended while #movie_player stays in place. Prefer the
+    // player container rect whenever <video> is shifted above the container or
+    // has less visible area than the player container.
+    if (
+      !videoRect ||
+      videoRect.width < 160 ||
+      videoRect.height < 90 ||
+      videoRect.top < containerRect.top - 8 ||
+      rectVisibleArea(videoRect) < rectVisibleArea(containerRect) * 0.75
+    ) {
+      return containerRect;
+    }
+    return videoRect;
+  }
+
+  function normalizeResolvedYouTubeEntry(ytData, fallbackVideoId, fallbackTitle) {
+    if (!ytData || typeof ytData !== "object") return null;
+    const videoId = String(ytData.videoId || fallbackVideoId || "").trim();
+    const title = String(ytData.title || fallbackTitle || "").trim();
+    const rawVariants = Array.isArray(ytData.variants) ? ytData.variants : [];
+    const rawMp3 = Array.isArray(ytData.mp3Variants) ? ytData.mp3Variants : [];
+    const variants = rawVariants
+      .filter((v) => v && typeof v.url === "string" && v.url)
+      .map((v) => ({
+        url: v.url,
+        quality: v.quality || (v.height > 0 ? `${v.height}p` : "Best"),
+        height: Number(v.height) || 0,
+        width: Number(v.width) || 0,
+        fps: Number(v.fps) || 0,
+        size: Number(v.size) || 0,
+        format: v.format || "MP4",
+        ext: v.ext || "mp4",
+        isHLS: false,
+        source: "youtube",
+        streamType: v.streamType || "muxed",
+        hasVideo: v.hasVideo !== false,
+        hasAudio: v.hasAudio !== false,
+        title: v.title || title,
+        ytdlpFormat: typeof v.ytdlpFormat === "string" ? v.ytdlpFormat : "",
+        targetFormat: v.targetFormat || "mp4"
+      }));
+    const mp3Variants = rawMp3
+      .filter((m) => m && typeof m.url === "string" && m.url)
+      .map((m) => ({
+        url: m.url,
+        quality: m.quality || "MP3 · 192 kbps",
+        format: "MP3",
+        ext: "mp3",
+        outputFormat: "mp3",
+        audioBitrate: m.audioBitrate || "192k",
+        streamType: "audio-mp3",
+        source: "youtube",
+        title: m.title || title,
+        ytdlpFormat: typeof m.ytdlpFormat === "string" ? m.ytdlpFormat : "bestaudio/best",
+        hasVideo: false,
+        hasAudio: true
+      }));
+    const thumbnail = ytData.thumbnail
+      ? extractYouTubeThumbnail([{ url: ytData.thumbnail, width: 1280, height: 720 }], videoId)
+      : extractYouTubeThumbnail([], videoId);
+    return {
+      videoId,
+      title,
+      isLive: Boolean(ytData.isLive),
+      hlsManifestUrl: "",
+      dashManifestUrl: "",
+      variants,
+      mp3Variants,
+      thumbnail,
+      cipherOnlyCount: 0,
+      drmDetected: false,
+      sabrDetected: false,
+      resolvedViaYtdlp: true,
+      at: Date.now()
+    };
+  }
+
   function parseYouTubePlayerPayload(payload) {
     if (!payload || typeof payload !== "object") return null;
     const videoId = typeof payload.videoId === "string" ? payload.videoId.trim() : "";
@@ -286,6 +396,10 @@
     const isLive = Boolean(payload.isLive);
     const hlsManifestUrl = typeof payload.hlsManifestUrl === "string" ? payload.hlsManifestUrl.trim() : "";
     const dashManifestUrl = typeof payload.dashManifestUrl === "string" ? payload.dashManifestUrl.trim() : "";
+    const sabrDetected = Boolean(
+      payload.hasServerAbr ||
+      (typeof payload.serverAbrStreamingUrl === "string" && payload.serverAbrStreamingUrl.trim())
+    );
 
     let cipherOnlyCount = 0;
     let drmDetected = false;
@@ -384,6 +498,7 @@
       thumbnail,
       cipherOnlyCount,
       drmDetected,
+      sabrDetected,
       at: Date.now()
     };
   }
@@ -392,6 +507,9 @@
     MP3_PRESETS,
     isYouTubeHost,
     extractYouTubeVideoId,
+    canonicalYouTubeUrl,
+    resolveYouTubeAnchorRect,
+    normalizeResolvedYouTubeEntry,
     isGoogleVideoPlaybackURL,
     isYouTubeRangeChunkURL,
     parseMimeContainer,

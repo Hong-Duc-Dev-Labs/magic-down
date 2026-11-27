@@ -303,7 +303,8 @@ func (t *Task) Start(parentCtx context.Context, client *http.Client, onUpdate fu
 	plan := t.Plan
 	audioURL := t.AudioURL
 	outputFmt := t.OutputFormat
-	isHLS := t.IsHLS || (plan == nil && audioURL == "" && IsHLSURL(t.URL, ""))
+	ytdlpFmt := t.YTDLPFormat
+	isHLS := t.IsHLS || (plan == nil && audioURL == "" && ytdlpFmt == "" && IsHLSURL(t.URL, ""))
 	totalBytes := t.TotalBytes
 	numSegments := len(t.Segments)
 	savePath := t.SavePath
@@ -322,6 +323,10 @@ func (t *Task) Start(parentCtx context.Context, client *http.Client, onUpdate fu
 	if err := os.MkdirAll(saveDir, 0755); err != nil {
 		t.fail(fmt.Sprintf("failed to create directory: %v", err), onUpdate)
 		return err
+	}
+
+	if ytdlpFmt != "" {
+		return t.runYTDLPDownload(ctx, onUpdate)
 	}
 
 	if plan != nil {
@@ -937,6 +942,7 @@ func (t *Task) Clone() *Task {
 		TargetFormat:    t.TargetFormat,
 		OutputFormat:    t.OutputFormat,
 		AudioBitrate:    t.AudioBitrate,
+		YTDLPFormat:     t.YTDLPFormat,
 		SpeedLimitKBps:  t.SpeedLimitKBps,
 		NumSegments:     t.NumSegments,
 		ErrorMessage:    t.ErrorMessage,

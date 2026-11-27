@@ -64,6 +64,8 @@
   const isXPage = Boolean(X && X.isXHost(location.hostname));
   const isXiaohongshuPage = Boolean(THUMB && THUMB.isXiaohongshuHost && THUMB.isXiaohongshuHost(location.hostname));
   const ytPlayers = new Map(); // videoId -> parsed YouTube player entry
+  const ytResolveState = new Map(); // videoId -> { status, ytdlpMissing, appOffline, error, at }
+  let lastSyncedYtKey = "";
   const biliPlayers = new Map(); // videoId -> parsed Bilibili player entry
   const xEntries = new Map(); // key -> parsed X media entry
   const xhsNotes = new Map(); // noteId -> { noteId, title, thumbnail }
@@ -287,6 +289,14 @@
       if (data.__mdSniff === YT_MSG && data.payload && YT) {
         const parsed = YT.parseYouTubePlayerPayload(data.payload);
         if (parsed) {
+          const existing = parsed.videoId ? ytPlayers.get(parsed.videoId) : null;
+          // Do not overwrite a yt-dlp resolved entry with an empty SABR/cipher payload.
+          if (existing && existing.resolvedViaYtdlp && parsed.variants.length === 0) {
+            if (!existing.title && parsed.title) existing.title = parsed.title;
+            if (!existing.thumbnail && parsed.thumbnail) existing.thumbnail = parsed.thumbnail;
+            scheduleRefresh();
+            return;
+          }
           if (parsed.videoId) {
             ytPlayers.set(parsed.videoId, parsed);
             if (ytPlayers.size > 16) ytPlayers.delete(ytPlayers.keys().next().value);
@@ -294,6 +304,11 @@
           latestYtEntry = parsed;
           if (parsed.hlsManifestUrl) {
             resolveManifest(parsed.hlsManifestUrl, "hls");
+          }
+          if (parsed.variants.length > 0) {
+            syncYouTubeVideosToBackground(parsed);
+          } else if (parsed.videoId && !parsed.drmDetected) {
+            requestYouTubeDesktopResolve(parsed.videoId, false);
           }
           scheduleRefresh();
         }
@@ -415,6 +430,103 @@
     return latestYtEntry && latestYtEntry.videoId === videoId ? latestYtEntry : null;
   }
 
+  function syncYouTubeVideosToBackground(entry) {
+    if (!isExtensionEnv || !isTopFrame || !isYouTubePage || !entry || !Array.isArray(entry.variants) || entry.variants.length === 0) {
+      return;
+    }
+    const syncKey = `${entry.videoId || ""}:${entry.variants.length}:${entry.resolvedViaYtdlp ? "ytdlp" : "web"}`;
+    if (syncKey === lastSyncedYtKey) return;
+    lastSyncedYtKey = syncKey;
+    try {
+      chrome.runtime.sendMessage(
+        {
+          type: "setTabYouTubeVideos",
+          videos: entry.variants.slice(0, 20)
+        },
+        () => {
+          void chrome.runtime.lastError;
+        }
+      );
+    } catch {
+      // ignore
+    }
+  }
+
+  function requestYouTubeDesktopResolve(videoIdOverride, force) {
+    if (!isExtensionEnv || !isTopFrame || !isYouTubePage || !YT) return;
+    const videoId = (typeof videoIdOverride === "string" && videoIdOverride.trim()) || YT.extractYouTubeVideoId(location.href);
+    if (!videoId) return;
+    const existing = ytPlayers.get(videoId);
+    if (existing && existing.variants && existing.variants.length > 0 && !force) return;
+    if (existing && existing.drmDetected) return;
+
+    const prevState = ytResolveState.get(videoId);
+    const now = Date.now();
+    if (prevState) {
+      if (prevState.status === "loading") return;
+      if (!force && prevState.status === "ok") return;
+      if (!force && prevState.status === "error" && now - prevState.at < 15000) return;
+    }
+
+    const canonicalUrl = YT.canonicalYouTubeUrl(location.href, videoId);
+    if (!canonicalUrl) return;
+
+    ytResolveState.set(videoId, { status: "loading", ytdlpMissing: false, appOffline: false, error: "", at: now });
+    if (ytResolveState.size > 20) ytResolveState.delete(ytResolveState.keys().next().value);
+    lastRenderSignature = "";
+    scheduleRefresh();
+
+    try {
+      chrome.runtime.sendMessage({ type: "resolveYouTube", url: canonicalUrl }, (resp) => {
+        if (chrome.runtime.lastError || !resp) {
+          ytResolveState.set(videoId, {
+            status: "error",
+            ytdlpMissing: false,
+            appOffline: true,
+            error: (chrome.runtime.lastError && chrome.runtime.lastError.message) || "Native host unavailable",
+            at: Date.now()
+          });
+          lastRenderSignature = "";
+          scheduleRefresh();
+          return;
+        }
+        if (resp.success && resp.youtube) {
+          const fallbackTitle = (existing && existing.title) || document.title || "";
+          const normalized = YT.normalizeResolvedYouTubeEntry(resp.youtube, videoId, fallbackTitle);
+          if (normalized && normalized.variants.length > 0) {
+            ytPlayers.set(videoId, normalized);
+            if (ytPlayers.size > 16) ytPlayers.delete(ytPlayers.keys().next().value);
+            latestYtEntry = normalized;
+            ytResolveState.set(videoId, { status: "ok", ytdlpMissing: false, appOffline: false, error: "", at: Date.now() });
+            syncYouTubeVideosToBackground(normalized);
+            lastRenderSignature = "";
+            scheduleRefresh();
+            return;
+          }
+        }
+        ytResolveState.set(videoId, {
+          status: "error",
+          ytdlpMissing: Boolean(resp.ytdlp_missing),
+          appOffline: resp.app_running === false || Boolean(resp.hostError),
+          error: resp.error || "No formats resolved",
+          at: Date.now()
+        });
+        lastRenderSignature = "";
+        scheduleRefresh();
+      });
+    } catch {
+      ytResolveState.set(videoId, {
+        status: "error",
+        ytdlpMissing: false,
+        appOffline: true,
+        error: "Extension messaging unavailable",
+        at: Date.now()
+      });
+      lastRenderSignature = "";
+      scheduleRefresh();
+    }
+  }
+
   function currentBilibiliEntry() {
     if (!isBilibiliPage || !BILI) return null;
     const videoId = BILI.extractBilibiliVideoId(location.href);
@@ -442,6 +554,8 @@
     lastHref = location.href;
     sniffDrm = false;
     dropdownOpen = false;
+    dismissedVideos = new WeakSet();
+    lastSyncedYtKey = "";
     lastRenderSignature = "";
     if (isExtensionEnv && isTopFrame) {
       networkVideos = [];
@@ -1371,12 +1485,25 @@
     if (!video) return "No <video> element found in this frame. If the player is an iframe, scroll it into view to wake the frame.";
     if (isYouTubePage) {
       const ytEntry = currentYouTubeEntry();
+      const videoId = YT ? YT.extractYouTubeVideoId(location.href) : "";
+      const resolveSt = videoId ? ytResolveState.get(videoId) : null;
+      if (ytEntry && ytEntry.drmDetected) {
+        return "DRM-protected YouTube stream. MagicDown cannot download encrypted media.";
+      }
+      if (resolveSt && resolveSt.status === "loading") {
+        return t("overlay.yt_resolving");
+      }
+      if (resolveSt && resolveSt.status === "error") {
+        if (resolveSt.ytdlpMissing) return t("overlay.yt_need_ytdlp");
+        if (resolveSt.appOffline) return t("overlay.yt_app_offline");
+        if (resolveSt.error) return t("overlay.yt_resolve_failed", { err: resolveSt.error });
+      }
       if (ytEntry) {
-        if (ytEntry.drmDetected) {
-          return "DRM-protected YouTube stream. MagicDown cannot download encrypted media.";
+        if (ytEntry.variants.length === 0 && ytEntry.sabrDetected) {
+          return t("overlay.yt_need_ytdlp");
         }
         if (ytEntry.variants.length === 0 && ytEntry.cipherOnlyCount > 0) {
-          return "YouTube streams use signatureCipher (encrypted URLs) which MagicDown cannot decipher yet.";
+          return t("overlay.yt_need_ytdlp");
         }
       }
     }
@@ -1630,7 +1757,26 @@
     pillBtn.type = "button";
     pillBtn.setAttribute("aria-haspopup", "menu");
     pillBtn.setAttribute("aria-expanded", "false");
-    pillBtn.innerHTML = `<span class="md-bolt"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z"/></svg></span><span>MagicDown</span>`;
+    const boltWrap = document.createElement("span");
+    boltWrap.className = "md-bolt";
+    const svgNS = "http://www.w3.org/2000/svg";
+    const boltSvg = document.createElementNS(svgNS, "svg");
+    boltSvg.setAttribute("width", "12");
+    boltSvg.setAttribute("height", "12");
+    boltSvg.setAttribute("viewBox", "0 0 24 24");
+    boltSvg.setAttribute("fill", "none");
+    boltSvg.setAttribute("stroke", "currentColor");
+    boltSvg.setAttribute("stroke-width", "2.5");
+    boltSvg.setAttribute("stroke-linecap", "round");
+    boltSvg.setAttribute("stroke-linejoin", "round");
+    const boltPath = document.createElementNS(svgNS, "path");
+    boltPath.setAttribute("d", "M13 2 3 14h9l-1 8 10-12h-9l1-8z");
+    boltSvg.appendChild(boltPath);
+    boltWrap.appendChild(boltSvg);
+    const labelSpan = document.createElement("span");
+    labelSpan.textContent = "MagicDown";
+    pillBtn.appendChild(boltWrap);
+    pillBtn.appendChild(labelSpan);
 
     countBadge = document.createElement("span");
     countBadge.className = "md-count";
@@ -1656,11 +1802,17 @@
       e.stopPropagation();
       dropdownOpen = !dropdownOpen;
       pillBtn.setAttribute("aria-expanded", String(dropdownOpen));
-      if (dropdownOpen && isYouTubePage && !currentYouTubeEntry()) {
-        try {
-          window.postMessage({ __mdSniff: YT_PROBE_MSG }, "*");
-        } catch {
-          // ignore
+      if (dropdownOpen && isYouTubePage) {
+        const ytEntry = currentYouTubeEntry();
+        if (!ytEntry) {
+          try {
+            window.postMessage({ __mdSniff: YT_PROBE_MSG }, "*");
+          } catch {
+            // ignore
+          }
+        }
+        if (!ytEntry || ytEntry.variants.length === 0) {
+          requestYouTubeDesktopResolve("", true);
         }
       }
       if (dropdownOpen && isBilibiliPage && !currentBilibiliEntry()) {
@@ -1695,9 +1847,12 @@
 
     const ddHeader = document.createElement("div");
     ddHeader.className = "md-dd-header";
-    ddHeader.innerHTML = `<span class="md-dd-title"></span><span class="md-dd-sub"></span>`;
-    ddTitleEl = ddHeader.querySelector(".md-dd-title");
-    ddSubEl = ddHeader.querySelector(".md-dd-sub");
+    ddTitleEl = document.createElement("span");
+    ddTitleEl.className = "md-dd-title";
+    ddSubEl = document.createElement("span");
+    ddSubEl.className = "md-dd-sub";
+    ddHeader.appendChild(ddTitleEl);
+    ddHeader.appendChild(ddSubEl);
     if (ddTitleEl) ddTitleEl.textContent = t("overlay.header_title");
     if (ddSubEl) ddSubEl.textContent = t("overlay.header_sub");
 
@@ -1810,7 +1965,12 @@
       else if (dashCount > 0) ddSubEl.textContent = dashCount === 1 ? t("overlay.sub_dash_one") : t("overlay.sub_dash", { n: dashCount });
       else if (videos.some((v) => v.isHLS)) ddSubEl.textContent = t("overlay.sub_hls");
       else if (videos.length > 0) ddSubEl.textContent = t("overlay.header_sub");
-      else ddSubEl.textContent = sniffDrm || (activeVideo && activeVideo.mediaKeys) ? t("overlay.sub_drm") : t("overlay.sub_unresolved");
+      else {
+        const ytId = isYouTubePage && YT ? YT.extractYouTubeVideoId(location.href) : "";
+        const ytRes = ytId ? ytResolveState.get(ytId) : null;
+        if (ytRes && ytRes.status === "loading") ddSubEl.textContent = t("overlay.sub_resolving");
+        else ddSubEl.textContent = sniffDrm || (activeVideo && activeVideo.mediaKeys) ? t("overlay.sub_drm") : t("overlay.sub_unresolved");
+      }
     }
 
     listEl.textContent = "";
@@ -1890,6 +2050,7 @@
           if (v.targetFormat) payload.targetFormat = v.targetFormat;
           if (v.outputFormat) payload.outputFormat = v.outputFormat;
           if (v.audioBitrate) payload.audioBitrate = v.audioBitrate;
+          if (v.ytdlpFormat) payload.ytdlpFormat = v.ytdlpFormat;
           if (v.size > 0) payload.size = v.size;
           let resp = null;
           try {
@@ -1942,7 +2103,7 @@
 
         const dlPill = document.createElement("span");
         dlPill.className = "md-dl-pill";
-        dlPill.textContent = "Download";
+        dlPill.textContent = t("overlay.download");
 
         btn.appendChild(left);
         btn.appendChild(dlPill);
@@ -1968,6 +2129,7 @@
               outputFormat: "mp3",
               audioBitrate: m.audioBitrate
             };
+            if (m.ytdlpFormat) payload.ytdlpFormat = m.ytdlpFormat;
             let resp = null;
             try {
               resp = await chrome.runtime.sendMessage(payload);
@@ -1975,13 +2137,13 @@
               resp = null;
             }
             if (resp && resp.success) {
-              dlPill.textContent = "Sent!";
+              dlPill.textContent = t("overlay.sent");
               dlPill.classList.add("sent");
             } else {
-              dlPill.textContent = "Offline";
+              dlPill.textContent = t("overlay.offline");
             }
           } else {
-            dlPill.textContent = "Sent!";
+            dlPill.textContent = t("overlay.sent");
             dlPill.classList.add("sent");
           }
         });
@@ -2089,13 +2251,31 @@
     return x * y;
   }
 
-  // Feed videos can be partially scrolled, hidden by a collapsed container, or
+  function getVideoAnchorElement(video) {
+    if (!video || !isYouTubePage || typeof video.closest !== "function") return video;
+    const container = video.closest("#movie_player, #shorts-player, .html5-video-player");
+    return container || video;
+  }
+
+  function getVideoAnchorRect(video) {
+    if (!video || !video.isConnected) return null;
+    const videoRect = video.getBoundingClientRect();
+    if (!isYouTubePage) return videoRect;
+    const anchorEl = getVideoAnchorElement(video);
+    const containerRect = anchorEl && anchorEl !== video ? anchorEl.getBoundingClientRect() : null;
+    if (YT && typeof YT.resolveYouTubeAnchorRect === "function") {
+      return YT.resolveYouTubeAnchorRect(videoRect, containerRect, window.innerWidth, window.innerHeight) || videoRect;
+    }
+    return containerRect || videoRect;
+  }
+
+  // Feed pages can be partially scrolled, hidden by a collapsed container, or
   // removed without a mutation we notice; every positioning decision checks
   // this instead of trusting that a connected <video> is still on screen.
   function isVideoRenderable(video) {
     if (!video || !video.isConnected || dismissedVideos.has(video)) return false;
-    const rect = video.getBoundingClientRect();
-    if (rect.width < 160 || rect.height < 90) return false;
+    const rect = getVideoAnchorRect(video);
+    if (!rect || rect.width < 160 || rect.height < 90) return false;
     if (visibleArea(rect) <= 0) return false;
     try {
       const style = window.getComputedStyle(video);
@@ -2130,7 +2310,7 @@
       }
     }
 
-    const rect = activeVideo.getBoundingClientRect();
+    const rect = getVideoAnchorRect(activeVideo) || activeVideo.getBoundingClientRect();
     const viewportH = window.innerHeight;
 
     // Keep the control on players whose stream has no direct URL (blob/MSE):
@@ -2167,7 +2347,8 @@
     let bestArea = Infinity;
     for (const video of collectVideoElements(document)) {
       if (!isVideoRenderable(video)) continue;
-      const rect = video.getBoundingClientRect();
+      const rect = getVideoAnchorRect(video);
+      if (!rect) continue;
       if (clientX < rect.left || clientX > rect.right || clientY < rect.top || clientY > rect.bottom) continue;
       const area = rect.width * rect.height;
       if (area <= bestArea) {
@@ -2185,7 +2366,8 @@
     const visible = [];
     for (const video of collectVideoElements(document)) {
       if (!isVideoRenderable(video)) continue;
-      visible.push({ video, rect: video.getBoundingClientRect() });
+      const rect = getVideoAnchorRect(video);
+      if (rect) visible.push({ video, rect });
     }
     if (visible.length === 0) return null;
     if (hoveredVideo) {

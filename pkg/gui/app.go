@@ -189,6 +189,7 @@ type App struct {
 	inputTargetFormat  string
 	inputOutputFormat  string
 	inputAudioBitrate  string
+	inputYTDLPFormat   string
 	inputPlan          *engine.DownloadPlan
 	lastAutoTarget     string
 	addError           string
@@ -685,6 +686,7 @@ func (a *App) openIncomingDownloadDialog(req ipc.AddDownloadRequest) {
 			TargetFormat:  req.TargetFormat,
 			OutputFormat:  req.OutputFormat,
 			AudioBitrate:  req.AudioBitrate,
+			YTDLPFormat:   req.YTDLPFormat,
 			Plan:          parsedPlan,
 			AutoStart:     autoStart,
 			StartPaused:   !autoStart,
@@ -703,6 +705,7 @@ func (a *App) openIncomingDownloadDialog(req ipc.AddDownloadRequest) {
 	a.inputTargetFormat = req.TargetFormat
 	a.inputOutputFormat = req.OutputFormat
 	a.inputAudioBitrate = req.AudioBitrate
+	a.inputYTDLPFormat = req.YTDLPFormat
 	a.inputEstimatedSize = estimatedSize
 	a.inputPlan = parsedPlan
 	a.inputFilename = filename
@@ -996,6 +999,10 @@ func (a *App) openAddModal() {
 	a.inputCookies = ""
 	a.inputHeaders = nil
 	a.inputConvertFormat = ""
+	a.inputTargetFormat = ""
+	a.inputOutputFormat = ""
+	a.inputAudioBitrate = ""
+	a.inputYTDLPFormat = ""
 	a.inputPlan = nil
 	a.lastAutoTarget = ""
 	a.addError = ""
@@ -1828,6 +1835,7 @@ func (a *App) submitAddDownload(autoStart bool) {
 		TargetFormat:  a.inputTargetFormat,
 		OutputFormat:  a.inputOutputFormat,
 		AudioBitrate:  a.inputAudioBitrate,
+		YTDLPFormat:   a.inputYTDLPFormat,
 		Plan:          a.inputPlan,
 		AutoStart:     autoStart,
 		StartPaused:   !autoStart,

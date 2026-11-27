@@ -34,6 +34,7 @@ type AddTaskRequest struct {
 	TargetFormat  string            `json:"target_format,omitempty"`
 	OutputFormat  string            `json:"output_format,omitempty"`
 	AudioBitrate  string            `json:"audio_bitrate,omitempty"`
+	YTDLPFormat   string            `json:"ytdlp_format,omitempty"`
 	Plan           *DownloadPlan     `json:"plan,omitempty"`
 	SpeedLimitKBps int64             `json:"speed_limit_kbps,omitempty"`
 	AutoStart      bool              `json:"auto_start"`
@@ -398,6 +399,11 @@ func (e *Engine) prepareTask(req AddTaskRequest) (*Task, string, error) {
 		numSegs = cfg.DefaultSegments
 	}
 
+	ytdlpFmt, err := ValidateYTDLPFormat(req.YTDLPFormat)
+	if err != nil {
+		return nil, "", err
+	}
+
 	filename := ""
 	if req.Filename != "" {
 		filename = SanitizeFilename(req.Filename)
@@ -412,6 +418,12 @@ func (e *Engine) prepareTask(req AddTaskRequest) (*Task, string, error) {
 	} else if req.AudioURL != "" {
 		name := ExtractFilename(req.URL, nil)
 		filename = SanitizeFilename(ReplaceExtension(name, "mp4"))
+	} else if ytdlpFmt != "" {
+		if _, videoID, ytErr := ValidateYouTubeURL(req.URL); ytErr == nil && videoID != "" {
+			filename = SanitizeFilename("youtube_" + videoID + ".mp4")
+		} else {
+			filename = SanitizeFilename(ReplaceExtension(ExtractFilename(req.URL, nil), "mp4"))
+		}
 	}
 	convertFmt, _ := NormalizeImageFormat(req.ConvertFormat)
 	if filename != "" && convertFmt != "" {
@@ -446,7 +458,7 @@ func (e *Engine) prepareTask(req AddTaskRequest) (*Task, string, error) {
 	if category == "" {
 		if outputFmt == "mp3" {
 			category = CategoryMusic
-		} else if req.AudioURL != "" {
+		} else if req.AudioURL != "" || ytdlpFmt != "" {
 			category = CategoryVideo
 		} else {
 			category = CategoryForFilename(filename, req.URL)
@@ -492,8 +504,9 @@ func (e *Engine) prepareTask(req AddTaskRequest) (*Task, string, error) {
 		TargetFormat:   targetFmt,
 		OutputFormat:   outputFmt,
 		AudioBitrate:   audioBitrate,
+		YTDLPFormat:    ytdlpFmt,
 		Plan:           plan,
-		IsHLS:          plan == nil && req.AudioURL == "" && IsHLSURL(req.URL, ""),
+		IsHLS:          plan == nil && req.AudioURL == "" && ytdlpFmt == "" && IsHLSURL(req.URL, ""),
 		CreatedAt:      time.Now(),
 		limiter:        e.limiter,
 		taskLimiter:    newRateLimiter(speedLimit * 1024),
@@ -721,7 +734,7 @@ func (e *Engine) processQueue() {
 		// Probe if needed. A browser-supplied plan or muxed video+audio job
 		// already describes what to fetch, so probing the base URL is noise.
 		snap := t.Clone()
-		if snap.Plan == nil && snap.AudioURL == "" && (snap.TotalBytes <= 0 || snap.SavePath == "") {
+		if snap.Plan == nil && snap.AudioURL == "" && snap.YTDLPFormat == "" && (snap.TotalBytes <= 0 || snap.SavePath == "") {
 			probeDir := downloadDir
 			if snap.SavePath != "" {
 				probeDir = filepath.Dir(snap.SavePath)

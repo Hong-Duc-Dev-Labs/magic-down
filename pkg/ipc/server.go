@@ -37,6 +37,7 @@ type AddDownloadRequest struct {
 	TargetFormat  string            `json:"target_format,omitempty"`
 	OutputFormat  string            `json:"output_format,omitempty"`
 	AudioBitrate  string            `json:"audio_bitrate,omitempty"`
+	YTDLPFormat   string            `json:"ytdlp_format,omitempty"`
 	Plan          json.RawMessage   `json:"plan,omitempty"`
 	AutoStart     bool              `json:"auto_start"`
 	StartPaused   bool              `json:"start_paused,omitempty"`
@@ -230,12 +231,13 @@ func (s *Server) Start() error {
 	mux.HandleFunc("/downloads/pause", s.handlePause)
 	mux.HandleFunc("/downloads/resume", s.handleResume)
 	mux.HandleFunc("/downloads/delete", s.handleDelete)
+	mux.HandleFunc("/youtube/resolve", s.handleResolveYouTube)
 	mux.HandleFunc("/config", s.handleConfig)
 
 	s.httpServer = &http.Server{
 		Handler:      s.securityMiddleware(mux),
 		ReadTimeout:  10 * time.Second,
-		WriteTimeout: 10 * time.Second,
+		WriteTimeout: 35 * time.Second,
 	}
 
 	go func() {
@@ -432,6 +434,10 @@ func (s *Server) handleAddDownload(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	if _, err := engine.ValidateYTDLPFormat(req.YTDLPFormat); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 
 	var plan *engine.DownloadPlan
 	if len(req.Plan) > 0 {
@@ -477,6 +483,7 @@ func (s *Server) handleAddDownload(w http.ResponseWriter, r *http.Request) {
 		TargetFormat:  req.TargetFormat,
 		OutputFormat:  req.OutputFormat,
 		AudioBitrate:  req.AudioBitrate,
+		YTDLPFormat:   req.YTDLPFormat,
 		Plan:          plan,
 		AutoStart:     req.AutoStart,
 		StartPaused:   req.StartPaused,
@@ -492,6 +499,46 @@ func (s *Server) handleAddDownload(w http.ResponseWriter, r *http.Request) {
 		"success": true,
 		"task":    task,
 		"message": "download added successfully",
+	})
+}
+
+// ResolveYouTubeRequest is the JSON payload for /youtube/resolve.
+type ResolveYouTubeRequest struct {
+	URL string `json:"url"`
+}
+
+// ResolveYouTubeResponse is returned by /youtube/resolve.
+type ResolveYouTubeResponse struct {
+	Success      bool                         `json:"success"`
+	YouTube      *engine.YouTubeResolveResult `json:"youtube,omitempty"`
+	YTDLPMissing bool                         `json:"ytdlp_missing,omitempty"`
+	Error        string                       `json:"error,omitempty"`
+}
+
+func (s *Server) handleResolveYouTube(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req ResolveYouTubeRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, fmt.Sprintf("invalid json: %v", err), http.StatusBadRequest)
+		return
+	}
+	res, err := engine.ResolveYouTube(r.Context(), req.URL)
+	w.Header().Set("Content-Type", "application/json")
+	if err != nil {
+		resp := ResolveYouTubeResponse{
+			Success:      false,
+			YTDLPMissing: engine.IsYTDLPMissingError(err),
+			Error:        err.Error(),
+		}
+		_ = json.NewEncoder(w).Encode(resp)
+		return
+	}
+	_ = json.NewEncoder(w).Encode(ResolveYouTubeResponse{
+		Success: true,
+		YouTube: res,
 	})
 }
 

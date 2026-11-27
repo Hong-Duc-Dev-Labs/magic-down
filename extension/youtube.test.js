@@ -232,3 +232,89 @@ test("parseYouTubePlayerPayload prefers H.264/avc1 MP4 over av01, pairs WebM fal
   );
   assert.equal(parsed.mp3Variants[0].url, "https://rr1.googlevideo.com/videoplayback?itag=251");
 });
+
+test("parseYouTubePlayerPayload detects SABR-only streamingData with zero plaintext URLs", () => {
+  const parsed = yt.parseYouTubePlayerPayload({
+    videoId: "jNQXAC9IVRw",
+    title: "Me at the zoo",
+    hasServerAbr: true,
+    formats: [],
+    adaptiveFormats: [
+      { itag: 248, url: "", hasCipher: false, mimeType: 'video/webm; codecs="vp9"', height: 1080 }
+    ]
+  });
+  assert.ok(parsed);
+  assert.equal(parsed.sabrDetected, true);
+  assert.equal(parsed.variants.length, 0);
+  assert.equal(parsed.cipherOnlyCount, 0);
+});
+
+test("canonicalYouTubeUrl normalizes watch and shorts URLs cleanly", () => {
+  assert.equal(
+    yt.canonicalYouTubeUrl("https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=42s"),
+    "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+  );
+  assert.equal(
+    yt.canonicalYouTubeUrl("https://www.youtube.com/shorts/abcDEF12345?feature=share"),
+    "https://www.youtube.com/shorts/abcDEF12345"
+  );
+  assert.equal(yt.canonicalYouTubeUrl("https://www.youtube.com/", "jNQXAC9IVRw"), "https://www.youtube.com/watch?v=jNQXAC9IVRw");
+});
+
+test("resolveYouTubeAnchorRect falls back to #movie_player when YouTube shifts <video> to negative top", () => {
+  const shiftedVideoRect = { top: -524, bottom: 68, left: 24, right: 813, width: 789, height: 592 };
+  const playerRect = { top: 68, bottom: 549, left: 16, right: 872, width: 856, height: 481 };
+  const chosen = yt.resolveYouTubeAnchorRect(shiftedVideoRect, playerRect, 1280, 800);
+  assert.deepEqual(chosen, playerRect);
+
+  // When <video> is aligned inside the player, keep videoRect
+  const normalVideoRect = { top: 68, bottom: 549, left: 16, right: 872, width: 856, height: 481 };
+  const chosenNormal = yt.resolveYouTubeAnchorRect(normalVideoRect, playerRect, 1280, 800);
+  assert.deepEqual(chosenNormal, normalVideoRect);
+});
+
+test("normalizeResolvedYouTubeEntry builds MP4 and MP3 variants with ytdlpFormat", () => {
+  const entry = yt.normalizeResolvedYouTubeEntry(
+    {
+      videoId: "aqz-KE-bpKQ",
+      title: "Big Buck Bunny",
+      thumbnail: "https://i.ytimg.com/vi/aqz-KE-bpKQ/maxresdefault.jpg",
+      variants: [
+        {
+          url: "https://www.youtube.com/watch?v=aqz-KE-bpKQ",
+          quality: "1080p60",
+          height: 1080,
+          fps: 60,
+          size: 152000000,
+          format: "MP4",
+          ext: "mp4",
+          ytdlpFormat: "bestvideo[height<=1080]+bestaudio/best"
+        }
+      ],
+      mp3Variants: [
+        {
+          url: "https://www.youtube.com/watch?v=aqz-KE-bpKQ",
+          quality: "MP3 · 320 kbps",
+          audioBitrate: "320k",
+          ytdlpFormat: "bestaudio/best"
+        }
+      ]
+    },
+    "aqz-KE-bpKQ",
+    "Fallback"
+  );
+  assert.ok(entry);
+  assert.equal(entry.resolvedViaYtdlp, true);
+  assert.equal(entry.variants.length, 1);
+  assert.equal(entry.variants[0].ytdlpFormat, "bestvideo[height<=1080]+bestaudio/best");
+  assert.equal(entry.mp3Variants.length, 1);
+  assert.equal(entry.mp3Variants[0].outputFormat, "mp3");
+});
+
+test("content.js avoids innerHTML (Trusted Types safe) and resets dismissedVideos on SPA navigation", () => {
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const src = fs.readFileSync(path.join(__dirname, "content.js"), "utf8");
+  assert.equal(/\.innerHTML\s*=/.test(src), false, "content.js must not assign .innerHTML (Trusted Types CSP)");
+  assert.match(src, /function handleNavigationChange\(\)[\s\S]{0,400}dismissedVideos\s*=\s*new WeakSet\(\)/);
+});

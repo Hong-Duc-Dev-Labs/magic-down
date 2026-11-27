@@ -319,7 +319,7 @@ function sanitizeHeaders(rawHeaders) {
   return out;
 }
 
-function buildDownloadPayload({ url, audioUrl = "", filename = "", referrer = "", cookies = "", headers = null, convertFormat = "", targetFormat = "", outputFormat = "", audioBitrate = "", plan = null, size = 0 }) {
+function buildDownloadPayload({ url, audioUrl = "", filename = "", referrer = "", cookies = "", headers = null, convertFormat = "", targetFormat = "", outputFormat = "", audioBitrate = "", ytdlpFormat = "", plan = null, size = 0 }) {
   const safeHeaders = sanitizeHeaders(headers);
   const safeFilename = sanitizeDownloadFilename(filename);
   const payload = {
@@ -349,6 +349,9 @@ function buildDownloadPayload({ url, audioUrl = "", filename = "", referrer = ""
   if (typeof audioBitrate === "string" && audioBitrate.trim()) {
     payload.audio_bitrate = audioBitrate.trim().toLowerCase();
   }
+  if (typeof ytdlpFormat === "string" && ytdlpFormat.trim()) {
+    payload.ytdlp_format = ytdlpFormat.trim();
+  }
   const safePlan = sanitizeDownloadPlan(plan);
   if (safePlan) {
     payload.plan = safePlan;
@@ -356,9 +359,9 @@ function buildDownloadPayload({ url, audioUrl = "", filename = "", referrer = ""
   return payload;
 }
 
-async function forwardDownload({ url, audioUrl = "", filename = "", referrer = "", headers = null, convertFormat = "", targetFormat = "", outputFormat = "", audioBitrate = "", plan = null, size = 0 }) {
+async function forwardDownload({ url, audioUrl = "", filename = "", referrer = "", headers = null, convertFormat = "", targetFormat = "", outputFormat = "", audioBitrate = "", ytdlpFormat = "", plan = null, size = 0 }) {
   const cookies = await getCookiesHeader(url);
-  const payload = buildDownloadPayload({ url, audioUrl, filename, referrer, cookies, headers, convertFormat, targetFormat, outputFormat, audioBitrate, plan, size });
+  const payload = buildDownloadPayload({ url, audioUrl, filename, referrer, cookies, headers, convertFormat, targetFormat, outputFormat, audioBitrate, ytdlpFormat, plan, size });
 
   const resp = await sendNativeMessage(payload);
 
@@ -1698,10 +1701,39 @@ if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.onMessage)
         targetFormat: message.targetFormat || "",
         outputFormat: message.outputFormat || "",
         audioBitrate: message.audioBitrate || "",
+        ytdlpFormat: message.ytdlpFormat || "",
         plan: message.plan || null,
         size: typeof message.size === "number" ? message.size : 0
       }).then(sendResponse);
       return true;
+    }
+    if (message.type === "resolveYouTube") {
+      const targetUrl = typeof message.url === "string" ? message.url.trim() : "";
+      if (!targetUrl) {
+        sendResponse({ success: false, error: "missing YouTube URL" });
+        return false;
+      }
+      sendNativeMessage({ action: "resolve_youtube", url: targetUrl }).then(sendResponse);
+      return true;
+    }
+    if (message.type === "setTabYouTubeVideos") {
+      const tabId = typeof message.tabId === "number" ? message.tabId : (sender.tab ? sender.tab.id : -1);
+      if (tabId >= 0 && Array.isArray(message.videos)) {
+        const map = new Map();
+        const now = Date.now();
+        for (const v of message.videos.slice(0, MAX_TAB_VIDEOS)) {
+          if (!v || typeof v.url !== "string" || !v.url) continue;
+          const key = `${v.url}|${v.quality || ""}|${v.ytdlpFormat || ""}|${v.outputFormat || ""}`;
+          map.set(key, {
+            ...v,
+            detectedAt: now
+          });
+        }
+        tabVideos.set(tabId, map);
+        updateTabBadge(tabId);
+      }
+      sendResponse({ ok: true });
+      return false;
     }
     if (message.type === "clearTabVideos") {
       const tabId = typeof message.tabId === "number" ? message.tabId : (sender.tab ? sender.tab.id : -1);
